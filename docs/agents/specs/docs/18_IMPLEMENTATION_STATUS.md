@@ -16,6 +16,10 @@ Updated as work lands.
 - `reference-data` fixture format + loader; `fixtures/`.
 - `safetensors-io`: a shared, dependency-light safetensors reader
   (`F32`/`F64`/`F16`/`BF16`) used by both engines' checkpoint loaders.
+- `tenferro-ext`: a self-hosted tenferro extension op (`erf`, the same
+  mechanism `tenferro-linalg`/`tenferro-fft` use) plus the exact erf-based GELU
+  on the eager session; the `f32` kernel ports the MLX `erff` sequence. Used by
+  Laya's forward.
 - `bench-suite` criterion skeleton with build/machine metadata capture.
 - CI: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`,
   `cargo test --workspace`, and the `decision-core` `serde` feature.
@@ -75,9 +79,9 @@ bundled webpki roots).
   `d→1` with GELU), top-1/top-2/entropy pooling, and the action head. Both a
   host `forward_encoder_reference` / `forward_reference` and a tenferro
   `forward_encoder_tenferro` / `forward_tenferro` are provided, with synthetic
-  parity tests. The forward uses the tanh GELU on both sides so they can be
-  compared; an `exact_gelu` / `erf` port of `mlx_erf` is included for the
-  eventual exact path.
+  parity tests. The forward uses the exact erf-based GELU: `erf` / `gelu_erf`
+  come from the self-hosted `tenferro-ext` extension op and the host reference
+  uses the `mlx_erf` port.
 - `checkpoint`: loads `encoder/config.json` + `rl_agent_config.json` +
   `model.safetensors` into `LayaWeights` (name sanitizing, config-driven bias
   handling, strict consumption) via the shared `safetensors-io` reader.
@@ -147,16 +151,14 @@ bundled webpki roots).
 
 | Area | Blocker |
 |---|---|
-| Laya numerical parity (Phase 2) | No Laya checkpoint/fixture in this environment; validate against `extern/Laya.jl` once tokenizer/weights assets exist. (Jeff now has real-fixture parity in `native_fixture.rs`.) |
-| Exact GELU (Laya parity) | tenferro has no `erf`; implement `erf`/`gelu_erf` as a self-hosted extension op (upstream issue #1973 closed as not planned). |
+| Laya numerical parity (Phase 2) | No Laya checkpoint/fixture assets in this environment; the tokenizer, checkpoint loader and forward are implemented and validated against synthetic weights and Julia tokenizer goldens, but end-to-end parity needs real weights. (Jeff has real-fixture parity in `native_fixture.rs`.) |
 | Phase 4 / 7 CUDA | No CUDA hardware here; code can be written but not validated. |
 | Phase 8 FP16/BF16 | Deferred by decision: tenferro's public dtype set lacks `F16`/`BF16` at the pinned revision. |
 | Phase 10 Apple GPU | tenferro's WebGPU surface is effectively `dot_general` (F32/C32) plus transpose; most primitives are missing. |
-| Tokenizer (Laya) | Requires the checkpoint's tokenizer assets. |
 
 ## Verification snapshot
 
 - `cargo test --workspace`: decision-core 20, reference-data 4, tenferro-infer 13,
-  laya-infer 41, jeff-infer 31, tenferro-gated-delta 10, jev-client 49
-  (58 with `--features http`), bench-suite 1.
+  tenferro-ext 2, laya-infer 41, jeff-infer 31, tenferro-gated-delta 10,
+  jev-client 49 (58 with `--features http`), bench-suite 1.
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean.

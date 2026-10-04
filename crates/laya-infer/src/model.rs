@@ -25,14 +25,15 @@
 //! ## GELU
 //!
 //! The Laya reference uses the erf-based exact GELU (`mlx_erf`). tenferro has
-//! no `erf` op, so the parity path (both the host reference and the tenferro
-//! forward) uses the **tanh approximation** and is compared against itself.
-//! [`exact_gelu`] / [`erf`] mirror `mathfns.jl` for future checkpoint parity
-//! once a tenferro `erf` extension op lands (tracked as issue #1973).
+//! no native `erf`, so [`tenferro_ext`] adds it as a first-class extension op
+//! and the forward uses [`exact_gelu`] on the host and
+//! [`tenferro_ext::EagerSessionErfExt::gelu_erf`] on the eager session. [`erf`]
+//! mirrors `mathfns.jl`.
 
 use decision_core::{DecisionError, Result};
 use tenferro_ad::{DotGeneralConfig, EagerSession, EagerTensor, GatherConfig, SliceConfig, Tensor};
-use tenferro_infer::{activation, attention, norm, rope};
+use tenferro_ext::EagerSessionErfExt;
+use tenferro_infer::{attention, norm, rope};
 
 use crate::config::{AgentConfig, EncoderConfig, LayerKind};
 
@@ -623,7 +624,7 @@ fn gelu_gate_host(u: &[f32], intermediate: usize, columns: usize) -> Vec<f32> {
     for c in 0..columns {
         let base = 2 * intermediate * c;
         for i in 0..intermediate {
-            g[intermediate * c + i] = gelu_tanh(u[base + i]) * u[base + intermediate + i];
+            g[intermediate * c + i] = exact_gelu(u[base + i]) * u[base + intermediate + i];
         }
     }
     g
@@ -931,7 +932,7 @@ pub fn forward_reference(
     let markers = gather_markers_host(&h, marker_pos, k_count, length, batch, d);
     let s0 = layer_norm_host(&weights.scorer_norm, &markers, d, k_count, batch, eps);
     let s1 = linear_host(&weights.scorer1, d, d, &s0, k_count, batch);
-    let g1: Vec<f32> = s1.iter().map(|value| gelu_tanh(*value)).collect();
+    let g1: Vec<f32> = s1.iter().map(|value| exact_gelu(*value)).collect();
     let logits = linear_host(&weights.scorer2, d, 1, &g1, k_count, batch);
 
     let (masked_logits, features) = pool_host(&logits, marker_mask, k_count, batch);
@@ -948,7 +949,7 @@ pub fn forward_reference(
 
     let action_hidden = weights.act1.weight.len() / (d + 4);
     let a1 = linear_host(&weights.act1, d + 4, action_hidden, &pooled, 1, batch);
-    let g2: Vec<f32> = a1.iter().map(|value| gelu_tanh(*value)).collect();
+    let g2: Vec<f32> = a1.iter().map(|value| exact_gelu(*value)).collect();
     let action = linear_host(
         &weights.act2,
         action_hidden,
@@ -1185,7 +1186,8 @@ fn encoder_tensor(
         let u = linear_feature_first(session, &hn, &layer.wi, 2 * intermediate)?;
         let value = slice_axis(session, &u, 0, 0, intermediate)?;
         let gate = slice_axis(session, &u, 0, intermediate, intermediate)?;
-        let g = activation::geglu(session, &value, &gate)?;
+        let activated = session.gelu_erf(&value)?;
+        let g = session.mul(&activated, &gate)?;
         let down = linear_feature_first(session, &g, &layer.wo_mlp, d)?;
         x = session.add(&z, &down)?;
     }
@@ -1377,7 +1379,7 @@ pub fn forward_tenferro(
     let s0 =
         layer_norm_feature_first(session, &markers, &weights.scorer_norm, d, encoder.norm_eps)?;
     let s1 = linear_feature_first(session, &s0, &weights.scorer1, d)?;
-    let g1 = activation::gelu(session, &s1)?;
+    let g1 = session.gelu_erf(&s1)?;
     let s2 = linear_feature_first(session, &g1, &weights.scorer2, 1)?;
     let s2 = session.reshape(&s2, vec![k_count, batch])?;
     let raw_logits = extract_col(session, &s2)?;
@@ -1398,7 +1400,7 @@ pub fn forward_tenferro(
     let pooled = tensor_col(session, vec![d + 4, batch], &pooled)?;
     let action_hidden = weights.act1.weight.len() / (d + 4);
     let a1 = linear_feature_first(session, &pooled, &weights.act1, action_hidden)?;
-    let g2 = activation::gelu(session, &a1)?;
+    let g2 = session.gelu_erf(&a1)?;
     let action = linear_feature_first(session, &g2, &weights.act2, agent.action_count())?;
     let action = extract_col(session, &action)?;
     Ok((logits, action))

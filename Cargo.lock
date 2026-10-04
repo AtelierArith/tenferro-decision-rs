@@ -1089,6 +1089,7 @@ dependencies = [
  "serde_json",
  "tenferro-ad",
  "tenferro-cpu",
+ "tenferro-ext",
  "tenferro-infer",
  "tenferro-tensor",
  "unicode-normalization",
@@ -2034,6 +2035,16 @@ dependencies = [
  "tenferro-cpu-basic",
  "tenferro-tensor",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "tenferro-ext"
+version = "0.1.0"
+dependencies = [
+ "tenferro-ad",
+ "tenferro-cpu",
+ "tenferro-runtime",
+ "tenferro-tensor",
 ]
 
 [[package]]

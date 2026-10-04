@@ -1,0 +1,15 @@
+[package]
+name = "tenferro-ext"
+description = "Self-hosted tenferro extension ops for the decision engines (erf, exact GELU)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+tenferro-ad.workspace = true
+tenferro-runtime.workspace = true
+tenferro-tensor.workspace = true
+tenferro-cpu.workspace = true

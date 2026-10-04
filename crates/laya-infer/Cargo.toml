@@ -15,6 +15,7 @@ serde_json.workspace = true
 regex.workspace = true
 unicode-normalization.workspace = true
 tenferro-ad.workspace = true
+tenferro-ext.workspace = true
 tenferro-tensor.workspace = true
 tenferro-infer.workspace = true
 

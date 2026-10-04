@@ -14,6 +14,7 @@ authors = ["Satoshi Terasaki <terasakisatoshi.math@gmail.com> and contributors"]
 # Local crates.
 decision-core = { path = "crates/decision-core" }
 tenferro-infer = { path = "crates/tenferro-infer" }
+tenferro-ext = { path = "crates/tenferro-ext" }
 reference-data = { path = "crates/reference-data" }
 safetensors-io = { path = "crates/safetensors-io" }
 
