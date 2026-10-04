@@ -1,9 +1,14 @@
 //! The prepared-token Jeff [`DecisionEngine`].
 //!
 //! This is the first engine seam for `jeff-infer`: it accepts
-//! [`State::Prepared`] tokens only, runs the host reference forward
-//! ([`forward_reference_with`]) once per row through a workspace reused across
-//! rows, and turns the readout logits into typed answers with [`crate::readout`].
+//! [`State::Prepared`] tokens only, runs a forward once per row through a
+//! workspace reused across rows, and turns the readout logits into typed answers
+//! with [`crate::readout`].
+//!
+//! [`JeffBackend`] selects the forward: the all-host fused path
+//! ([`forward_reference_with`], the CPU-competitive default) or the
+//! tenferro-native path ([`forward_tenferro_cached`], backend-portable but
+//! slower on CPU today).
 //!
 //! Row `i` of the prepared state answers question `i`, so the batch and the
 //! [`QuestionSet`] must have the same length. Each question selects its own
@@ -17,16 +22,31 @@
 //! yet; the initial engine rejects them (`docs/agents/specs/docs/14_JEFF_INFER_DESIGN.md`
 //! §9).
 
-use std::cell::RefCell;
+use std::sync::Arc;
 
 use decision_core::{
     Answer, DecisionEngine, DecisionError, PreparedState, Question, QuestionSet, Result, State,
 };
+use tenferro_ad::EagerRuntime;
+use tenferro_cpu::CpuBackend;
 use tenferro_gated_delta::GatedDeltaWorkspace;
+use tenferro_infer::TensorCache;
 
 use crate::config::DecisionConfig;
-use crate::model::{JeffConfig, JeffWeights, forward_reference_with};
+use crate::model::{JeffConfig, JeffWeights, forward_reference_with, forward_tenferro_cached};
 use crate::readout::{choice_answer, noul_answer, score_answer};
+
+/// Which forward the engine runs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum JeffBackend {
+    /// The all-host fused forward — the CPU-competitive default (and the
+    /// correctness oracle).
+    #[default]
+    Host,
+    /// The tenferro-native forward — backend-portable, but slower on CPU today
+    /// (per-layer host/tensor round trips and the chunked DeltaNet).
+    Tenferro,
+}
 
 /// A prepared-token Jeff engine: dimensions, decision settings, and weights.
 #[derive(Clone, Debug)]
@@ -34,17 +54,31 @@ pub struct JeffEngine {
     config: JeffConfig,
     decision: DecisionConfig,
     weights: JeffWeights,
-    /// DeltaNet scratch reused across rows (`RefCell` keeps `logits` a `&self`
-    /// method).
-    workspace: RefCell<GatedDeltaWorkspace>,
+    backend: JeffBackend,
+    /// The tenferro runtime the tenferro forward runs on (CPU today).
+    runtime: Arc<EagerRuntime>,
+    /// DeltaNet scratch reused across rows.
+    workspace: GatedDeltaWorkspace,
+    /// Weight tensors cached across rows (tenferro backend).
+    cache: TensorCache,
 }
 
 impl JeffEngine {
-    /// Build an engine after validating the weights and decision settings.
+    /// Build an engine with the host forward (the CPU-competitive default).
+    pub fn new(config: JeffConfig, decision: DecisionConfig, weights: JeffWeights) -> Result<Self> {
+        Self::with_backend(config, decision, weights, JeffBackend::Host)
+    }
+
+    /// Build an engine selecting the forward.
     ///
     /// Also requires `decision.max_options` to fit inside the readout, since
     /// every question slices at most that many columns.
-    pub fn new(config: JeffConfig, decision: DecisionConfig, weights: JeffWeights) -> Result<Self> {
+    pub fn with_backend(
+        config: JeffConfig,
+        decision: DecisionConfig,
+        weights: JeffWeights,
+        backend: JeffBackend,
+    ) -> Result<Self> {
         weights.validate(&config)?;
         decision.validate()?;
         if decision.max_options > weights.options {
@@ -56,12 +90,21 @@ impl JeffEngine {
                 ),
             ));
         }
+        let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).map_err(backend_error)?;
         Ok(Self {
             config,
             decision,
             weights,
-            workspace: RefCell::new(GatedDeltaWorkspace::new()),
+            backend,
+            runtime,
+            workspace: GatedDeltaWorkspace::new(),
+            cache: TensorCache::new(),
         })
+    }
+
+    /// The selected forward.
+    pub fn backend(&self) -> JeffBackend {
+        self.backend
     }
 
     /// The model dimensions.
@@ -84,7 +127,7 @@ impl JeffEngine {
     /// Rows follow `state.input_ids` order; all readout columns are returned.
     /// This is the raw input to the per-question answer formulas in
     /// [`DecisionEngine::system_one`].
-    pub fn logits(&self, state: &PreparedState) -> Result<Vec<Vec<f32>>> {
+    pub fn logits(&mut self, state: &PreparedState) -> Result<Vec<Vec<f32>>> {
         state.validate()?;
         state
             .input_ids
@@ -100,15 +143,33 @@ impl JeffEngine {
     /// the reference's left-padding policy (`native_sequence_start`): RoPE
     /// positions restart at the first active token while interior mask holes
     /// are preserved.
-    fn row_logits(&self, ids: &[i64], mask: &[bool]) -> Result<Vec<f32>> {
+    fn row_logits(&mut self, ids: &[i64], mask: &[bool]) -> Result<Vec<f32>> {
         let start = mask.iter().position(|active| *active).unwrap_or(0);
         let ids = &ids[start..];
         let mask: Vec<f32> = mask[start..]
             .iter()
             .map(|active| if *active { 1.0 } else { 0.0 })
             .collect();
-        let mut workspace = self.workspace.borrow_mut();
-        forward_reference_with(&mut workspace, &self.config, &self.weights, ids, &mask)
+        match self.backend {
+            JeffBackend::Host => {
+                forward_reference_with(&mut self.workspace, &self.config, &self.weights, ids, &mask)
+            }
+            JeffBackend::Tenferro => self
+                .runtime
+                .with_eager_session(|session| {
+                    forward_tenferro_cached(
+                        &mut self.workspace,
+                        &mut self.cache,
+                        session,
+                        &self.config,
+                        &self.weights,
+                        ids,
+                        &mask,
+                    )
+                })
+                .map_err(forward_error)?
+                .map_err(forward_error),
+        }
     }
 
     /// How many readout columns a question consumes.
@@ -148,6 +209,22 @@ impl JeffEngine {
                 score_answer(&question.criteria, &active, temperature).map(Answer::Score)
             }
         }
+    }
+}
+
+/// Map a tenferro backend-construction error into a decision error.
+fn backend_error(error: tenferro_ad::Error) -> DecisionError {
+    DecisionError::Backend {
+        message: format!("failed to create the tenferro CPU runtime: {error}"),
+        source: Some(Box::new(error)),
+    }
+}
+
+/// Map a tenferro forward error into a decision error.
+fn forward_error(error: tenferro_ad::Error) -> DecisionError {
+    DecisionError::Backend {
+        message: format!("tenferro forward failed: {error}"),
+        source: Some(Box::new(error)),
     }
 }
 

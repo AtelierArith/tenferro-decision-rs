@@ -1002,50 +1002,11 @@ fn tensor_bool(
     session.constant_from(Tensor::from_vec_col_major(shape, data.to_vec())?)
 }
 
-/// Reusable cache of weight tensors keyed by host storage identity.
+/// Reusable weight-tensor cache for the eager session.
 ///
-/// An [`EagerTensor`] keeps an `Arc<EagerRuntime>`, so cached weights can be
-/// reused across forwards as long as the session shares the same runtime. This
-/// removes the per-call transpose and constant creation of every weight tensor
-/// (the dominant overhead of the tenferro path). Callers must keep the weight
-/// storage alive for as long as the cache is used (the engines own the
-/// checkpoint for their lifetime).
-#[derive(Clone, Debug, Default)]
-pub struct TensorCache {
-    weights: std::collections::HashMap<(usize, usize), EagerTensor>,
-}
-
-impl TensorCache {
-    /// An empty cache.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// The number of cached weight tensors.
-    pub fn len(&self) -> usize {
-        self.weights.len()
-    }
-
-    /// Whether the cache is empty.
-    pub fn is_empty(&self) -> bool {
-        self.weights.is_empty()
-    }
-
-    fn col(
-        &mut self,
-        session: &mut EagerSession<'_>,
-        shape: Vec<usize>,
-        data: &[f32],
-    ) -> tenferro_ad::Result<EagerTensor> {
-        let key = (data.as_ptr() as usize, data.len());
-        if let Some(tensor) = self.weights.get(&key) {
-            return Ok(tensor.clone());
-        }
-        let tensor = tensor_col(session, shape, data)?;
-        self.weights.insert(key, tensor.clone());
-        Ok(tensor)
-    }
-}
+/// Shared with `tenferro-infer`; re-exported here so `laya_infer::model` keeps
+/// exposing it.
+pub use tenferro_infer::TensorCache;
 
 fn extract_col(
     session: &mut EagerSession<'_>,
@@ -1090,9 +1051,9 @@ fn layer_norm_feature_first(
     let mut perm: Vec<usize> = (1..rank).collect();
     perm.push(0);
     let transposed = session.transpose(x, &perm)?;
-    let weight = cache.col(session, vec![width], &ln.weight)?;
+    let weight = cache.col_major(session, vec![width], &ln.weight)?;
     let bias = match &ln.bias {
-        Some(bias) => Some(cache.col(session, vec![width], bias)?),
+        Some(bias) => Some(cache.col_major(session, vec![width], bias)?),
         None => None,
     };
     let normalized = norm::layer_norm(session, &transposed, &weight, bias.as_ref(), eps)?;
@@ -1110,7 +1071,7 @@ fn linear_feature_first(
     out_dim: usize,
 ) -> tenferro_ad::Result<EagerTensor> {
     let in_dim = x.shape()[0];
-    let weight = cache.col(session, vec![in_dim, out_dim], &linear.weight)?;
+    let weight = cache.col_major(session, vec![in_dim, out_dim], &linear.weight)?;
     let contracted = session.dot_general(
         x,
         &weight,
@@ -1127,7 +1088,7 @@ fn linear_feature_first(
     let y = session.transpose(&contracted, &perm)?;
     match &linear.bias {
         Some(bias) => {
-            let bias = cache.col(session, vec![out_dim], bias)?;
+            let bias = cache.col_major(session, vec![out_dim], bias)?;
             let mut shape = vec![1usize; rank];
             shape[0] = out_dim;
             let bias = session.reshape(&bias, shape)?;
@@ -1203,7 +1164,7 @@ fn encoder_tensor(
     let vocab = weights.tok_embeddings.len() / d;
     let eps = cfg.norm_eps;
 
-    let table = cache.col(session, vec![d, vocab], &weights.tok_embeddings)?;
+    let table = cache.col_major(session, vec![d, vocab], &weights.tok_embeddings)?;
     let ids_t = tensor_col_i64(session, vec![length, batch], ids)?;
     let mut x = session.gather(
         &table,
@@ -1296,7 +1257,7 @@ fn gather_type_emb(
     d: usize,
     batch: usize,
 ) -> tenferro_ad::Result<EagerTensor> {
-    let table = cache.col(session, vec![d, 3], type_emb)?;
+    let table = cache.col_major(session, vec![d, 3], type_emb)?;
     let indices = tensor_col_i64(session, vec![batch], qtype)?;
     session.gather(
         &table,

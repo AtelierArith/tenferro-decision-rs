@@ -42,6 +42,29 @@ The best Julia configuration differs by model, so each table uses its fastest
   work with Julia tasks. `initialize_cpu!` sets BLAS=8 when `nthreads == 1`
   (the default), which is 4–7× *slower* for this hybrid model.
 
+## Best vs best
+
+Fastest configuration per side (Julia's best per model as above; Rust = the
+better of the host and cached-tenferro paths), 8 threads, production
+checkpoints.
+
+| model | shape | Julia best | Rust best | Rust / Julia |
+|---|---|---:|---:|---:|
+| Laya | L8 B1 | 94.0 ms (BLAS=8) | 160 ms (tenferro cached) | 1.70× |
+| Laya | L64 B1 | 339.1 ms | 638 ms (host+GEMM+rayon) | 1.88× |
+| Laya | L8 B8 | 309.3 ms | 511 ms (host+GEMM+rayon) | 1.65× |
+| Laya | model load | 1535 ms | 6591 ms | 4.29× |
+| Jeff | L8 | 128.5 ms (`-t 8`) | 159.5 ms (host+GEMM+rayon) | 1.24× |
+| Jeff | L16 | 119.8 ms | 210.4 ms | 1.76× |
+| Jeff | L64 | 198.9 ms | 608.3 ms | 3.06× |
+| Jeff | model load | 5442 ms | 4699 ms | **0.86×** |
+
+- Laya's Rust best is the cached tenferro path at L8B1; at L64/L8B8 the tenferro
+  cache was not measured, so the host path is listed.
+- Jeff's Rust best is always the host path; the cached tenferro path is ~10×
+  slower on CPU (see the Jeff section).
+- Rust loads Jeff faster than Julia and Laya slower.
+
 ## Laya
 
 Checkpoint: `convaiinnovations/laya@main` (commit
@@ -62,8 +85,10 @@ Checkpoint: `convaiinnovations/laya@main` (commit
 - Rust is now ~1.7–2.3× behind Julia's multithreaded BLAS.
 - Julia `-t 8` with `OPENBLAS_NUM_THREADS=1` is slower (287 / 635 / 637 ms), so
   the default BLAS=8 configuration is Julia's best for Laya.
-- `forward_tenferro` (faer-backed `dot_general`) is slower than the host+GEMM
-  path because it rebuilds every weight tensor per call.
+- `forward_tenferro` rebuilds every weight tensor per call (563 ms in the table
+  above); with a reused `TensorCache` it drops to **160 ms**, faster than the
+  host+GEMM path. `LayaEngine` runs this cached tenferro path by default
+  (`23_TENFERRO_NATIVE.md`).
 
 Closing this gap is tracked in
 [issue #2](https://github.com/AtelierArith/tenferro-decision-rs/issues/2).

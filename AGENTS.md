@@ -12,9 +12,13 @@ GEMM/SIMD are a fallback, not the default.
 
 Concretely:
 
-- The production forward (`forward_tenferro`) stays tenferro-native: embeddings,
+- The tenferro forward (`forward_tenferro`) stays tenferro-native: embeddings,
   norms, attention, Gated DeltaNet, MLP, and the readout go through
-  `EagerSession` / `tenferro-infer` ops.
+  `EagerSession` / `tenferro-infer` ops, so new backends follow from tenferro.
+  Engines select the forward per model (`LayaEngine` uses tenferro;
+  `JeffEngine` defaults to the host path and offers a tenferro backend) because
+  the tenferro path still round-trips through the host and is slower on CPU
+  today — see `docs/agents/specs/docs/23_TENFERRO_NATIVE.md`.
 - Prefer adding or extending tenferro ops over writing host loops. Use the
   self-hosted extension-op pattern (`tenferro-ext`, `tenferro-gated-delta`) and
   never modify tenferro-rs itself; record gaps in

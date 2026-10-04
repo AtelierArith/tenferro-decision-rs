@@ -26,7 +26,7 @@ use tenferro_gated_delta::{
     GatedDeltaConfig, GatedDeltaPlan, GatedDeltaWeights, GatedDeltaWorkspace,
     delta_layer_recurrent, gated_delta,
 };
-use tenferro_infer::{activation, embedding, linear, norm, rope};
+use tenferro_infer::{TensorCache, activation, embedding, linear, norm, rope};
 
 /// Shared model dimensions.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -463,6 +463,7 @@ fn linear_col(
 
 fn full_attention_tenferro(
     session: &mut EagerSession<'_>,
+    cache: &mut TensorCache,
     w: &FullAttentionWeights,
     cfg: &JeffConfig,
     x: &EagerTensor,
@@ -473,13 +474,13 @@ fn full_attention_tenferro(
     let heads = cfg.heads;
     let width = hd * heads;
 
-    let q_w = host_to_tensor(session, cfg.hidden, width, &w.q)?;
-    let gate_w = host_to_tensor(session, cfg.hidden, width, &w.gate)?;
-    let k_w = host_to_tensor(session, cfg.hidden, width, &w.k)?;
-    let v_w = host_to_tensor(session, cfg.hidden, width, &w.v)?;
-    let o_w = host_to_tensor(session, width, cfg.hidden, &w.o)?;
-    let q_norm = host_to_tensor(session, hd, 1, &w.q_norm)?;
-    let k_norm = host_to_tensor(session, hd, 1, &w.k_norm)?;
+    let q_w = cache.col(session, vec![cfg.hidden, width], &w.q)?;
+    let gate_w = cache.col(session, vec![cfg.hidden, width], &w.gate)?;
+    let k_w = cache.col(session, vec![cfg.hidden, width], &w.k)?;
+    let v_w = cache.col(session, vec![cfg.hidden, width], &w.v)?;
+    let o_w = cache.col(session, vec![width, cfg.hidden], &w.o)?;
+    let q_norm = cache.col(session, vec![hd, 1], &w.q_norm)?;
+    let k_norm = cache.col(session, vec![hd, 1], &w.k_norm)?;
     let q_norm = session.reshape(&q_norm, vec![hd])?;
     let k_norm = session.reshape(&k_norm, vec![hd])?;
 
@@ -565,6 +566,21 @@ pub fn forward_tenferro_with(
     ids: &[i64],
     mask: &[f32],
 ) -> tenferro_ad::Result<Vec<f32>> {
+    let mut cache = TensorCache::new();
+    forward_tenferro_cached(workspace, &mut cache, session, cfg, weights, ids, mask)
+}
+
+/// [`forward_tenferro_with`] with a reusable DeltaNet workspace **and** weight
+/// cache, so the weights are not re-transposed and re-created on every call.
+pub fn forward_tenferro_cached(
+    workspace: &mut GatedDeltaWorkspace,
+    cache: &mut TensorCache,
+    session: &mut EagerSession<'_>,
+    cfg: &JeffConfig,
+    weights: &JeffWeights,
+    ids: &[i64],
+    mask: &[f32],
+) -> tenferro_ad::Result<Vec<f32>> {
     weights.validate(cfg).map_err(config_error)?;
     let length = ids.len();
     if mask.len() != length {
@@ -574,13 +590,10 @@ pub fn forward_tenferro_with(
         )));
     }
 
-    // Embedding: gather rows of (vocab, hidden) by token ids.
-    let table = host_to_tensor(
-        session,
-        weights.vocab,
-        cfg.hidden,
-        &transpose(&weights.embedding, cfg.hidden, weights.vocab),
-    )?;
+    // Embedding: gather rows of (vocab, hidden) by token ids. The row-major
+    // `(hidden, vocab)` table is already the column-major `(vocab, hidden)`
+    // tensor, so no transpose is needed.
+    let table = cache.col_major(session, vec![weights.vocab, cfg.hidden], &weights.embedding)?;
     let ids_t = session.constant_from(tenferro_ad::Tensor::from_vec_col_major(
         vec![length],
         ids.to_vec(),
@@ -589,7 +602,7 @@ pub fn forward_tenferro_with(
     hidden = session.transpose(&hidden, &[1, 0])?; // [hidden, length]
 
     for layer in &weights.layers {
-        let input_norm = host_to_tensor(session, cfg.hidden, 1, &layer.input_norm)?;
+        let input_norm = cache.col(session, vec![cfg.hidden, 1], &layer.input_norm)?;
         let input_norm = session.reshape(&input_norm, vec![cfg.hidden])?;
         // rms_norm normalizes the last axis, so work on (length, hidden).
         let hidden_t = session.transpose(&hidden, &[1, 0])?;
@@ -598,7 +611,7 @@ pub fn forward_tenferro_with(
 
         let mixed = match &layer.attention {
             AttentionWeights::Full(w) => {
-                full_attention_tenferro(session, w, cfg, &normalized, mask, length)?
+                full_attention_tenferro(session, cache, w, cfg, &normalized, mask, length)?
             }
             AttentionWeights::Delta { weights, config } => {
                 let normalized_host = extract(session, &normalized, cfg.hidden, length)?;
@@ -617,14 +630,14 @@ pub fn forward_tenferro_with(
         let mixed_t = host_to_tensor(session, cfg.hidden, length, &mixed)?;
         let residual = session.add(&hidden, &mixed_t)?;
 
-        let post_norm = host_to_tensor(session, cfg.hidden, 1, &layer.post_norm)?;
+        let post_norm = cache.col(session, vec![cfg.hidden, 1], &layer.post_norm)?;
         let post_norm = session.reshape(&post_norm, vec![cfg.hidden])?;
         let residual_t = session.transpose(&residual, &[1, 0])?;
         let normalized2_t = norm::rms_norm(session, &residual_t, &post_norm, true, cfg.eps as f64)?;
 
-        let gate_w = host_to_tensor(session, cfg.hidden, cfg.intermediate, &layer.mlp.gate)?;
-        let up_w = host_to_tensor(session, cfg.hidden, cfg.intermediate, &layer.mlp.up)?;
-        let down_w = host_to_tensor(session, cfg.intermediate, cfg.hidden, &layer.mlp.down)?;
+        let gate_w = cache.col(session, vec![cfg.hidden, cfg.intermediate], &layer.mlp.gate)?;
+        let up_w = cache.col(session, vec![cfg.hidden, cfg.intermediate], &layer.mlp.up)?;
+        let down_w = cache.col(session, vec![cfg.intermediate, cfg.hidden], &layer.mlp.down)?;
         let gate = linear::linear(session, &normalized2_t, &gate_w)?;
         let up = linear::linear(session, &normalized2_t, &up_w)?;
         let gated = activation::gated_silu(session, &gate, &up)?;
@@ -643,23 +656,13 @@ pub fn forward_tenferro_with(
             strides: vec![1, 1],
         },
     )?; // (1, hidden)
-    let final_norm = host_to_tensor(session, cfg.hidden, 1, &weights.final_norm)?;
+    let final_norm = cache.col(session, vec![cfg.hidden, 1], &weights.final_norm)?;
     let final_norm = session.reshape(&final_norm, vec![cfg.hidden])?;
     let last_normed = norm::rms_norm(session, &last, &final_norm, true, cfg.eps as f64)?; // (1, hidden)
 
-    let readout = host_to_tensor(session, cfg.hidden, weights.options, &weights.readout)?;
+    let readout = cache.col(session, vec![cfg.hidden, weights.options], &weights.readout)?;
     let logits = linear::linear(session, &last_normed, &readout)?; // (1, options)
     extract(session, &logits, 1, weights.options)
-}
-
-fn transpose(data: &[f32], rows: usize, cols: usize) -> Vec<f32> {
-    let mut out = vec![0.0f32; rows * cols];
-    for r in 0..rows {
-        for c in 0..cols {
-            out[c * rows + r] = data[r * cols + c];
-        }
-    }
-    out
 }
 
 fn config_error(error: DecisionError) -> tenferro_ad::Error {
@@ -779,7 +782,8 @@ mod tests {
             let ten = runtime
                 .with_eager_session(|session| {
                     let x_t = host_to_tensor(session, cfg.hidden, length, &x)?;
-                    full_attention_tenferro(session, &w, &cfg, &x_t, &mask, length)
+                    let mut cache = TensorCache::new();
+                    full_attention_tenferro(session, &mut cache, &w, &cfg, &x_t, &mask, length)
                 })
                 .unwrap()
                 .unwrap();

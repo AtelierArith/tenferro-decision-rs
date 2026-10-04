@@ -14,12 +14,12 @@
 //!
 //! ## Known gap
 //!
-//! tenferro has no `erf` op, so [`activation::gelu`] uses the tanh
-//! approximation. The exact erf-based GELU used by the Laya reference needs an
-//! extension op (Phase 2 work).
+//! tenferro has no `erf` op; the exact erf-based GELU used by Laya comes from
+//! the self-hosted `tenferro-ext` extension op (`EagerSessionErfExt`).
 
 pub mod activation;
 pub mod attention;
+pub mod cache;
 pub mod embedding;
 pub mod linear;
 pub mod norm;
@@ -27,5 +27,7 @@ pub mod rope;
 pub mod softmax;
 pub(crate) mod util;
 
+/// Reusable weight-tensor cache for the eager session.
+pub use cache::TensorCache;
 /// Re-exported tenferro error and result types used by every primitive.
 pub use tenferro_ad::{Error, Result};

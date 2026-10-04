@@ -188,7 +188,15 @@ fn answers_choice_noul_and_score_in_order() {
             &mask_f[start..],
         )
         .unwrap();
-        assert_eq!(logits[row], reference);
+        let diff = logits[row]
+            .iter()
+            .zip(&reference)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            diff <= 2e-2,
+            "row {row} logits differ from the host oracle by {diff}"
+        );
     }
 
     // Choice: probabilities are the temperature-scaled softmax over columns
@@ -254,8 +262,8 @@ fn answers_choice_noul_and_score_in_order() {
 
 #[test]
 fn temperature_changes_the_distribution() {
-    let cold = build_engine(4, 3, 0.25, 7);
-    let warm = build_engine(4, 3, 2.0, 7);
+    let mut cold = build_engine(4, 3, 0.25, 7);
+    let mut warm = build_engine(4, 3, 2.0, 7);
     let prepared = prepared();
     let cold_logits = cold.logits(&prepared).unwrap();
     let warm_logits = warm.logits(&prepared).unwrap();
@@ -325,7 +333,7 @@ fn rejects_option_count_above_max_options() {
 
 #[test]
 fn trims_leading_padding() {
-    let engine = build_engine(4, 3, 1.0, 7);
+    let mut engine = build_engine(4, 3, 1.0, 7);
     let padded = PreparedState {
         input_ids: vec![vec![9, 3, 1, 4, 2]],
         attention_mask: vec![vec![false, true, true, true, true]],

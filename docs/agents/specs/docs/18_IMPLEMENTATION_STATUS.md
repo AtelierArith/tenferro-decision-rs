@@ -126,9 +126,12 @@ bundled webpki roots).
   ids match and `forward_reference` matches the Julia `DecisionModel` to
   `1.7e-6` (logits; action within `~1.7e-7` relative). `tests/real_checkpoint.rs`
   skips when the snapshot or reference is absent.
+- Tenferro-native execution: `forward_tenferro_cached` threads a shared
+  `TensorCache` (from `tenferro-infer`) so weights are not rebuilt per call;
+  `LayaEngine` runs this cached tenferro path (160 ms vs 216 ms host at L8B1).
+  `tests/model.rs` checks cache-reuse parity.
 - Remaining: production `system_one`/`predict` answer parity (prompt rendering +
-  calibration end to end); Jeff's production checkpoint
-  (`mstrasser/Jeff-Qwen3.5-0.8B`, ~1.7 GB) has not been fetched/validated yet.
+  calibration end to end). See `23_TENFERRO_NATIVE.md`.
 
 ### Phase 5 — `jeff-infer`
 
@@ -162,6 +165,10 @@ bundled webpki roots).
   `NativeBackend` logits to `1.8e-5` (scale ~10). `tests/real_checkpoint.rs` is
   `#[ignore]`d (it runs the full 0.8B forward):
   `cargo test --release -p jeff-infer --test real_checkpoint -- --ignored`.
+- Backend choice: `JeffEngine` defaults to `JeffBackend::Host` (the fused
+  CPU-competitive forward) and offers `JeffBackend::Tenferro`
+  (`forward_tenferro_cached` + cached weights) for backend portability; the
+  tenferro path is ~10× slower on CPU today (`23_TENFERRO_NATIVE.md`).
 - Remaining: natural-language tokenizer.
 
 ### Phase 6 — `tenferro-gated-delta`
