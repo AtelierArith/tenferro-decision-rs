@@ -7,8 +7,8 @@
 use laya_infer::config::{AgentConfig, EncoderConfig, LayerKind};
 use laya_infer::model::{
     erf, exact_gelu, forward_encoder_reference, forward_encoder_tenferro, forward_reference,
-    forward_tenferro, EncoderLayerWeights, HeadLayerWeights, LayaWeights, LayerNormWeights,
-    LinearWeights, ModernBertWeights,
+    forward_tenferro, forward_tenferro_cached, EncoderLayerWeights, HeadLayerWeights, LayaWeights,
+    LayerNormWeights, LinearWeights, ModernBertWeights, TensorCache,
 };
 use tenferro_ad::EagerRuntime;
 use tenferro_cpu::CpuBackend;
@@ -252,6 +252,59 @@ fn decision_model_parity() {
     let action_diff = max_abs_diff(&ref_action, &ten_action);
     assert!(logits_diff <= 2e-2, "logits max diff {logits_diff}");
     assert!(action_diff <= 2e-2, "action max diff {action_diff}");
+}
+
+#[test]
+fn decision_model_cached_reuse_parity() {
+    let cfg = encoder_config();
+    let agent = agent_config();
+    let mut rng = Lcg(29);
+    let weights = laya_weights(&cfg, &agent, &mut rng);
+    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+
+    let length = 4;
+    let batch = 2;
+    let (ids, mask) = encoder_batch(length, batch);
+    let marker_pos = vec![0i64, 3, 1, 2, 3, 0];
+    let marker_mask = vec![true, true, false, true, false, true];
+    let qtype = vec![0i64, 2];
+
+    let (ref_logits, ref_action) = forward_reference(
+        &cfg,
+        &agent,
+        &weights,
+        &ids,
+        &mask,
+        &marker_pos,
+        &marker_mask,
+        &qtype,
+    )
+    .unwrap();
+
+    // Reuse one cache across calls: the second call must match the first.
+    let mut cache = TensorCache::new();
+    for _ in 0..2 {
+        let (logits, action) = runtime
+            .with_eager_session(|session| {
+                forward_tenferro_cached(
+                    session,
+                    &mut cache,
+                    &cfg,
+                    &agent,
+                    &weights,
+                    &ids,
+                    &mask,
+                    &marker_pos,
+                    &marker_mask,
+                    &qtype,
+                )
+            })
+            .unwrap()
+            .unwrap();
+        assert!(max_abs_diff(&ref_logits, &logits) <= 2e-2);
+        assert!(max_abs_diff(&ref_action, &action) <= 2e-2);
+    }
+    assert!(!cache.is_empty());
 }
 
 #[test]

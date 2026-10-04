@@ -9,7 +9,9 @@
 use std::time::Instant;
 
 use laya_infer::checkpoint::load_checkpoint;
-use laya_infer::model::{forward_reference, forward_tenferro};
+use laya_infer::model::{
+    forward_reference, forward_tenferro, forward_tenferro_cached, TensorCache,
+};
 use serde_json::json;
 use tenferro_ad::EagerRuntime;
 use tenferro_cpu::CpuBackend;
@@ -101,50 +103,87 @@ fn main() {
         shapes.push(value);
     }
 
-    // The tenferro path rebuilds every weight tensor per call; time it once on
-    // the smallest shape so the benchmark stays bounded.
+    // The tenferro path: rebuilding every weight tensor per call (fresh cache)
+    // vs a reused weight cache. Timed on the smallest shape.
     let (ids, mask, marker_pos, marker_mask, qtype) = make_batch(8, 1);
     let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
-    let _ = runtime
-        .with_eager_session(|session| {
-            forward_tenferro(
-                session,
-                &checkpoint.encoder,
-                &checkpoint.agent,
-                &checkpoint.weights,
-                &ids,
-                &mask,
-                &marker_pos,
-                &marker_mask,
-                &qtype,
-            )
-        })
-        .unwrap()
-        .unwrap();
-    let mut tenferro_samples = Vec::new();
-    for _ in 0..2 {
-        let timer = Instant::now();
+
+    let time = |cached: bool| -> serde_json::Value {
+        let mut cache = TensorCache::new();
         let _ = runtime
             .with_eager_session(|session| {
-                forward_tenferro(
-                    session,
-                    &checkpoint.encoder,
-                    &checkpoint.agent,
-                    &checkpoint.weights,
-                    &ids,
-                    &mask,
-                    &marker_pos,
-                    &marker_mask,
-                    &qtype,
-                )
+                if cached {
+                    forward_tenferro_cached(
+                        session,
+                        &mut cache,
+                        &checkpoint.encoder,
+                        &checkpoint.agent,
+                        &checkpoint.weights,
+                        &ids,
+                        &mask,
+                        &marker_pos,
+                        &marker_mask,
+                        &qtype,
+                    )
+                } else {
+                    forward_tenferro(
+                        session,
+                        &checkpoint.encoder,
+                        &checkpoint.agent,
+                        &checkpoint.weights,
+                        &ids,
+                        &mask,
+                        &marker_pos,
+                        &marker_mask,
+                        &qtype,
+                    )
+                }
             })
             .unwrap()
             .unwrap();
-        tenferro_samples.push(timer.elapsed().as_secs_f64() * 1000.0);
-    }
-    let mut tenferro = stats(tenferro_samples);
-    tenferro["length"] = json!(8);
-    tenferro["batch"] = json!(1);
+        let mut samples = Vec::new();
+        for _ in 0..2 {
+            let timer = Instant::now();
+            let _ = runtime
+                .with_eager_session(|session| {
+                    if cached {
+                        forward_tenferro_cached(
+                            session,
+                            &mut cache,
+                            &checkpoint.encoder,
+                            &checkpoint.agent,
+                            &checkpoint.weights,
+                            &ids,
+                            &mask,
+                            &marker_pos,
+                            &marker_mask,
+                            &qtype,
+                        )
+                    } else {
+                        forward_tenferro(
+                            session,
+                            &checkpoint.encoder,
+                            &checkpoint.agent,
+                            &checkpoint.weights,
+                            &ids,
+                            &mask,
+                            &marker_pos,
+                            &marker_mask,
+                            &qtype,
+                        )
+                    }
+                })
+                .unwrap()
+                .unwrap();
+            samples.push(timer.elapsed().as_secs_f64() * 1000.0);
+        }
+        let mut value = stats(samples);
+        value["cached"] = json!(cached);
+        value["cache_entries"] = json!(cache.len());
+        value
+    };
+    let tenferro = time(false);
+    let tenferro_cached = time(true);
 
     let out = json!({
         "runtime": "rust-cpu",
@@ -153,6 +192,7 @@ fn main() {
         "warmup": warmup,
         "shapes": shapes,
         "tenferro_forward_8x1": tenferro,
+        "tenferro_cached_forward_8x1": tenferro_cached,
     });
     println!("{}", serde_json::to_string(&out).unwrap());
 }

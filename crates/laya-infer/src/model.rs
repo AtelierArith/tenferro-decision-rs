@@ -1002,6 +1002,51 @@ fn tensor_bool(
     session.constant_from(Tensor::from_vec_col_major(shape, data.to_vec())?)
 }
 
+/// Reusable cache of weight tensors keyed by host storage identity.
+///
+/// An [`EagerTensor`] keeps an `Arc<EagerRuntime>`, so cached weights can be
+/// reused across forwards as long as the session shares the same runtime. This
+/// removes the per-call transpose and constant creation of every weight tensor
+/// (the dominant overhead of the tenferro path). Callers must keep the weight
+/// storage alive for as long as the cache is used (the engines own the
+/// checkpoint for their lifetime).
+#[derive(Clone, Debug, Default)]
+pub struct TensorCache {
+    weights: std::collections::HashMap<(usize, usize), EagerTensor>,
+}
+
+impl TensorCache {
+    /// An empty cache.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The number of cached weight tensors.
+    pub fn len(&self) -> usize {
+        self.weights.len()
+    }
+
+    /// Whether the cache is empty.
+    pub fn is_empty(&self) -> bool {
+        self.weights.is_empty()
+    }
+
+    fn col(
+        &mut self,
+        session: &mut EagerSession<'_>,
+        shape: Vec<usize>,
+        data: &[f32],
+    ) -> tenferro_ad::Result<EagerTensor> {
+        let key = (data.as_ptr() as usize, data.len());
+        if let Some(tensor) = self.weights.get(&key) {
+            return Ok(tensor.clone());
+        }
+        let tensor = tensor_col(session, shape, data)?;
+        self.weights.insert(key, tensor.clone());
+        Ok(tensor)
+    }
+}
+
 fn extract_col(
     session: &mut EagerSession<'_>,
     tensor: &EagerTensor,
@@ -1035,6 +1080,7 @@ fn slice_axis(
 /// LayerNorm over axis 0 of an activation `(d, ...)`, returning the same shape.
 fn layer_norm_feature_first(
     session: &mut EagerSession<'_>,
+    cache: &mut TensorCache,
     x: &EagerTensor,
     ln: &LayerNormWeights,
     width: usize,
@@ -1044,9 +1090,9 @@ fn layer_norm_feature_first(
     let mut perm: Vec<usize> = (1..rank).collect();
     perm.push(0);
     let transposed = session.transpose(x, &perm)?;
-    let weight = tensor_col(session, vec![width], &ln.weight)?;
+    let weight = cache.col(session, vec![width], &ln.weight)?;
     let bias = match &ln.bias {
-        Some(bias) => Some(tensor_col(session, vec![width], bias)?),
+        Some(bias) => Some(cache.col(session, vec![width], bias)?),
         None => None,
     };
     let normalized = norm::layer_norm(session, &transposed, &weight, bias.as_ref(), eps)?;
@@ -1058,12 +1104,13 @@ fn layer_norm_feature_first(
 /// Linear over axis 0 of an activation `(in, ...)`, returning `(out, ...)`.
 fn linear_feature_first(
     session: &mut EagerSession<'_>,
+    cache: &mut TensorCache,
     x: &EagerTensor,
     linear: &LinearWeights,
     out_dim: usize,
 ) -> tenferro_ad::Result<EagerTensor> {
     let in_dim = x.shape()[0];
-    let weight = tensor_col(session, vec![in_dim, out_dim], &linear.weight)?;
+    let weight = cache.col(session, vec![in_dim, out_dim], &linear.weight)?;
     let contracted = session.dot_general(
         x,
         &weight,
@@ -1080,7 +1127,7 @@ fn linear_feature_first(
     let y = session.transpose(&contracted, &perm)?;
     match &linear.bias {
         Some(bias) => {
-            let bias = tensor_col(session, vec![out_dim], bias)?;
+            let bias = cache.col(session, vec![out_dim], bias)?;
             let mut shape = vec![1usize; rank];
             shape[0] = out_dim;
             let bias = session.reshape(&bias, shape)?;
@@ -1103,6 +1150,7 @@ fn relu_tensor(
 #[allow(clippy::too_many_arguments)]
 fn attention_block_tenferro(
     session: &mut EagerSession<'_>,
+    cache: &mut TensorCache,
     hidden: usize,
     num_heads: usize,
     rope_base: Option<f64>,
@@ -1114,7 +1162,7 @@ fn attention_block_tenferro(
     batch: usize,
 ) -> tenferro_ad::Result<EagerTensor> {
     let hd = hidden / num_heads;
-    let qkv = linear_feature_first(session, x, in_proj, 3 * hidden)?; // (3d, L, B)
+    let qkv = linear_feature_first(session, cache, x, in_proj, 3 * hidden)?; // (3d, L, B)
     let qkv = session.reshape(&qkv, vec![hidden, 3, length, batch])?;
     let q = slice_axis(session, &qkv, 1, 0, 1)?;
     let k = slice_axis(session, &qkv, 1, 1, 1)?;
@@ -1137,11 +1185,12 @@ fn attention_block_tenferro(
     let attended = attention::attention(session, &q, &k, &v, Some(&mask), None)?; // (B,H,L,hd)
     let attended = session.transpose(&attended, &[3, 1, 2, 0])?; // (hd,H,L,B)
     let attended = session.reshape(&attended, vec![hidden, length, batch])?;
-    linear_feature_first(session, &attended, out_proj, hidden)
+    linear_feature_first(session, cache, &attended, out_proj, hidden)
 }
 
 fn encoder_tensor(
     session: &mut EagerSession<'_>,
+    cache: &mut TensorCache,
     cfg: &EncoderConfig,
     weights: &ModernBertWeights,
     ids: &[i64],
@@ -1154,7 +1203,7 @@ fn encoder_tensor(
     let vocab = weights.tok_embeddings.len() / d;
     let eps = cfg.norm_eps;
 
-    let table = tensor_col(session, vec![d, vocab], &weights.tok_embeddings)?;
+    let table = cache.col(session, vec![d, vocab], &weights.tok_embeddings)?;
     let ids_t = tensor_col_i64(session, vec![length, batch], ids)?;
     let mut x = session.gather(
         &table,
@@ -1167,16 +1216,17 @@ fn encoder_tensor(
             slice_sizes: vec![d, 1],
         },
     )?; // (d, L, B)
-    x = layer_norm_feature_first(session, &x, &weights.embed_norm, d, eps)?;
+    x = layer_norm_feature_first(session, cache, &x, &weights.embed_norm, d, eps)?;
 
     for layer in &weights.layers {
         let attn_input = match &layer.attn_norm {
-            Some(ln) => layer_norm_feature_first(session, &x, ln, d, eps)?,
+            Some(ln) => layer_norm_feature_first(session, cache, &x, ln, d, eps)?,
             None => x.clone(),
         };
         let keep = build_mask(cfg, layer.kind, mask, length, batch);
         let attended = attention_block_tenferro(
             session,
+            cache,
             d,
             layer.num_heads,
             Some(layer.rope_base),
@@ -1189,22 +1239,23 @@ fn encoder_tensor(
         )?;
         let z = session.add(&x, &attended)?;
 
-        let hn = layer_norm_feature_first(session, &z, &layer.mlp_norm, d, eps)?;
-        let u = linear_feature_first(session, &hn, &layer.wi, 2 * intermediate)?;
+        let hn = layer_norm_feature_first(session, cache, &z, &layer.mlp_norm, d, eps)?;
+        let u = linear_feature_first(session, cache, &hn, &layer.wi, 2 * intermediate)?;
         let value = slice_axis(session, &u, 0, 0, intermediate)?;
         let gate = slice_axis(session, &u, 0, intermediate, intermediate)?;
         let activated = session.gelu_erf(&value)?;
         let g = session.mul(&activated, &gate)?;
-        let down = linear_feature_first(session, &g, &layer.wo_mlp, d)?;
+        let down = linear_feature_first(session, cache, &g, &layer.wo_mlp, d)?;
         x = session.add(&z, &down)?;
     }
 
-    layer_norm_feature_first(session, &x, &weights.final_norm, d, eps)
+    layer_norm_feature_first(session, cache, &x, &weights.final_norm, d, eps)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn head_layer_tenferro(
     session: &mut EagerSession<'_>,
+    cache: &mut TensorCache,
     cfg: &EncoderConfig,
     layer: &HeadLayerWeights,
     x: &EagerTensor,
@@ -1214,9 +1265,10 @@ fn head_layer_tenferro(
 ) -> tenferro_ad::Result<EagerTensor> {
     let d = cfg.hidden_size;
     let eps = cfg.norm_eps;
-    let n = layer_norm_feature_first(session, x, &layer.norm1, d, eps)?;
+    let n = layer_norm_feature_first(session, cache, x, &layer.norm1, d, eps)?;
     let attended = attention_block_tenferro(
         session,
+        cache,
         d,
         layer.num_heads,
         None,
@@ -1228,22 +1280,23 @@ fn head_layer_tenferro(
         batch,
     )?;
     let z = session.add(x, &attended)?;
-    let hn = layer_norm_feature_first(session, &z, &layer.norm2, d, eps)?;
+    let hn = layer_norm_feature_first(session, cache, &z, &layer.norm2, d, eps)?;
     let ff = layer.linear1.weight.len() / d;
-    let u = linear_feature_first(session, &hn, &layer.linear1, ff)?;
+    let u = linear_feature_first(session, cache, &hn, &layer.linear1, ff)?;
     let r = relu_tensor(session, &u)?;
-    let y = linear_feature_first(session, &r, &layer.linear2, d)?;
+    let y = linear_feature_first(session, cache, &r, &layer.linear2, d)?;
     session.add(&z, &y)
 }
 
 fn gather_type_emb(
     session: &mut EagerSession<'_>,
+    cache: &mut TensorCache,
     type_emb: &[f32],
     qtype: &[i64],
     d: usize,
     batch: usize,
 ) -> tenferro_ad::Result<EagerTensor> {
-    let table = tensor_col(session, vec![d, 3], type_emb)?;
+    let table = cache.col(session, vec![d, 3], type_emb)?;
     let indices = tensor_col_i64(session, vec![batch], qtype)?;
     session.gather(
         &table,
@@ -1292,8 +1345,32 @@ fn gather_markers(
 // ------------------------------------------------------------------- tenferro
 
 /// Tenferro-backed encoder forward. Returns a column-major `(d, L, B)` vector.
+///
+/// Creates a fresh weight cache; use [`forward_encoder_tenferro_cached`] to
+/// reuse prepared weight tensors across calls.
 pub fn forward_encoder_tenferro(
     session: &mut EagerSession<'_>,
+    cfg: &EncoderConfig,
+    weights: &ModernBertWeights,
+    ids: &[i64],
+    mask: &[bool],
+    batch: usize,
+) -> tenferro_ad::Result<Vec<f32>> {
+    forward_encoder_tenferro_cached(
+        session,
+        &mut TensorCache::new(),
+        cfg,
+        weights,
+        ids,
+        mask,
+        batch,
+    )
+}
+
+/// [`forward_encoder_tenferro`] with a reusable weight cache.
+pub fn forward_encoder_tenferro_cached(
+    session: &mut EagerSession<'_>,
+    cache: &mut TensorCache,
     cfg: &EncoderConfig,
     weights: &ModernBertWeights,
     ids: &[i64],
@@ -1313,7 +1390,7 @@ pub fn forward_encoder_tenferro(
         )));
     }
     weights.validate(cfg).map_err(to_ad_error)?;
-    let h = encoder_tensor(session, cfg, weights, ids, mask, batch)?;
+    let h = encoder_tensor(session, cache, cfg, weights, ids, mask, batch)?;
     extract_col(session, &h)
 }
 
@@ -1327,6 +1404,34 @@ pub fn forward_encoder_tenferro(
 #[allow(clippy::too_many_arguments)]
 pub fn forward_tenferro(
     session: &mut EagerSession<'_>,
+    encoder: &EncoderConfig,
+    agent: &AgentConfig,
+    weights: &LayaWeights,
+    ids: &[i64],
+    mask: &[bool],
+    marker_pos: &[i64],
+    marker_mask: &[bool],
+    qtype: &[i64],
+) -> tenferro_ad::Result<(Vec<f32>, Vec<f32>)> {
+    forward_tenferro_cached(
+        session,
+        &mut TensorCache::new(),
+        encoder,
+        agent,
+        weights,
+        ids,
+        mask,
+        marker_pos,
+        marker_mask,
+        qtype,
+    )
+}
+
+/// [`forward_tenferro`] with a reusable weight cache.
+#[allow(clippy::too_many_arguments)]
+pub fn forward_tenferro_cached(
+    session: &mut EagerSession<'_>,
+    cache: &mut TensorCache,
     encoder: &EncoderConfig,
     agent: &AgentConfig,
     weights: &LayaWeights,
@@ -1372,22 +1477,31 @@ pub fn forward_tenferro(
         )));
     }
 
-    let encoder_output = encoder_tensor(session, encoder, &weights.encoder, ids, mask, batch)?;
-    let te = gather_type_emb(session, &weights.type_emb, qtype, d, batch)?;
+    let encoder_output =
+        encoder_tensor(session, cache, encoder, &weights.encoder, ids, mask, batch)?;
+    let te = gather_type_emb(session, cache, &weights.type_emb, qtype, d, batch)?;
     let te = session.broadcast_in_dim(&te, &[d, length, batch], &[0, 2])?;
     let mut h = session.add(&encoder_output, &te)?;
 
     let head_keep = build_mask(encoder, LayerKind::FullAttention, mask, length, batch);
     for layer in &weights.head {
-        h = head_layer_tenferro(session, encoder, layer, &h, &head_keep, length, batch)?;
+        h = head_layer_tenferro(
+            session, cache, encoder, layer, &h, &head_keep, length, batch,
+        )?;
     }
 
     let markers = gather_markers(session, &h, marker_pos, k_count, length, batch, d)?;
-    let s0 =
-        layer_norm_feature_first(session, &markers, &weights.scorer_norm, d, encoder.norm_eps)?;
-    let s1 = linear_feature_first(session, &s0, &weights.scorer1, d)?;
+    let s0 = layer_norm_feature_first(
+        session,
+        cache,
+        &markers,
+        &weights.scorer_norm,
+        d,
+        encoder.norm_eps,
+    )?;
+    let s1 = linear_feature_first(session, cache, &s0, &weights.scorer1, d)?;
     let g1 = session.gelu_erf(&s1)?;
-    let s2 = linear_feature_first(session, &g1, &weights.scorer2, 1)?;
+    let s2 = linear_feature_first(session, cache, &g1, &weights.scorer2, 1)?;
     let s2 = session.reshape(&s2, vec![k_count, batch])?;
     let raw_logits = extract_col(session, &s2)?;
     let (logits, features) = pool_host(&raw_logits, marker_mask, k_count, batch);
@@ -1406,9 +1520,9 @@ pub fn forward_tenferro(
     }
     let pooled = tensor_col(session, vec![d + 4, batch], &pooled)?;
     let action_hidden = weights.act1.weight.len() / (d + 4);
-    let a1 = linear_feature_first(session, &pooled, &weights.act1, action_hidden)?;
+    let a1 = linear_feature_first(session, cache, &pooled, &weights.act1, action_hidden)?;
     let g2 = session.gelu_erf(&a1)?;
-    let action = linear_feature_first(session, &g2, &weights.act2, agent.action_count())?;
+    let action = linear_feature_first(session, cache, &g2, &weights.act2, agent.action_count())?;
     let action = extract_col(session, &action)?;
     Ok((logits, action))
 }
