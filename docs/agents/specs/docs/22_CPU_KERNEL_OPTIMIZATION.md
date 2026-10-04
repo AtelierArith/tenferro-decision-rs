@@ -184,6 +184,35 @@ behind the eager session, so the forward stays tenferro-first:
   our tall-skinny decode shapes faer (tenferro's default) is already faster
   (see the MWE above), so this op only proves the mechanism.
 
+### GEMM provider is shape-dependent, not the gap
+
+`bench-suite/examples/host_gemm_providers.rs` compares `cpu-kernels`
+(Accelerate) against direct faer on the projection shapes (best-of-50, 8
+threads):
+
+| in | out | len | host (Accelerate) | faer | faer/host |
+|---:|---:|---:|---:|---:|---:|
+| 1024 | 4096 | 8 | 0.975 ms | 0.748 ms | 0.77× |
+| 2048 | 1024 | 8 | 0.462 ms | 0.355 ms | 0.77× |
+| 4096 | 1024 | 8 | 1.001 ms | 0.723 ms | 0.72× |
+| 1024 | 4096 | 64 | 1.760 ms | 2.447 ms | **1.39×** |
+| 4096 | 1024 | 512 | 8.139 ms | 16.806 ms | **2.06×** |
+
+faer wins only for the very skinny decode shapes (`len = 8`) and **loses** at
+`len = 64/512`, so switching `cpu-kernels` wholesale to faer would trade a ~3%
+decode win for a large prefill regression. There is no single provider that
+wins everywhere, and the difference is small at decode — so the provider is not
+the tenferro-vs-host gap. Do not change it.
+
+### What is *not* the L8 gap (summary)
+
+The L8 gap is not the eager wrapper (~1.1×), not the GEMM provider
+(shape-dependent, ~equal), not our forward transposes (neutral, above), and not
+the DeltaNet kernel (fixed). It is the aggregate of the many small eager ops,
+faer's per-call `spindle` scope/barrier fan-out for `m = length = 8` GEMMs, and
+the memory traffic of the intermediates — all tenferro-internal. Capturing more
+requires changes inside tenferro-rs (out of scope) or a different formulation.
+
 Whole-model effect (`bench_tenferro_kernels`, production Jeff checkpoint,
 `RAYON_NUM_THREADS=8`, release, best-of-10):
 
