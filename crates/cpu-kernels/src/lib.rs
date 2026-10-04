@@ -19,55 +19,19 @@ fn parallel_row_block(rows: usize) -> usize {
     rows.div_ceil(threads * 4).max(8)
 }
 
-/// Above this many multiply-adds, route the GEMM through Accelerate on macOS.
+/// Above this many multiply-adds, route the Laya `x·Wᵀ` GEMM through Accelerate
+/// on macOS. That kernel blocks over `rows` (= batch×sequence), which is tiny at
+/// decode, so the rayon row-block path cannot parallelize; Accelerate's internal
+/// threading wins there. The Jeff `Wᵀ·x` kernel blocks over `out_dim` (large) and
+/// is faster on the rayon path, so it does not use BLAS.
 #[cfg(target_os = "macos")]
 const BLAS_THRESHOLD: usize = 1 << 18;
-
-/// `y = Wᵀ x` (`beta = 1` accumulates) through Accelerate's `cblas_sgemm`.
-///
-/// Row-major `(out, in)` `W`, row-major `(in, length)` `x`, row-major
-/// `(out, length)` `y` are reinterpreted as column-major operands.
-///
-/// # Safety
-/// `W`, `x`, and `y` must have the lengths implied by the shape arguments and
-/// must not overlap.
-#[cfg(target_os = "macos")]
-fn blas_matmul_wtx(
-    weight: &[f32],
-    in_dim: usize,
-    out_dim: usize,
-    x: &[f32],
-    length: usize,
-    y: &mut [f32],
-    beta: f32,
-) {
-    use cblas_sys::{CBLAS_LAYOUT, CBLAS_TRANSPOSE, cblas_sgemm};
-    // SAFETY: callers pass slices whose lengths match the shape arguments and
-    // that do not overlap.
-    unsafe {
-        cblas_sgemm(
-            CBLAS_LAYOUT::CblasColMajor,
-            CBLAS_TRANSPOSE::CblasNoTrans,
-            CBLAS_TRANSPOSE::CblasTrans,
-            length as i32,
-            out_dim as i32,
-            in_dim as i32,
-            1.0,
-            x.as_ptr(),
-            length as i32,
-            weight.as_ptr(),
-            out_dim as i32,
-            beta,
-            y.as_mut_ptr(),
-            length as i32,
-        );
-    }
-}
 
 /// `y = x Wᵀ` (`beta = 1` accumulates) through Accelerate's `cblas_sgemm`.
 ///
 /// # Safety
-/// Same contract as [`blas_matmul_wtx`].
+/// `x`, `weight`, and `y` must have the lengths implied by the shape arguments
+/// and must not overlap.
 #[cfg(target_os = "macos")]
 fn blas_input_mul_weight_transpose(
     x: &[f32],
@@ -123,11 +87,9 @@ pub fn matmul_row_major_add_into(
     // y ← weightᵀ x + y. `weightᵀ` is `(out, in)` with row stride 1 (the `out`
     // axis of the row-major `(in, out)` storage) and column stride `out_dim`.
     let work = in_dim.saturating_mul(out_dim).saturating_mul(length);
-    #[cfg(target_os = "macos")]
-    if work >= BLAS_THRESHOLD {
-        blas_matmul_wtx(weight, in_dim, out_dim, x, length, y, 1.0);
-        return;
-    }
+    // This kernel blocks over `out_dim`, which is large for every Jeff /
+    // DeltaNet / MLP projection, so the rayon row-block path below beats
+    // Accelerate's per-call dispatch overhead. Do not route it through BLAS.
     if work >= PARALLEL_THRESHOLD && out_dim > 1 {
         let block = parallel_row_block(out_dim);
         y.par_chunks_mut(block * length)

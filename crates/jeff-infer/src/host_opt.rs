@@ -441,6 +441,19 @@ pub fn forward_host_opt_with(
         &mut ws.state,
     );
 
+    // Optional per-phase profiling, enabled with `HOST_OPT_PROFILE=1`.
+    let profile = std::env::var_os("HOST_OPT_PROFILE").is_some();
+    let mut acc = [0.0f64; 5];
+    let mut mark = std::time::Instant::now();
+    macro_rules! phase {
+        ($i:expr) => {
+            if profile {
+                acc[$i] += mark.elapsed().as_secs_f64() * 1e3;
+                mark = std::time::Instant::now();
+            }
+        };
+    }
+
     for layer in &weights.layers {
         rms_centered_into(
             &ws.state,
@@ -451,6 +464,7 @@ pub fn forward_host_opt_with(
             &mut ws.means,
             &mut ws.normalized,
         );
+        phase!(0);
 
         match &layer.attention {
             AttentionWeights::Full(w) => full_attention_into(
@@ -475,8 +489,10 @@ pub fn forward_host_opt_with(
                 ws.mixed.copy_from_slice(mixed);
             }
         }
+        phase!(1);
 
         residual_add_into(&ws.state, &ws.mixed, &mut ws.residual);
+        phase!(2);
 
         rms_centered_into(
             &ws.residual,
@@ -487,6 +503,8 @@ pub fn forward_host_opt_with(
             &mut ws.means,
             &mut ws.normalized,
         );
+        phase!(3);
+
         mlp_into(
             &layer.mlp,
             cfg,
@@ -499,7 +517,17 @@ pub fn forward_host_opt_with(
         // The down projection accumulated into `residual`, so it now holds
         // `residual + mlp`: the next layer's hidden state. Swap it in.
         std::mem::swap(&mut ws.state, &mut ws.residual);
+        phase!(4);
     }
+    if profile {
+        for (name, value) in ["rms_in", "attn", "resid", "rms_post", "mlp"]
+            .iter()
+            .zip(acc)
+        {
+            eprintln!("  host_opt {name:<8} {value:8.3} ms");
+        }
+    }
+    let _ = mark;
 
     // Final centered RMSNorm on the last position, then the readout.
     {

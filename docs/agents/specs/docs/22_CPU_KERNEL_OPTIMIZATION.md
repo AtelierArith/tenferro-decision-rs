@@ -100,12 +100,11 @@ remaining ~1.4× is the distributed cost of the recurrent scan's per-token state
 passes and the elementwise/transcendental work (SiLU `exp`, RMS `sqrt`), all of
 which Julia pays too but hides better across its 8 task workers.
 
-`JeffEngine` now defaults to `JeffBackend::Auto`: `host_opt` for sequences of at
-least 16 tokens, the oracle below (the crossover measured on the production
-checkpoint, where the rayon fan-out does not pay off yet). `Host`, `HostOpt`,
-and `Tenferro` remain selectable.
+`JeffEngine` now defaults to `JeffBackend::Auto`, which uses `host_opt` (the
+fastest at every measured length). `Host` (the oracle) and `Tenferro` remain
+selectable.
 
-### Explicit SIMD via `pulp` (the largest recent win)
+### Explicit SIMD via `pulp`
 
 Autovectorization did not fire for the DeltaNet scan's inner axpy loops (they
 compiled to scalar `mulss`/`addss`), and `-C target-cpu=native` did not help
@@ -114,20 +113,37 @@ dispatched through **`pulp`** (`recurrent.rs::ScanOp`), which emits
 AVX2/FMA kernels and selects them at runtime via `Arch::new().dispatch(...)`, so
 a baseline-compiled binary still gets SIMD. `pulp` was already in the tree (via
 `faer`). Its isolated effect on the scan token loop is **1.83×**
-(0.344 → 0.188 ms/head, best-of-200).
+(0.344 → 0.188 ms/head, best-of-200). The L64 delta layer dropped from 11.6 ms to
+**8.5 ms**.
+
+### Row-blocked `matrixmultiply` beats Accelerate for Jeff's layout
+
+Counter to the earlier "Accelerate for large GEMMs" choice, `cpu-kernels`'s
+rayon **row-blocked `matrixmultiply`** path is faster than Accelerate for the
+Jeff/DeltaNet/MLP projections. Those use `matmul_row_major` (`y = Wᵀ x`), which
+blocks over `out_dim` — large for every projection (1024–6144) and `length` is
+small, so the row blocks fill the cores while Accelerate's per-call
+`dispatch_apply` has high overhead. Back-to-back (`RAYON_NUM_THREADS=8`,
+best-of-12): `host_opt` L8 **108** vs 153 ms, L16 **126** vs 160, L64 **250** vs
+283. So `matmul_row_major` no longer calls BLAS.
+
+Laya's kernel is `input_mul_weight_transpose` (`y = x·Wᵀ`), which blocks over
+`rows` (= batch×sequence) — only 8–64 at decode, so the rayon path cannot
+parallelize and **Accelerate still wins there**. `cpu-kernels` therefore keeps
+the Accelerate `cblas_sgemm` path for that kernel only (and drops it for
+`matmul_row_major`).
 
 Whole-model effect (production Jeff, `RAYON_NUM_THREADS=8`, best-of-15):
 
 | length | oracle | `host_opt` | host_opt/Julia | Julia best |
 |---:|---:|---:|---:|---:|
-| 8 | 146.8 ms | 156.0 ms | 1.13× | 137.5 ms |
-| 16 | 165.9 ms | 164.0 ms | 1.14× | 143.3 ms |
-| 64 | 405.9 ms | **280.4 ms** | **1.18×** | 238.3 ms |
+| 8 | 126.5 ms | **106.8 ms** | **0.78×** | 137.5 ms |
+| 16 | 137.1 ms | **124.3 ms** | **0.87×** | 143.3 ms |
+| 64 | 379.6 ms | **248.7 ms** | **1.04×** | 238.3 ms |
 
-The L64 delta layer dropped from 11.6 ms to **8.5 ms**; `host_opt` went from
-~1.47× to ~1.18× behind Julia. The explicit-SIMD lesson generalizes: the
-elementwise/normalization passes remain candidates, but the scan was the
-compute-bound one.
+`host_opt` is now **faster than Julia at L8/L16** and within ~4% at L64. The
+remaining L64 gap is the Accelerate/BLAS-class GEMM work (which Julia matches)
+plus the last bit of scan/elementwise overhead.
 
 ## A. GEMM (BLAS-class) candidates
 
@@ -282,6 +298,12 @@ behind the eager session, so the forward stays tenferro-first:
   (see the MWE above), so this op only proves the mechanism.
 
 ### GEMM provider is shape-dependent, not the gap
+
+> **Update (below):** this compared Accelerate against *faer*. It did not test
+> the rayon row-blocked `matrixmultiply` path, which turns out to be faster than
+> Accelerate for Jeff's `y = Wᵀ x` projections (see "Row-blocked
+> `matrixmultiply` beats Accelerate"). The conclusion that the provider is *not*
+> the tenferro-vs-host gap still holds for the tenferro path, which uses faer.
 
 `bench-suite/examples/host_gemm_providers.rs` compares `cpu-kernels`
 (Accelerate) against direct faer on the projection shapes (best-of-50, 8

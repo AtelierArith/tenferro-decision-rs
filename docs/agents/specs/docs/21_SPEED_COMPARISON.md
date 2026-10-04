@@ -54,19 +54,19 @@ which is why the host path is much faster than earlier tables.
 | Laya | L64 B1 | 213.0 ms | 428.3 ms | — | 2.01× | — |
 | Laya | L8 B8 | 211.9 ms | 279.6 ms | — | 1.32× | — |
 | Laya | model load | 1516 ms | 6463 ms | — | 4.26× | — |
-| Jeff | L8 | 137.5 ms (`-t 8`) | 156.0 ms | 262.7 ms | 1.13× | 1.91× |
-| Jeff | L16 | 143.3 ms | 164.0 ms | 311.0 ms | 1.14× | 2.17× |
-| Jeff | L64 | 238.3 ms | 280.4 ms | 412.8 ms | 1.18× | 1.73× |
+| Jeff | L8 | 137.5 ms (`-t 8`) | 106.8 ms | 257.4 ms | **0.78×** | 1.87× |
+| Jeff | L16 | 143.3 ms | 124.3 ms | 293.8 ms | **0.87×** | 2.05× |
+| Jeff | L64 | 238.3 ms | 248.7 ms | 408.7 ms | 1.04× | 1.72× |
 | Jeff | model load | 5495 ms | 4369 ms | — | **0.79×** | — |
 
 - Laya's Rust best is the cached tenferro path at L8B1 and the Accelerate host
-  elsewhere; the Laya host was not further optimized.
-- Jeff's Rust best is `host_opt` (the optimized host forward). It is within
-  ~1.13× (L8) of Julia's best and ~1.18× at L64 (the DeltaNet scan runs through
-  `pulp`, runtime-dispatched SIMD). The tenferro (host-recurrent DeltaNet) path
-  shares the improved kernels and is ~1.7–2.2×.
-- The gap grows with length: the DeltaNet recurrent scan and the elementwise /
-  normalization work dominate at L64.
+  elsewhere; the Laya host was not further optimized (its `x·Wᵀ` GEMM blocks over
+  `rows`, which is tiny at decode, so it still uses Accelerate).
+- Jeff's Rust best is `host_opt`. It is **faster than Julia at L8/L16** (0.78× /
+  0.87×) and within ~4% at L64. The wins are the `pulp` runtime-dispatched SIMD
+  DeltaNet scan and the row-blocked `matrixmultiply` projections for Jeff's
+  `(out_dim, length)` layout (which beat Accelerate). The tenferro
+  (host-recurrent DeltaNet) path shares the improved kernels and is ~1.7–2.1×.
 - Rust loads Jeff faster than Julia and Laya slower. Host numbers vary ~±20%
   run-to-run with machine load/thermals.
 
@@ -104,26 +104,25 @@ Warmup 3, 15 iterations, min.
 
 | shape | Julia (-t 8) | Rust oracle `forward_reference` | Rust `host_opt` | host_opt / Julia |
 |---|---|---|---|---|
-| L8 | 137.5 ms | 146.8 ms (1.07×) | 156.0 ms | 1.13× |
-| L16 | 143.3 ms | 165.9 ms (1.16×) | 164.0 ms | 1.14× |
-| L64 | 238.3 ms | 405.9 ms (1.70×) | 280.4 ms | **1.18×** |
+| L8 | 137.5 ms | 126.5 ms (0.92×) | 106.8 ms | **0.78×** |
+| L16 | 143.3 ms | 137.1 ms (0.96×) | 124.3 ms | **0.87×** |
+| L64 | 238.3 ms | 379.6 ms (1.59×) | 248.7 ms | **1.04×** |
 | model load | 5495 ms | 4369 ms | — | — |
 
 - Julia's fastest configuration is `-t 8` (task-parallel, BLAS=1); the default
   BLAS=8 is 4–7× slower for this hybrid model.
-- The Rust host uses Accelerate for its GEMMs. `forward_reference` is the
-  correctness oracle and is not optimized; `host_opt`
-  (`JeffBackend::HostOpt`, `22_CPU_KERNEL_OPTIMIZATION.md`) is the optimized host
-  path. It reaches near-parity at L8/L16 and is ~1.45× faster than the oracle at
-  L64. The DeltaNet scan runs through `pulp` (runtime-dispatched SIMD), which is
-  the main reason `host_opt` is now within ~1.2× of Julia (was ~1.5×).
-- Against Julia's best, the optimized host path is ~1.13× (L8) / 1.14× (L16) /
-  1.18× (L64).
+- `forward_reference` is the correctness oracle; `host_opt`
+  (`JeffBackend::HostOpt`, the default) is the optimized host path. With the
+  `pulp` runtime-dispatched SIMD DeltaNet scan and the **row-blocked
+  `matrixmultiply`** projections (which beat Accelerate for Jeff's
+  `(out_dim, length)` layout), `host_opt` is now **faster than Julia at L8/L16**
+  and within ~4% at L64.
+- Against Julia's best, the optimized host path is 0.78× (L8) / 0.87× (L16) /
+  1.04× (L64).
 - The tenferro path runs the fused host recurrent DeltaNet via the `GatedDelta`
   extension op (`DeltaKernel::HostRecurrent`, the default). It shares the
-  improved host kernels, so it is faster than the earlier tables; `TensorNative`
-  (tensor-only, for portability) remains ~1.2–1.8× slower. See
-  `22_CPU_KERNEL_OPTIMIZATION.md`.
+  improved host kernels; `TensorNative` (tensor-only, for portability) remains
+  slower. See `22_CPU_KERNEL_OPTIMIZATION.md`.
 - Rust model loading is ~1.3× faster than Julia for Jeff.
 - `forward_tenferro` is rebuilt from tenferro ops with a reused `TensorCache`.
   `JeffEngine` defaults to `JeffBackend::Auto`, which picks `host_opt` for

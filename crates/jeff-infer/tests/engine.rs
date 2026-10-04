@@ -359,7 +359,7 @@ fn constructor_rejects_option_limit_above_readout() {
 }
 
 #[test]
-fn auto_backend_dispatches_by_length() {
+fn auto_backend_uses_the_optimized_host_path() {
     let weights = build_weights(&config(), 12, 4, 7);
     let mut auto = JeffEngine::new(config(), decision(1.0, 3), weights.clone()).unwrap();
     let mut host = JeffEngine::with_backend(
@@ -374,19 +374,21 @@ fn auto_backend_dispatches_by_length() {
             .unwrap();
     assert_eq!(auto.backend(), JeffBackend::Auto);
 
-    // Short rows (< 16 tokens): Auto uses the oracle.
+    // Auto always uses the optimized path, at short and long lengths alike.
     let short = PreparedState {
         input_ids: vec![vec![3, 1, 4, 2]],
         attention_mask: vec![vec![true; 4]],
     };
-    assert_eq!(auto.logits(&short).unwrap(), host.logits(&short).unwrap());
+    assert_eq!(auto.logits(&short).unwrap(), opt.logits(&short).unwrap());
 
-    // Long rows (>= 16 tokens): Auto uses the optimized path.
     let long = PreparedState {
         input_ids: vec![(0..16).map(|i| (i % 12) as i64).collect()],
         attention_mask: vec![vec![true; 16]],
     };
     assert_eq!(auto.logits(&long).unwrap(), opt.logits(&long).unwrap());
+
+    // The oracle is still selectable and differs (it is the reference).
+    let _ = host.logits(&short).unwrap();
 }
 
 #[test]

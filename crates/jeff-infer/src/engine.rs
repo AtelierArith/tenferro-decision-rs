@@ -6,9 +6,9 @@
 //! with [`crate::readout`].
 //!
 //! [`JeffBackend`] selects the forward: the default `Auto` picks the optimized
-//! host path ([`forward_host_opt_with`]) for sequences of at least 16 tokens and
-//! the all-host oracle ([`forward_reference_with`]) below that; `Tenferro` is the
-//! backend-portable path (slower on CPU today).
+//! host path ([`forward_host_opt_with`]); `Host` runs the all-host oracle
+//! ([`forward_reference_with`]); `Tenferro` is the backend-portable path (slower
+//! on CPU today).
 //!
 //! Row `i` of the prepared state answers question `i`, so the batch and the
 //! [`QuestionSet`] must have the same length. Each question selects its own
@@ -42,11 +42,10 @@ use crate::readout::{choice_answer, noul_answer, score_answer};
 /// Which forward the engine runs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum JeffBackend {
-    /// Automatically pick the host forward by sequence length: [`Host`] for
-    /// short sequences (the rayon fan-out of the optimized path is not yet worth
-    /// it) and [`HostOpt`] otherwise. The production default.
+    /// The optimized host forward ([`HostOpt`]). The production default: after
+    /// the `pulp` SIMD scan and the row-blocked host GEMM, it is the fastest at
+    /// every measured length.
     ///
-    /// [`Host`]: JeffBackend::Host
     /// [`HostOpt`]: JeffBackend::HostOpt
     #[default]
     Auto,
@@ -61,12 +60,6 @@ pub enum JeffBackend {
     /// op) on CPU by default.
     Tenferro,
 }
-
-/// Below this token length [`JeffBackend::Auto`] uses the oracle
-/// ([`JeffBackend::Host`]); at or above it uses [`JeffBackend::HostOpt`]. The
-/// crossover was measured on the production Jeff checkpoint (~L8: oracle
-/// marginally faster within noise; ~L16 onward: `HostOpt` wins).
-const AUTO_HOST_OPT_MIN_LENGTH: usize = 16;
 
 /// A prepared-token Jeff engine: dimensions, decision settings, and weights.
 #[derive(Clone, Debug)]
@@ -183,14 +176,11 @@ impl JeffEngine {
             .map(|active| if *active { 1.0 } else { 0.0 })
             .collect();
         match self.backend {
-            JeffBackend::Auto if ids.len() >= AUTO_HOST_OPT_MIN_LENGTH => {
+            JeffBackend::Auto | JeffBackend::HostOpt => {
                 forward_host_opt_with(&mut self.host_opt, &self.config, &self.weights, ids, &mask)
             }
-            JeffBackend::Auto | JeffBackend::Host => {
+            JeffBackend::Host => {
                 forward_reference_with(&mut self.workspace, &self.config, &self.weights, ids, &mask)
-            }
-            JeffBackend::HostOpt => {
-                forward_host_opt_with(&mut self.host_opt, &self.config, &self.weights, ids, &mask)
             }
             JeffBackend::Tenferro => self
                 .runtime
