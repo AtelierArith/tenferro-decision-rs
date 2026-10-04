@@ -39,6 +39,39 @@ against revision `471c4278` (workspace version `0.7.1`).
 | [#1985](https://github.com/tensor4all/tenferro-rs/issues/1985) | `reduce_sum_squares` axes argument differs from other reductions |
 | [#1986](https://github.com/tensor4all/tenferro-rs/issues/1986) | `constant_from` vs `constant_from_host` naming is ambiguous |
 
+## Performance
+
+| # | Issue | Severity |
+|---|---|---|
+| [#1990](https://github.com/tensor4all/tenferro-rs/issues/1990) | CPU fused elementwise region is ~3.7× slower than eager per-op kernels for a long elementwise chain | medium |
+| [#1992](https://github.com/tensor4all/tenferro-rs/issues/1992) | CPU eager `dot_general`: GEMM analysis recomputed per call (no plan cache) and the BLAS provider cannot execute linalg | medium |
+
+MWE and benchmark for #1990:
+
+MWE: `crates/bench-suite/examples/fused_elementwise_mwe.rs`
+
+```sh
+RAYON_NUM_THREADS=8 cargo run --release -p bench-suite --example fused_elementwise_mwe -- 200 20
+```
+
+A traced chain of `K` `tanh` ops over a `1024x64` `f32` tensor compiles to a
+**single elementwise region** that is executed as **one fused command**:
+`PreparedCompiledGraph::elementwise_region_summary()` reports `regions=1,
+covered_insts=K`, and `_execution_counts()` reports `fused=runs, fallback=0`.
+Yet the compiled time scales linearly and is ~3.7× the eager per-op path:
+
+| `K` | eager (per-op kernels) | compiled (1 fused region) | compiled / eager |
+|---:|---:|---:|---:|
+| 1 | 0.23 ms | 0.27 ms | 1.16× (no region) |
+| 10 | 1.79 ms | 5.96 ms | 3.34× |
+| 100 | 17.3 ms | 63.9 ms | 3.69× |
+| 200 | 34.7 ms | 128.0 ms | 3.69× |
+
+Fusion is entered and run (zero fallbacks), so this is a **fused-kernel
+quality** issue (`tenferro-cpu-fused` / `strided_fused` on CPU), not a
+dispatch/segmentation issue: the fused region's per-element cost exceeds the
+eager path's sequential per-op SIMD kernels.
+
 ## Positive findings (not filed)
 
 - `triangular_solve(..., unit_diagonal = true)` fits the chunked Gated DeltaNet

@@ -11,3 +11,9 @@ authors.workspace = true
 [dependencies]
 matrixmultiply.workspace = true
 rayon.workspace = true
+
+# On macOS, route large GEMMs through Accelerate (BLAS) and keep `matrixmultiply`
+# as the portable fallback for small shapes and other platforms. The Accelerate
+# framework link comes from `build.rs`.
+[target.'cfg(target_os = "macos")'.dependencies]
+cblas-sys = "0.1"

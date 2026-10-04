@@ -111,3 +111,55 @@ After the GEMM + rayon work (`21_SPEED_COMPARISON.md`):
      elementwise/normalization passes with SIMD (`wide`) — the dominant L64 cost.
   2. Batch the attention `QKᵀ`/`PV` across heads and use GEMM.
   3. Reuse buffers (workspace) to cut allocations in the fused kernels.
+
+## tenferro eager `dot_general` CPU path (2026-10-04)
+
+Call path (pinned rev `471c4278`):
+
+- `EagerRuntime::with_cpu_backend(CpuBackend::new())` — cpu threads follow
+  `RAYON_NUM_THREADS` (`tenferro-cpu/src/context.rs`).
+- `EagerSession::dot_general` → `EagerTensor::nary_op_in_session`
+  (`tenferro-ad/src/eager_ops.rs:214`); inference takes the `!any_requires_grad`
+  branch, so no AD is recorded.
+- `exec_standard_op_on_tensor_reads_with_session` (`tenferro-ad/src/eager_exec.rs:358`)
+  → `exec.dot_general_read` (`:451`).
+- `CpuExecSession::dot_general_read` (`tenferro-cpu/src/exec_session.rs:650`)
+  → `execute_dot_allocated` (`:557`): `preflight_dot_general`, pool
+  `UninitTensor::acquire`, `DotGeneralRuntime::execute_dot_into_uninit`
+  (`dot_runtime.rs:1044`); on decline, a zeroed pool alloc + scoped fallback.
+- Provider: `builtin_gemm_provider(CpuBackendKind::default_compiled())` —
+  **`Blas` when the `cpu-blas` feature is on, else `Faer`**
+  (`tenferro-cpu/src/backend.rs:286`). We build with default features → **faer**.
+- faer path: `FaerGemmProvider` (`provider.rs:2224`) →
+  `faer::MatRef::from_raw_parts` + `faer::linalg::matmul::matmul_with_conj(...,
+  Par::rayon(n))`, `n` = the cpu thread budget (`provider.rs:561`); below
+  `FAER_PARALLEL_MIN_MULADDS = 1<<20` it forces `Par::Seq`.
+
+Per-call overheads vs our `cpu-kernels`: output pool allocation (possible zero
+fill), two `Box` allocations per operand (`promote_read_to_dtype`), a
+`Vec<TensorRead>` per op, the GEMM analysis recomputed every call
+(`cache_slot = None`, `exec_session.rs:656`), and a faer `spindle`
+scope+barrier fan-out per GEMM (not the pool's steady state). For tall-skinny
+shapes (`out_dim` small) the fan-out fraction is larger.
+
+Levers that need **no edit to the pinned repo**:
+
+- `tenferro-cpu` features: `cpu-faer` (default), `cpu-blas`, `provider-src`,
+  `blas-accelerate`, `blas-openblas`, `blas-mkl`. Enabling `blas-accelerate`
+  flips `default_compiled()` to Accelerate's `cblas_sgemm`.
+- `cpu-kernels` (host path): (A1) Accelerate via `blas-src`+`cblas-sys`;
+  (A2) faer with `Par::rayon(0)`; (A3) finer row/column blocking than the
+  current `out_dim`-row split.
+
+**Tried:** enabling `blas-accelerate` flips `default_compiled()` to `Blas`, but
+`triangular_solve` then fails with `CPU linalg provider Blas is not compiled in`
+(the BLAS provider has no CPU linalg kernels), so the DeltaNet cannot run. The
+tenferro path must stay on faer until the BLAS provider covers linalg.
+
+**Measured (MWE `bench-suite/examples/eager_dot_general_mwe.rs`):** the eager
+`dot_general` wrapper adds only ~1.04–1.17× over the *same* faer GEMM run
+directly (preallocated output, `Par::rayon(0)`), i.e. the wrapper cost is small.
+For these projection shapes faer was even **faster** than our host
+`matrixmultiply`/Accelerate kernel (~1.3–2.1×), so eager's GEMM provider is not
+the whole-model bottleneck. The two fixable items are the per-call analysis
+(cache slot unused) and the BLAS-without-linalg limitation (filed as #1992).

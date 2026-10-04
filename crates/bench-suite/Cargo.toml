@@ -17,6 +17,9 @@ tenferro-tensor.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+tenferro-ad.workspace = true
+cpu-kernels.workspace = true
+faer = { version = "0.24", default-features = false, features = ["std", "rayon"] }
 
 [[bench]]
 name = "wiring"

@@ -67,8 +67,11 @@ checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 name = "bench-suite"
 version = "0.1.0"
 dependencies = [
+ "cpu-kernels",
  "criterion",
+ "faer",
  "serde_json",
+ "tenferro-ad",
  "tenferro-cpu",
  "tenferro-runtime",
  "tenferro-tensor",
@@ -123,6 +126,15 @@ name = "cast"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "37b2a672a2cb129a2e41c10b1224bb368f9f37a2b16b612598138befd7b37eb5"
+
+[[package]]
+name = "cblas-sys"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b6feecd82cce51b0204cf063f0041d69f24ce83f680d87514b004248e7b0fa65"
+dependencies = [
+ "libc",
+]
 
 [[package]]
 name = "cc"
@@ -218,6 +230,7 @@ source = "git+https://github.com/tensor4all/computegraph-rs.git?rev=691def2d82fd
 name = "cpu-kernels"
 version = "0.1.0"
 dependencies = [
+ "cblas-sys",
  "matrixmultiply",
  "rayon",
 ]
@@ -2079,6 +2092,7 @@ dependencies = [
 name = "tenferro-ext"
 version = "0.1.0"
 dependencies = [
+ "cpu-kernels",
  "tenferro-ad",
  "tenferro-cpu",
  "tenferro-runtime",
