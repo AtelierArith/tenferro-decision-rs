@@ -6,12 +6,14 @@
 //! - [`readout`]: temperature-scaled softmax and the choice / noul / score
 //!   answer formulas (ported from `extern/JeffClient.jl/src/questions.jl`)
 //!
-//! Still to come: safetensors loading, embeddings, RMSNorm, partial RoPE, full
-//! attention, the reference Gated DeltaNet (`tenferro-gated-delta`), SiLU MLP,
-//! and the prepared-token forward pass. Those need a real checkpoint to
-//! validate against the reference (`docs/agents/specs/docs/06_ROADMAP.md`
-//! Phase 5).
+//! Checkpoint-independent model code lives in [`model`], and [`checkpoint`]
+//! loads a checkpoint directory (`config.json`, `decision_config.json`,
+//! `model.safetensors`, `readout.safetensors`) into prepared [`model::JeffWeights`].
+//!
+//! Still to come: the prepared-token engine context (`JeffModel`/`JeffContext`
+//! per `docs/agents/specs/docs/14_JEFF_INFER_DESIGN.md`).
 
+pub mod checkpoint;
 pub mod config;
 pub mod model;
 pub mod readout;

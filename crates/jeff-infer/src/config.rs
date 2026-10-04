@@ -38,6 +38,11 @@ pub struct TextConfig {
     pub num_key_value_heads: usize,
     /// Number of layers.
     pub num_hidden_layers: usize,
+    /// MLP intermediate width when the checkpoint records it.
+    ///
+    /// Optional so the loader can infer it from the MLP gate weight shape when
+    /// a minimal `config.json` omits it.
+    pub intermediate_size: Option<usize>,
     /// Number of key heads in the linear-attention layers.
     pub linear_num_key_heads: usize,
     /// Number of value heads in the linear-attention layers.
@@ -183,6 +188,10 @@ impl TextConfig {
             num_attention_heads: required("num_attention_heads")?,
             num_key_value_heads: required("num_key_value_heads")?,
             num_hidden_layers,
+            intermediate_size: text
+                .get("intermediate_size")
+                .and_then(Value::as_u64)
+                .map(|v| v as usize),
             linear_num_key_heads: required("linear_num_key_heads")?,
             linear_num_value_heads: required("linear_num_value_heads")?,
             linear_key_head_dim: required("linear_key_head_dim")?,
