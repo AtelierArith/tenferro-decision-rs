@@ -83,14 +83,17 @@ bundled webpki roots).
 - Tenferro-backed chunked scan (`chunked`) using eager `matmul`/`dot_general`,
   `triangular_solve(unit_diagonal = true)`, `exp`, and the shared `rms_norm` /
   `silu` primitives.
-- Cross-formulation parity tests: the chunked scan matches the recurrent
-  reference across chunk boundaries, single tokens, and grouped key/value
-  widths.
+- Full layer wrapper (`layer`): `qkv`/`z`/`a`/`b`/`out_proj` projections
+  (tenferro-backed), causal convolution, Q/K L2 normalization with `sqrt(key_dim)`
+  Q scaling, `beta`/`decay` from `sigmoid`/`softplus`, the scan, and the output
+  projection — with `GatedDeltaWeights` layout validation.
+- Cross-formulation parity tests: the chunked scan and the full tenferro layer
+  match the recurrent host reference, across chunk boundaries, single tokens,
+  grouped key/value widths, and mask holes.
 - Also the chunked effective-system `M = I + L` helper with unit-diagonal
   forward substitution.
-- Remaining: the weight/projection wrapper (qkv/z/a/b), Q/K normalization and
-  beta/decay preparation, prepared plans/workspaces, extension-op wiring, and
-  CUDA kernels.
+- Remaining: prepared plans/workspaces, extension-op wiring, fused CPU
+  convolution/normalization, and CUDA kernels.
 
 ## Blocked / needs external input
 
@@ -106,6 +109,6 @@ bundled webpki roots).
 ## Verification snapshot
 
 - `cargo test --workspace`: decision-core 19, reference-data 4, tenferro-infer 11,
-  laya-infer 22, jeff-infer 8, tenferro-gated-delta 7, jev-client 49
+  laya-infer 22, jeff-infer 8, tenferro-gated-delta 9, jev-client 49
   (58 with `--features http`), bench-suite 1.
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean.

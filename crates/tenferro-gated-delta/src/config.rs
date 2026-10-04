@@ -14,6 +14,8 @@ pub enum Algorithm {
 /// Layer shape and execution settings.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GatedDeltaConfig {
+    /// Model hidden width.
+    pub hidden: usize,
     /// Number of key (query) heads.
     pub key_heads: usize,
     /// Number of value heads.
@@ -51,6 +53,12 @@ impl GatedDeltaConfig {
             return Err(DecisionError::invalid_field(
                 "gated_delta",
                 "key_dim and value_dim must be positive",
+            ));
+        }
+        if self.hidden == 0 {
+            return Err(DecisionError::invalid_field(
+                "gated_delta.hidden",
+                "hidden must be positive",
             ));
         }
         if self.conv_taps == 0 {

@@ -19,11 +19,13 @@
 pub mod chunked;
 pub mod config;
 pub mod conv;
+pub mod layer;
 pub mod ops;
 pub mod reference;
 
 pub use config::{Algorithm, GatedDeltaConfig};
 pub use conv::causal_depthwise_silu;
+pub use layer::{delta_layer_reference, delta_layer_tenferro, GatedDeltaWeights};
 pub use reference::{delta_scan_reference, DeltaScanInputs};
 
 use decision_core::{DecisionError, Result};

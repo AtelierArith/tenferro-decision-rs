@@ -135,11 +135,15 @@ fn cumulative_host(inputs: &DeltaScanInputs<'_>, start: usize, index: usize) -> 
     inputs.decay[start..=start + index].iter().sum()
 }
 
-fn constant(session: &mut EagerSession<'_>, shape: &[usize], data: &[f32]) -> Result<EagerTensor> {
+pub(crate) fn constant(
+    session: &mut EagerSession<'_>,
+    shape: &[usize],
+    data: &[f32],
+) -> Result<EagerTensor> {
     session.constant_from(Tensor::from_vec_col_major(shape.to_vec(), data.to_vec())?)
 }
 
-fn col_major(rows: usize, cols: usize, row_major: &[f32]) -> Result<Vec<f32>> {
+pub(crate) fn col_major(rows: usize, cols: usize, row_major: &[f32]) -> Result<Vec<f32>> {
     if row_major.len() != rows * cols {
         return Err(tenferro_ad::Error::TensorRuntime(
             tenferro_tensor::Error::invalid_argument(
