@@ -134,9 +134,8 @@ impl EncoderConfig {
 
     /// Parse `encoder/config.json`.
     pub fn from_json_str(text: &str) -> Result<Self> {
-        let value: Value = serde_json::from_str(text).map_err(|e| {
-            DecisionError::invalid_field("encoder", format!("invalid JSON: {e}"))
-        })?;
+        let value: Value = serde_json::from_str(text)
+            .map_err(|e| DecisionError::invalid_field("encoder", format!("invalid JSON: {e}")))?;
         Self::from_json(&value)
     }
 
@@ -152,7 +151,10 @@ impl EncoderConfig {
                 .and_then(Value::as_u64)
                 .map(|v| v as usize)
                 .ok_or_else(|| {
-                    DecisionError::invalid_field(format!("encoder.{key}"), "expected a positive integer")
+                    DecisionError::invalid_field(
+                        format!("encoder.{key}"),
+                        "expected a positive integer",
+                    )
                 })
         };
 
@@ -287,9 +289,8 @@ impl AgentConfig {
 
     /// Parse `rl_agent_config.json`.
     pub fn from_json_str(text: &str) -> Result<Self> {
-        let value: Value = serde_json::from_str(text).map_err(|e| {
-            DecisionError::invalid_field("rl_agent", format!("invalid JSON: {e}"))
-        })?;
+        let value: Value = serde_json::from_str(text)
+            .map_err(|e| DecisionError::invalid_field("rl_agent", format!("invalid JSON: {e}")))?;
         let object = value.as_object().ok_or_else(|| {
             DecisionError::invalid_field("rl_agent", "config must be a JSON object")
         })?;
@@ -306,14 +307,12 @@ impl AgentConfig {
             Some(Value::Array(items)) => items
                 .iter()
                 .map(|item| {
-                    item.as_str()
-                        .map(str::to_string)
-                        .ok_or_else(|| {
-                            DecisionError::invalid_field(
-                                "rl_agent.act_costs",
-                                "array entries must be strings",
-                            )
-                        })
+                    item.as_str().map(str::to_string).ok_or_else(|| {
+                        DecisionError::invalid_field(
+                            "rl_agent.act_costs",
+                            "array entries must be strings",
+                        )
+                    })
                 })
                 .collect::<Result<Vec<_>>>()?,
             Some(Value::Null) | None => Vec::new(),

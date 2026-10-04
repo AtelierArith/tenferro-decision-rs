@@ -160,9 +160,8 @@ impl Calibration {
 
     /// Parse the calibration fields of `rl_agent_config.json`.
     pub fn from_json_str(text: &str) -> Result<Self> {
-        let value: Value = serde_json::from_str(text).map_err(|e| {
-            DecisionError::invalid_field("rl_agent", format!("invalid JSON: {e}"))
-        })?;
+        let value: Value = serde_json::from_str(text)
+            .map_err(|e| DecisionError::invalid_field("rl_agent", format!("invalid JSON: {e}")))?;
         Self::from_json(&value)
     }
 
@@ -175,7 +174,10 @@ impl Calibration {
         let mut temperatures = [1.0_f64; 3];
         if let Some(items) = object.get("temperature") {
             let items = items.as_array().ok_or_else(|| {
-                DecisionError::invalid_field("rl_agent.temperature", "expected an array of three numbers")
+                DecisionError::invalid_field(
+                    "rl_agent.temperature",
+                    "expected an array of three numbers",
+                )
             })?;
             if items.len() != 3 {
                 return Err(DecisionError::invalid_field(

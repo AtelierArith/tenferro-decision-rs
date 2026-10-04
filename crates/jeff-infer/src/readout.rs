@@ -35,11 +35,7 @@ pub fn probabilities(logits: &[f64], temperature: f64) -> Result<Vec<f64>> {
 
 /// Choice answer with Jeff's confidence:
 /// `clamp((p_best - 1/n) / (1 - 1/n), 0, 1)`.
-pub fn choice_answer(
-    labels: &[String],
-    logits: &[f64],
-    temperature: f64,
-) -> Result<ChoiceAnswer> {
+pub fn choice_answer(labels: &[String], logits: &[f64], temperature: f64) -> Result<ChoiceAnswer> {
     let probabilities = probabilities(logits, temperature)?;
     let best = argmax(&probabilities);
     let n = probabilities.len();
@@ -78,11 +74,7 @@ pub fn noul_answer(logits: &[f64], temperature: f64) -> Result<NoulAnswer> {
 /// `max(0, 1 - distance / baseline)`, where `distance` is the expected
 /// absolute distance from the most likely level and `baseline` is the mean
 /// distance from the midpoint.
-pub fn score_answer(
-    levels: &[String],
-    logits: &[f64],
-    temperature: f64,
-) -> Result<ScoreAnswer> {
+pub fn score_answer(levels: &[String], logits: &[f64], temperature: f64) -> Result<ScoreAnswer> {
     let probabilities = probabilities(logits, temperature)?;
     let n = probabilities.len();
     let best = argmax(&probabilities) as f64;

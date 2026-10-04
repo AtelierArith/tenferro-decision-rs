@@ -138,17 +138,23 @@ fn choice_answer_picks_argmax_and_rounds() {
     let probabilities = [0.1, 0.7, 0.2];
     let answer = choice_answer(&labels, &probabilities);
     assert_eq!(answer.choice, "b");
-    assert_eq!(answer.probabilities, vec![
-        ("a".to_string(), 0.1),
-        ("b".to_string(), 0.7),
-        ("c".to_string(), 0.2),
-    ]);
+    assert_eq!(
+        answer.probabilities,
+        vec![
+            ("a".to_string(), 0.1),
+            ("b".to_string(), 0.7),
+            ("c".to_string(), 0.2),
+        ]
+    );
     assert!(answer.confidence >= 0.0 && answer.confidence <= 1.0);
 }
 
 #[test]
 fn score_answer_computes_expected_value() {
-    let levels: Vec<String> = ["low", "mid", "high"].iter().map(|s| s.to_string()).collect();
+    let levels: Vec<String> = ["low", "mid", "high"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let probabilities = [0.2, 0.5, 0.3];
     let answer = score_answer(&levels, &probabilities);
     assert!((answer.score - 1.1).abs() < 1e-9);

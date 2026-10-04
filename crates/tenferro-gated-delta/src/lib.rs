@@ -42,16 +42,12 @@ pub fn build_effective_matrix(
     }
 
     let mut m = vec![vec![0.0; n]; n];
-    for i in 0..n {
-        m[i][i] = 1.0;
+    for (i, row) in m.iter_mut().enumerate() {
+        row[i] = 1.0;
     }
     for i in 0..n {
         for j in 0..i {
-            let dot: f64 = keys[i]
-                .iter()
-                .zip(&keys[j])
-                .map(|(a, b)| a * b)
-                .sum();
+            let dot: f64 = keys[i].iter().zip(&keys[j]).map(|(a, b)| a * b).sum();
             m[i][j] = beta[i] * dot * (cum_decay[i] - cum_decay[j]).exp();
         }
     }

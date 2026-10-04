@@ -33,6 +33,23 @@ independent numerical test:
 Known gap: tenferro has no `erf`, so `gelu` uses the tanh approximation. The
 exact erf-based form that Laya's MLX kernels use requires an extension op.
 
+### Phase 9 — `jev-client`
+
+Independent TypeSafe System One client (no tenferro dependency), with a
+`Transport` seam and a `testing::MockTransport` so tests never touch the
+network:
+
+- fixed endpoint policy, no base URL / proxy / redirects
+- credential providers with validation, redaction, and best-effort zeroization
+- `ResourceLimits`, `TimeoutPolicy`, `RetryPolicy`; retry only 429/529 with an
+  injectable sleeper
+- single ordered wire-serialization path and strict response validation
+- typed `JevError` hierarchy and metadata-only `Event` sink
+
+Follow-up: the concrete TLS transport (the default `UnsupportedTransport`
+errors); HTTP-date `Retry-After`, an injectable monotonic clock, and a
+`zeroize`-backed secret are deferred.
+
 ## In progress (checkpoint-independent groundwork)
 
 ### Phase 2 — `laya-infer`
@@ -71,5 +88,6 @@ exact erf-based form that Laya's MLX kernels use requires an extension op.
 ## Verification snapshot
 
 - `cargo test --workspace`: decision-core 19, reference-data 4, tenferro-infer 11,
-  laya-infer 14, jeff-infer 8, tenferro-gated-delta 3, bench-suite 1.
+  laya-infer 14, jeff-infer 8, tenferro-gated-delta 3, jev-client 49,
+  bench-suite 1.
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean.

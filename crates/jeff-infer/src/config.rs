@@ -87,9 +87,8 @@ impl TextConfig {
 
     /// Parse the `text_config` object of `config.json`.
     pub fn from_json_str(text: &str) -> Result<Self> {
-        let value: Value = serde_json::from_str(text).map_err(|e| {
-            DecisionError::invalid_field("config", format!("invalid JSON: {e}"))
-        })?;
+        let value: Value = serde_json::from_str(text)
+            .map_err(|e| DecisionError::invalid_field("config", format!("invalid JSON: {e}")))?;
         Self::from_json(&value)
     }
 
@@ -109,7 +108,9 @@ impl TextConfig {
         }
         if let Some(attention_bias) = object.get("attention_bias").and_then(Value::as_bool) {
             if attention_bias {
-                return Err(DecisionError::unsupported("attention_bias is not supported"));
+                return Err(DecisionError::unsupported(
+                    "attention_bias is not supported",
+                ));
             }
         }
         if let Some(hidden_act) = object.get("hidden_act").and_then(Value::as_str) {
@@ -147,7 +148,10 @@ impl TextConfig {
                 .iter()
                 .map(|item| {
                     let name = item.as_str().ok_or_else(|| {
-                        DecisionError::invalid_field("text_config.layer_types", "entries must be strings")
+                        DecisionError::invalid_field(
+                            "text_config.layer_types",
+                            "entries must be strings",
+                        )
                     })?;
                     LayerKind::parse(name).ok_or_else(|| {
                         DecisionError::invalid_field(
@@ -253,14 +257,20 @@ impl DecisionConfig {
                 .get("temperature")
                 .and_then(Value::as_f64)
                 .ok_or_else(|| {
-                    DecisionError::invalid_field("decision_config.temperature", "missing temperature")
+                    DecisionError::invalid_field(
+                        "decision_config.temperature",
+                        "missing temperature",
+                    )
                 })?,
             max_options: object
                 .get("max_options")
                 .and_then(Value::as_u64)
                 .map(|v| v as usize)
                 .ok_or_else(|| {
-                    DecisionError::invalid_field("decision_config.max_options", "missing max_options")
+                    DecisionError::invalid_field(
+                        "decision_config.max_options",
+                        "missing max_options",
+                    )
                 })?,
         };
         config.validate()?;

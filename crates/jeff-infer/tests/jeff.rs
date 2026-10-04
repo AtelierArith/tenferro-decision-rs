@@ -121,7 +121,10 @@ fn noul_answer_is_true_probability() {
 
 #[test]
 fn score_answer_expected_value_and_confidence() {
-    let levels: Vec<String> = ["low", "mid", "high"].iter().map(|s| s.to_string()).collect();
+    let levels: Vec<String> = ["low", "mid", "high"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
     let answer = score_answer(&levels, &[10.0, 0.0, 0.0], 1.0).unwrap();
     assert!(answer.score < 0.01);
     assert!(answer.confidence > 0.99);

@@ -671,6 +671,24 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 
 [[package]]
+name = "jeff-infer"
+version = "0.1.0"
+dependencies = [
+ "decision-core",
+ "serde_json",
+]
+
+[[package]]
+name = "jev-client"
+version = "0.1.0"
+dependencies = [
+ "decision-core",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "js-sys"
 version = "0.3.106"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -679,6 +697,14 @@ dependencies = [
  "cfg-if",
  "futures-util",
  "wasm-bindgen",
+]
+
+[[package]]
+name = "laya-infer"
+version = "0.1.0"
+dependencies = [
+ "decision-core",
+ "serde_json",
 ]
 
 [[package]]
@@ -1331,6 +1357,13 @@ dependencies = [
  "tenferro-cpu-basic",
  "tenferro-tensor",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "tenferro-gated-delta"
+version = "0.1.0"
+dependencies = [
+ "decision-core",
 ]
 
 [[package]]

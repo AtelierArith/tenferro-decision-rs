@@ -14,10 +14,10 @@ architecture.
 |---|---|
 | `decision-core` | Backend-independent questions/answers, `Content`, and the `DecisionEngine` seam |
 | `tenferro-infer` | Shared inference primitives (norm, activations, softmax, RoPE, attention) |
-| `laya-infer` | Laya engine (planned) |
-| `jeff-infer` | Jeff engine (planned) |
-| `tenferro-gated-delta` | Gated DeltaNet crate for Jeff (planned) |
-| `jev-client` | Independent TypeSafe System One API client (planned) |
+| `laya-infer` | Laya engine (config + calibration done; forward pending) |
+| `jeff-infer` | Jeff engine (config + readout done; forward pending) |
+| `tenferro-gated-delta` | Gated DeltaNet crate for Jeff (host reference started) |
+| `jev-client` | Independent TypeSafe System One API client |
 | `reference-data` | Reference fixture format and loader (test support) |
 | `bench-suite` | Benchmark harness skeleton and metadata capture |
 
@@ -25,10 +25,14 @@ architecture.
 
 ## Status
 
-Phase 0 (workspace and baseline) is in place: the Cargo workspace,
-`decision-core`, tenferro CPU dependency wiring, the reference fixture format,
-the benchmark harness skeleton, and CI. Engine work starts at Phase 1
-(`tenferro-infer` primitives).
+Phase 0 (workspace), Phase 1 (`tenferro-infer` primitives), and Phase 9
+(`jev-client`) are implemented and tested. The checkpoint-independent parts of
+Phases 2/5/6 (config, calibration, readout, Delta system reference) are in
+place; the forward passes, tokenizers, and checkpoint loading need real
+checkpoints to validate. See
+[`docs/agents/specs/docs/18_IMPLEMENTATION_STATUS.md`](docs/agents/specs/docs/18_IMPLEMENTATION_STATUS.md)
+for the live status and blockers (CUDA hardware, tenferro `erf`/F16/BF16,
+WebGPU coverage).
 
 ## Building and testing
 

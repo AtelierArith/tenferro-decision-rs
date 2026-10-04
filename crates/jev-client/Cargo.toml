@@ -1,0 +1,19 @@
+[package]
+name = "jev-client"
+description = "Unofficial Rust client for the TypeSafe AI System One (Jev) API"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+# `decision-core` supplies the shared question/answer/response types; its
+# `serde` feature exposes `Content` as a JSON-compatible value. This crate owns
+# the wire format and must never depend on `tenferro`
+# (`docs/agents/specs/docs/17_JEV_CLIENT_DESIGN.md` §11).
+decision-core = { workspace = true, features = ["serde"] }
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
