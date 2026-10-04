@@ -28,9 +28,23 @@ every weight tensor on every call.
   an `Arc<EagerRuntime>` and a `TensorCache` and runs the tenferro forward.
 - **`jeff-infer`** — `forward_tenferro_cached` threads the cache plus the
   DeltaNet workspace; `JeffEngine` owns the runtime, workspace, and cache.
+- **`tenferro-gated-delta::tensor_layer`** — a fully tensor-native,
+  **head-batched** Gated DeltaNet (mask, causal depthwise conv, Q/K L2-norm,
+  gates, chunked scan, output projection). Jeff's tenferro path calls it
+  directly, so there are no host round-trips between layers.
 - The engines' `decide` / `logits` / `row_logits` now take `&mut self` for the
   cache (the eager session API requires a `Send` closure, so a `RefCell` borrow
   cannot cross it).
+
+### tenferro conventions pinned down
+
+- `dot_general` emits **batch dimensions trailing**; `tensor_layer::bmm`
+  transposes them back to batch-leading.
+- `reshape` preserves **column-major** order, so splitting `[width, L]` into
+  heads reshapes to `(dim, heads, L)` then transposes (as attention already
+  does).
+- `triangular_solve` is rank-2 only, so the per-chunk solves loop over heads
+  while everything else stays batched.
 
 ## Measured (production checkpoints, release, 8 threads)
 
@@ -45,17 +59,19 @@ Laya, L8B1:
 The cached tenferro path is the fastest Rust Laya forward (within ~1.7× of
 Julia's OpenBLAS).
 
-Jeff, L8 / L16 / L64 (see `21_SPEED_COMPARISON.md`):
+Jeff, L8 (host `+GEMM+rayon` is the oracle / CPU best):
 
-| path | L8 | L16 | L64 |
-|---|---|---|---|
-| host + GEMM + rayon (oracle) | 159.5 ms | 210.4 ms | 608.3 ms |
-| tenferro, fresh cache | 4459 ms | — | — |
-| tenferro, reused cache | 1693 ms | — | — |
+| path | L8 |
+|---|---:|
+| host + GEMM + rayon | 177 ms |
+| tenferro, fresh cache each call | 4677 ms |
+| tenferro, reused cache, old host-round-trip chunked path | 1693 ms |
+| tenferro, reused cache, tensor-native (head-sequential) | 496 ms |
+| **tenferro, reused cache, tensor-native, head-batched** | **342 ms** |
 
-Caching helps Jeff 2.6×, but the tenferro path is still ~10× slower than the
-host path on CPU: each layer round-trips activations through the host and the
-chunked DeltaNet is heavier than the fused recurrent kernel.
+Caching plus the tensor-native rewrite cut the tenferro path ~5× (1693 → 342 ms),
+to ~1.9× the host path on CPU. The remaining gap is the tenferro eager-op /
+small-GEMM overhead; the payoff is a single backend-portable code path.
 
 ## Backend selection
 
@@ -76,7 +92,7 @@ with the current extension API: `execute_in_session` receives only a
 backend and caches — no tensor-op helpers (`dot_general`, `triangular_solve`,
 …). The op therefore keeps its CPU fused kernel. This is not a GPU blocker for
 the production path, which already runs Gated DeltaNet through
-`delta_layer_tenferro` (session ops).
+`tensor_layer::delta_layer_tenferro_native` (session ops).
 
 ## Next
 

@@ -166,9 +166,11 @@ bundled webpki roots).
   `#[ignore]`d (it runs the full 0.8B forward):
   `cargo test --release -p jeff-infer --test real_checkpoint -- --ignored`.
 - Backend choice: `JeffEngine` defaults to `JeffBackend::Host` (the fused
-  CPU-competitive forward) and offers `JeffBackend::Tenferro`
-  (`forward_tenferro_cached` + cached weights) for backend portability; the
-  tenferro path is ~10× slower on CPU today (`23_TENFERRO_NATIVE.md`).
+  CPU-competitive forward) and offers `JeffBackend::Tenferro` for backend
+  portability. The tenferro path uses `forward_tenferro_cached` plus the
+  fully tensor-native, head-batched `tensor_layer::delta_layer_tenferro_native`;
+  it is now ~1.9× the host path on CPU (L8 342 ms vs 177 ms), down from ~10×
+  (`23_TENFERRO_NATIVE.md`).
 - Remaining: natural-language tokenizer.
 
 ### Phase 6 — `tenferro-gated-delta`
@@ -182,6 +184,10 @@ bundled webpki roots).
   (tenferro-backed), causal convolution, Q/K L2 normalization with
   `1 / sqrt(key_dim)` Q scaling, `beta`/`decay` from `sigmoid`/`softplus`, the
   scan, and the output projection — with `GatedDeltaWeights` layout validation.
+- Fully tensor-native layer (`tensor_layer`): tensor-in/tensor-out, **head
+  batched** across value heads, so it composes with the tenferro forward with no
+  host round-trips. The `GatedDelta` extension op stays CPU-only (the extension
+  API exposes no session-op helpers).
 - Cross-formulation parity tests: the chunked scan and the full tenferro layer
   match the recurrent host reference, across chunk boundaries, single tokens,
   grouped key/value widths, mask holes, and strongly negative decay.

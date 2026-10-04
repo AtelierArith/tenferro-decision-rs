@@ -54,16 +54,18 @@ checkpoints.
 | Laya | L64 B1 | 339.1 ms | 638 ms (host+GEMM+rayon) | 1.88× |
 | Laya | L8 B8 | 309.3 ms | 511 ms (host+GEMM+rayon) | 1.65× |
 | Laya | model load | 1535 ms | 6591 ms | 4.29× |
-| Jeff | L8 | 128.5 ms (`-t 8`) | 159.5 ms (host+GEMM+rayon) | 1.24× |
-| Jeff | L16 | 119.8 ms | 210.4 ms | 1.76× |
-| Jeff | L64 | 198.9 ms | 608.3 ms | 3.06× |
-| Jeff | model load | 5442 ms | 4699 ms | **0.86×** |
+| Jeff | L8 | 128.5 ms (`-t 8`) | 177 ms (host+GEMM+rayon) | 1.38× |
+| Jeff | L16 | 119.8 ms | 208 ms | 1.74× |
+| Jeff | L64 | 198.9 ms | 568 ms | 2.86× |
+| Jeff | model load | 5442 ms | 4330 ms | **0.80×** |
 
 - Laya's Rust best is the cached tenferro path at L8B1; at L64/L8B8 the tenferro
   cache was not measured, so the host path is listed.
-- Jeff's Rust best is always the host path; the cached tenferro path is ~10×
-  slower on CPU (see the Jeff section).
-- Rust loads Jeff faster than Julia and Laya slower.
+- Jeff's Rust best is the host path. The tensor-native cached tenferro path is
+  now **342 ms** at L8 (down from 1693 ms; see the Jeff section) — ~1.9× the host
+  path, backend-portable but still slower on CPU.
+- Rust loads Jeff faster than Julia and Laya slower. Host numbers vary ~±10%
+  with machine load.
 
 ## Laya
 
@@ -115,5 +117,9 @@ Warmup 1, 3 iterations, median.
   single-threaded elementwise/normalization work dominate at L64.
 - Rust model loading is ~1.2–2.6× faster than Julia (4297–4542 ms vs
   5442–11756 ms).
-- `forward_tenferro` is unchanged by the host kernels and still ~25× slower
-  than the host path because it rebuilds every weight tensor per call.
+- `forward_tenferro` is rebuilt from tenferro ops (`tensor_layer`: mask, causal
+  conv, Q/K L2-norm, gates, head-batched chunked scan, output projection) with a
+  reused `TensorCache`. At L8 it is **342 ms** (fresh cache 4677 ms), ~1.9× the
+  host path; the trajectory was 1693 → 496 (tensor-native) → 418 (head-batched)
+  → 342 ms. `JeffEngine` defaults to the host backend and offers the tenferro
+  one (`JeffBackend::Tenferro`) for portability.

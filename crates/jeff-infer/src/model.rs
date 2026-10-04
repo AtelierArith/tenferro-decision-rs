@@ -23,8 +23,8 @@
 use decision_core::{DecisionError, Result};
 use tenferro_ad::{EagerSession, EagerTensor};
 use tenferro_gated_delta::{
-    GatedDeltaConfig, GatedDeltaPlan, GatedDeltaWeights, GatedDeltaWorkspace,
-    delta_layer_recurrent, gated_delta,
+    GatedDeltaConfig, GatedDeltaWeights, GatedDeltaWorkspace, delta_layer_recurrent,
+    delta_layer_tenferro_native, prepare_tensor_weights,
 };
 use tenferro_infer::{TensorCache, activation, embedding, linear, norm, rope};
 
@@ -408,6 +408,7 @@ pub fn forward_reference_with(
 
 // ------------------------------------------------------------------ tenferro
 
+#[cfg(test)]
 fn host_to_tensor(
     session: &mut EagerSession<'_>,
     rows: usize,
@@ -469,7 +470,7 @@ fn full_attention_tenferro(
     x: &EagerTensor,
     mask: &[f32],
     length: usize,
-) -> tenferro_ad::Result<Vec<f32>> {
+) -> tenferro_ad::Result<EagerTensor> {
     let hd = cfg.head_dim;
     let heads = cfg.heads;
     let width = hd * heads;
@@ -539,7 +540,7 @@ fn full_attention_tenferro(
     let merged = session.transpose(&gated, &[2, 0, 1])?;
     let merged = session.reshape(&merged, vec![width, length])?;
     let out = linear_col(session, &merged, &o_w)?; // [hidden, length]
-    extract(session, &out, cfg.hidden, length)
+    Ok(out)
 }
 
 /// Tenferro-backed forward. Returns readout scores `(options,)`.
@@ -573,7 +574,7 @@ pub fn forward_tenferro_with(
 /// [`forward_tenferro_with`] with a reusable DeltaNet workspace **and** weight
 /// cache, so the weights are not re-transposed and re-created on every call.
 pub fn forward_tenferro_cached(
-    workspace: &mut GatedDeltaWorkspace,
+    _workspace: &mut GatedDeltaWorkspace,
     cache: &mut TensorCache,
     session: &mut EagerSession<'_>,
     cfg: &JeffConfig,
@@ -609,25 +610,15 @@ pub fn forward_tenferro_cached(
         let normalized_t = norm::rms_norm(session, &hidden_t, &input_norm, true, cfg.eps as f64)?;
         let normalized = session.transpose(&normalized_t, &[1, 0])?; // [hidden, length]
 
-        let mixed = match &layer.attention {
+        let mixed_t = match &layer.attention {
             AttentionWeights::Full(w) => {
                 full_attention_tenferro(session, cache, w, cfg, &normalized, mask, length)?
             }
             AttentionWeights::Delta { weights, config } => {
-                let normalized_host = extract(session, &normalized, cfg.hidden, length)?;
-                let plan = GatedDeltaPlan::from_config(config, length);
-                gated_delta(
-                    session,
-                    config,
-                    weights,
-                    &normalized_host,
-                    mask,
-                    &plan,
-                    workspace,
-                )?
+                let tensor_weights = prepare_tensor_weights(session, config, weights, cache)?;
+                delta_layer_tenferro_native(session, config, &tensor_weights, &normalized, mask)?
             }
         };
-        let mixed_t = host_to_tensor(session, cfg.hidden, length, &mixed)?;
         let residual = session.add(&hidden, &mixed_t)?;
 
         let post_norm = cache.col(session, vec![cfg.hidden, 1], &layer.post_norm)?;
@@ -783,7 +774,18 @@ mod tests {
                 .with_eager_session(|session| {
                     let x_t = host_to_tensor(session, cfg.hidden, length, &x)?;
                     let mut cache = TensorCache::new();
-                    full_attention_tenferro(session, &mut cache, &w, &cfg, &x_t, &mask, length)
+                    let out = full_attention_tenferro(
+                        session, &mut cache, &w, &cfg, &x_t, &mask, length,
+                    )?;
+                    let host = session.duplicate_value(&out)?;
+                    let values = host.as_slice::<f32>()?;
+                    let mut row_major = vec![0.0f32; cfg.hidden * length];
+                    for col in 0..length {
+                        for row in 0..cfg.hidden {
+                            row_major[row * length + col] = values[row + col * cfg.hidden];
+                        }
+                    }
+                    Ok::<Vec<f32>, tenferro_ad::Error>(row_major)
                 })
                 .unwrap()
                 .unwrap();

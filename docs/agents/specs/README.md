@@ -63,6 +63,11 @@ typed-decision-rs/
 - `docs/17_JEV_CLIENT_DESIGN.md` — design of the independent `jev-client` TypeSafe API client (transport, credentials, limits, validation)
 - `docs/18_IMPLEMENTATION_STATUS.md` — live status of the Rust implementation against the roadmap (completed phases, blockers)
 - `docs/19_TENFERRO_FEEDBACK.md` — tenferro-rs feedback filed as upstream issues
+- `docs/20_MODEL_HUB_FETCH.md` — checkpoint discovery/download (`hf-fetch`)
+- `docs/21_SPEED_COMPARISON.md` — measured Julia vs Rust forward latencies
+- `docs/22_CPU_KERNEL_OPTIMIZATION.md` — host GEMM/BLAS/SIMD analysis
+- `docs/23_TENFERRO_NATIVE.md` — tenferro-native forwarding, weight caching, backend selection
+- `docs/24_EAGER_OP_OVERHEAD.md` — eager op cost breakdown and the compiled (fused) path
 
 ## Recommended first milestone
 

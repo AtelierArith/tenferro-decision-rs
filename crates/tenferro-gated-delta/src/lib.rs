@@ -28,6 +28,8 @@ pub mod ops;
 pub mod plan;
 pub mod recurrent;
 pub mod reference;
+pub mod tensor_layer;
+pub mod traced_layer;
 pub mod workspace;
 
 pub use config::{Algorithm, GatedDeltaConfig};
@@ -37,6 +39,9 @@ pub use layer::{GatedDeltaWeights, delta_layer_reference, delta_layer_tenferro};
 pub use plan::{AlgorithmChoice, BackendCaps, GatedDeltaPlan, resolve_algorithm};
 pub use recurrent::delta_layer_recurrent;
 pub use reference::{DeltaScanInputs, delta_scan_reference};
+pub use tensor_layer::{
+    GatedDeltaTensorWeights, delta_layer_tenferro_native, prepare_tensor_weights,
+};
 pub use workspace::GatedDeltaWorkspace;
 
 use decision_core::{DecisionError, Result};
