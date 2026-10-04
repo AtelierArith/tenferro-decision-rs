@@ -17,6 +17,7 @@ tenferro-infer = { path = "crates/tenferro-infer" }
 tenferro-ext = { path = "crates/tenferro-ext" }
 reference-data = { path = "crates/reference-data" }
 safetensors-io = { path = "crates/safetensors-io" }
+hf-fetch = { path = "crates/hf-fetch" }
 
 # Shared third-party dependencies.
 serde = { version = "1", features = ["derive"] }

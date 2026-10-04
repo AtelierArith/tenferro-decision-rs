@@ -1,0 +1,91 @@
+# Model Hub Fetch
+
+**Status:** implemented  
+**Date:** 2026-10-04  
+**Crate:** `crates/hf-fetch` (binary `hf-fetch`)
+
+`hf-fetch` downloads production checkpoints from the Hugging Face Hub with the
+same cache layout and environment variables as the Julia runtimes
+(`extern/Laya.jl/src/agent.jl`, `extern/JeffClient.jl/src/hub.jl`), so a Rust
+download is interchangeable with a Python/Julia one. It has no dependency on
+tenferro or on the inference crates: it returns a local snapshot directory that
+can be passed to `laya_infer::agent::LayaEngine::load` or
+`jeff_infer::checkpoint::load_checkpoint`.
+
+## Default checkpoints
+
+| Preset | Repository | Revision | Size (weights) |
+|---|---|---|---|
+| `laya` | `convaiinnovations/laya` | `main` | ~843 MB |
+| `jeff` | `mstrasser/Jeff-Qwen3.5-0.8B` | `0f212b3e72acb4dde3f7da61e925d6ab7f819990` | ~1.7 GB |
+
+The Laya default matches `Laya.load`'s default argument; the Jeff default is the
+pin recorded in `extern/JeffClient.jl/docs/src/models.md`.
+
+## Cache and environment
+
+- Snapshot layout: `<cache>/models--<org>--<name>/snapshots/<commit>/…`, with
+  `refs/<revision>` recording the resolved commit.
+- `HF_HUB_CACHE` (highest priority), then `HF_HOME` (uses `$HF_HOME/hub`), then
+  `~/.cache/huggingface/hub`.
+- `HF_ENDPOINT` overrides the endpoint (default `https://huggingface.co`).
+- `HF_TOKEN` is sent as a bearer token for private/gated repositories.
+- `HF_HUB_OFFLINE` (or `--offline`) disables downloading; only cached snapshots
+  are used.
+
+## File selection
+
+Only checkpoint files are fetched; other assets (videos, eval images, further
+checkpoints in sibling subfolders) are skipped. A `CheckpointSpec` combines a
+repository/ref/subfolder with include rules (`Exact`, `Prefix`, `Glob`) and a
+list of `required` files used to decide whether a cached snapshot is complete.
+
+- **Laya**: `model.safetensors`, `rl_agent_config.json`, `encoder/config.json`,
+  `mlx_config.json`, and `tokenizer/` (matching `Laya.jl`'s
+  `CHECKPOINT_FILES`). Required: the first three.
+- **Jeff**: `config.json`, `decision_config.json`, `readout.safetensors`,
+  `tokenizer.json`, `tokenizer_config.json`, `model*.safetensors`, the
+  `model.safetensors.index.json` shard index, and auxiliary files
+  (`chat_template.jinja`, `processor_config.json`, `LICENSE`, `NOTICE`).
+
+Partial downloads never appear inside a snapshot: files are staged in a
+temporary directory under the repository root and moved into place only after a
+complete download.
+
+## CLI
+
+```text
+hf-fetch laya
+hf-fetch jeff --offline
+hf-fetch org/name --revision <sha> \
+    --include 'model*.safetensors' --include '*.json' --required config.json
+```
+
+Options: `--revision <rev>`, `--subfolder <dir>`, `--include <pattern>`
+(repeatable for a generic repository), `--required <file>`, `--offline`,
+`--cache <dir>`, `--endpoint <url>`, `--token <token>`. On success it prints the
+resolved checkpoint directory.
+
+```bash
+DIR=$(cargo run -p hf-fetch --bin hf-fetch -- laya)
+# then, in a program that links laya-infer:
+#   LayaEngine::load(DIR)
+```
+
+## Testing
+
+- Offline unit tests cover global matching, preset file selection, cache-dir
+  precedence, unsafe-path/repository rejection, and percent-encoding.
+- An integration test spins up a local HTTP server (including an HTTP 302
+  redirect, as Hugging Face uses for LFS) and exercises the real download path,
+  the snapshot layout, `refs/<revision>`, subfolder scoping, and offline reuse.
+  No network is required in CI.
+
+## Not done
+
+- Convenience `load_from_hub` constructors behind an opt-in feature; the CLI
+  already feeds the existing `load(dir)` entry points.
+- Private/gated repositories are supported via `HF_TOKEN` but are not exercised
+  by tests.
+- Progress reporting / resumable downloads (the Julia runtimes re-download from
+  scratch, and so does this crate).

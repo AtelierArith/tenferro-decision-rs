@@ -62,6 +62,26 @@ Still deferred: HTTP-date `Retry-After`, an injectable monotonic clock, a
 `zeroize`-backed secret, and OS-trust-store roots (the `http` feature uses
 bundled webpki roots).
 
+### Model acquisition — `hf-fetch`
+
+- `crates/hf-fetch` downloads production checkpoints from the Hugging Face Hub
+  with the Julia-compatible cache layout (`models--<org>--<name>/snapshots/
+  <commit>`, `refs/<revision>`) and environment variables (`HF_HUB_CACHE`,
+  `HF_HOME`, `HF_ENDPOINT`, `HF_TOKEN`, `HF_HUB_OFFLINE`).
+- Presets: `laya` → `convaiinnovations/laya`@`main` (matching `Laya.load`);
+  `jeff` → `mstrasser/Jeff-Qwen3.5-0.8B`@`0f212b3e72acb4dde3f7da61e925d6ab7f819990`
+  (the pin in `extern/JeffClient.jl/docs/src/models.md`). `CheckpointSpec`
+  selects only the checkpoint files, with `Exact`/`Prefix`/`Glob` rules and a
+  `required` completeness check. Downloads stage into a temp dir and move into
+  the snapshot atomically.
+- `hf-fetch` is a separate crate with no tenferro dependency; it returns a
+  local snapshot directory for `LayaEngine::load` / `load_checkpoint`.
+- CLI `hf-fetch <preset|org/name> [--revision …] [--subfolder …] [--offline] …`
+  prints the resolved directory.
+- Tests: offline unit tests plus a local-HTTP-server integration test (including
+  an LFS-style 302 redirect) covering download, layout, `refs`, subfolders, and
+  offline reuse. Design: `20_MODEL_HUB_FETCH.md`.
+
 ## In progress (checkpoint-independent groundwork)
 
 ### Phase 2 — `laya-infer`
@@ -184,6 +204,7 @@ bundled webpki roots).
 ## Verification snapshot
 
 - `cargo test --workspace`: decision-core 20, reference-data 4, tenferro-infer 13,
-  tenferro-ext 2, laya-infer 44, jeff-infer 33, tenferro-gated-delta 19,
-  jev-client 49 (58 with `--features http`), bench-suite 1.
+  tenferro-ext 2, hf-fetch 9, laya-infer 44, jeff-infer 33,
+  tenferro-gated-delta 19, jev-client 49 (58 with `--features http`),
+  bench-suite 1 (194 total).
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean.
