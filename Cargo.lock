@@ -1084,6 +1084,10 @@ version = "0.1.0"
 dependencies = [
  "decision-core",
  "serde_json",
+ "tenferro-ad",
+ "tenferro-cpu",
+ "tenferro-infer",
+ "tenferro-tensor",
 ]
 
 [[package]]

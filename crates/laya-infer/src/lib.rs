@@ -17,6 +17,7 @@
 
 pub mod calibration;
 pub mod config;
+pub mod model;
 pub mod prompt;
 
 /// Re-export the shared decision types this crate produces.

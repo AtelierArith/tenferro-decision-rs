@@ -11,3 +11,9 @@ authors.workspace = true
 [dependencies]
 decision-core.workspace = true
 serde_json.workspace = true
+tenferro-ad.workspace = true
+tenferro-tensor.workspace = true
+tenferro-infer.workspace = true
+
+[dev-dependencies]
+tenferro-cpu.workspace = true
