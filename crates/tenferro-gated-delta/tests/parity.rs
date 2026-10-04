@@ -43,12 +43,13 @@ fn make_case(key_dim: usize, value_dim: usize, length: usize, seed: u64) -> Case
     let mut k = (0..key_dim * length)
         .map(|_| rng.range(-1.0, 1.0))
         .collect::<Vec<_>>();
-    // L2-normalize each key/query column, then scale q by sqrt(key_dim).
+    // L2-normalize each key/query column; scale q by 1/sqrt(key_dim), matching
+    // the reference (`query ./= sqrt(sum + eps) .* sqrt(key_dim)`).
     for t in 0..length {
         let mut qcol: Vec<f32> = (0..key_dim).map(|d| q[d * length + t]).collect();
         tenferro_gated_delta::ops::l2_normalize(&mut qcol, 1e-6);
         for d in 0..key_dim {
-            q[d * length + t] = qcol[d] * (key_dim as f32).sqrt();
+            q[d * length + t] = qcol[d] / (key_dim as f32).sqrt();
         }
         let mut kcol: Vec<f32> = (0..key_dim).map(|d| k[d * length + t]).collect();
         tenferro_gated_delta::ops::l2_normalize(&mut kcol, 1e-6);
@@ -130,6 +131,18 @@ fn chunked_matches_reference_single_token() {
     let case = make_case(2, 4, 1, 3);
     compare(&case, 1, 1e-4);
     compare(&case, 64, 1e-4);
+}
+
+#[test]
+fn chunked_matches_reference_with_large_decay_across_boundary() {
+    // Strongly negative decay, as in the Qwen3.5 checkpoint. The chunk decay
+    // sum underflows to zero over a 64-token chunk; the state update must still
+    // use the host cumulative values (regression for the `exp(sum).ln()` path).
+    let mut case = make_case(2, 2, 66, 11);
+    for (index, value) in case.decay.iter_mut().enumerate() {
+        *value = -1.5 - 8.0 * ((index % 3) as f32);
+    }
+    compare(&case, 64, 2e-3);
 }
 
 #[test]

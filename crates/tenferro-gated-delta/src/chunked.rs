@@ -99,9 +99,15 @@ pub fn delta_scan_chunked(
         let result = session.add(&state_q, &correction_intra)?;
 
         // state update.
-        let final_decay = inputs.decay[start..end].iter().sum::<f32>().exp();
+        //
+        // `tail[j] = exp(cumsum_last - cumsum_j)` from the host cumulative
+        // values. Do **not** route this through `exp(sum).ln()`: a strongly
+        // negative decay sum (e.g. ~-600 over a 64-token chunk) underflows the
+        // chunk decay to zero, and `ln(0) = -inf` would zero the state update.
+        let cumulative_last = inputs.decay[start..end].iter().sum::<f32>();
+        let final_decay = cumulative_last.exp();
         let tail: Vec<f32> = (0..n)
-            .map(|j| (final_decay.ln() - cumulative_host(inputs, start, j)).exp())
+            .map(|j| (cumulative_last - cumulative_host(inputs, start, j)).exp())
             .collect();
         let tail = constant(session, &[n], &tail)?;
         let ending_keys = session.mul(&kc, &tail)?;

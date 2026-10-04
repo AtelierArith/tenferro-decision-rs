@@ -1,8 +1,8 @@
 //! Host recurrent Gated DeltaNet reference (one value head at a time).
 //!
 //! Follows `12_TENFERRO_GATED_DELTA.md` §6 and the Julia reference. Inputs are
-//! already prepared: `q` is L2-normalized and scaled by `sqrt(key_dim)`, `k` is
-//! L2-normalized. Layouts are row-major `(d, length)`.
+//! already prepared: `q` is L2-normalized and scaled by `1 / sqrt(key_dim)`,
+//! `k` is L2-normalized. Layouts are row-major `(d, length)`.
 
 use crate::ops::{rms_noncentered, silu};
 

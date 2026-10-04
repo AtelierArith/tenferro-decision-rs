@@ -177,7 +177,7 @@ Precompute (per `09_JEFFCLIENT_ANALYSIS.md` §7.1):
 ```text
 masked = x * mask
 mixed  = SiLU(causal_depthwise(qkv^T masked))
-q = L2norm(mixed[0 : key_width]) * sqrt(key_dim)      # key_width = key_dim*key_heads
+q = L2norm(mixed[0 : key_width]) / sqrt(key_dim)      # key_width = key_dim*key_heads
 k = L2norm(mixed[key_width : 2*key_width])
 v = mixed[2*key_width : end]                          # value_dim*value_heads
 z = SiLU(z^T masked)                                  # value gate
@@ -372,8 +372,10 @@ The causal depthwise convolution may be a second extension op
 - `exp`/`softplus`/`sigmoid` must follow the reference definitions
   (`softplus(x) = max(x,0) + log1p(exp(-|x|))`) to keep parity at extremes.
 - `rms_noncentered` uses `eps` inside the square root and no `1 + w` term.
-- Q uses `eps = 1e-6` for L2 normalization and scales by `sqrt(key_dim)`;
-  K uses `eps = 1e-6` with no scale.
+- Q uses `eps = 1e-6` for L2 normalization and scales by `1 / sqrt(key_dim)`
+  (the reference divides; the sign of this factor only shows through the
+  output-RMSNorm `eps`, but it is load-bearing for fixture parity); K uses
+  `eps = 1e-6` with no scale.
 - Algorithm choice MUST NOT change semantic output beyond tolerance; any
   divergence is a bug, not an acceptable approximation.
 

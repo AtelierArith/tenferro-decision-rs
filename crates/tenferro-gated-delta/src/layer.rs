@@ -138,14 +138,18 @@ fn build_head_inputs(
             k[row * length + t] = mixed[(k_offset + row) * length + t];
         }
     }
-    let scale = (kd as f32).sqrt();
+    // The reference L2-normalizes `q` and scales it by `1 / sqrt(key_dim)`
+    // (`query ./= sqrt(sum + eps) .* sqrt(key_dim)` in the Julia reference and
+    // HF Qwen3.5), and L2-normalizes `k`. Keep the same orientation so the
+    // epsilon in the output RMSNorm matches the reference bit for bit.
+    let inv_scale = 1.0 / (kd as f32).sqrt();
     for t in 0..length {
         let mut qcol: Vec<f32> = (0..kd).map(|d| q[d * length + t]).collect();
         l2_normalize(&mut qcol, 1e-6);
         let mut kcol: Vec<f32> = (0..kd).map(|d| k[d * length + t]).collect();
         l2_normalize(&mut kcol, 1e-6);
         for d in 0..kd {
-            q[d * length + t] = qcol[d] * scale;
+            q[d * length + t] = qcol[d] * inv_scale;
             k[d * length + t] = kcol[d];
         }
     }
