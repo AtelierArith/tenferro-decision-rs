@@ -11,6 +11,7 @@
 //! It is numerically equivalent to [`crate::delta_layer_reference`] and is
 //! cross-checked against it.
 
+use pulp::{Simd, WithSimd};
 use rayon::prelude::*;
 
 use crate::config::GatedDeltaConfig;
@@ -142,6 +143,7 @@ pub fn delta_layer_recurrent_slices<'a>(
     // own `HeadScratch`.
     ws.heads.resize_with(cfg.value_heads, HeadScratch::default);
     let inv_scale = 1.0 / (kd as f32).sqrt();
+    let arch = pulp::Arch::new();
     {
         let mixed = &ws.mixed;
         let z_proj = &ws.z_proj;
@@ -149,7 +151,7 @@ pub fn delta_layer_recurrent_slices<'a>(
         let decay = &ws.decay;
         ws.heads.par_iter_mut().enumerate().for_each(|(head, s)| {
             scan_head(
-                cfg, weights, mixed, z_proj, beta, decay, length, head, inv_scale, s,
+                cfg, weights, mixed, z_proj, beta, decay, length, head, inv_scale, s, arch,
             );
         });
     }
@@ -193,6 +195,7 @@ fn scan_head(
     head: usize,
     inv_scale: f32,
     s: &mut HeadScratch,
+    arch: pulp::Arch,
 ) {
     let kd = cfg.key_dim;
     let vd = cfg.value_dim;
@@ -253,16 +256,77 @@ fn scan_head(
     s.result.resize(vd, 0.0);
     s.state.iter_mut().for_each(|value| *value = 0.0);
 
-    {
-        let state = &mut s.state;
-        let prediction = &mut s.prediction;
-        let correction = &mut s.correction;
-        let result = &mut s.result;
-        let k = &s.k;
-        let q = &s.q;
-        let v_act = &s.v;
-        let z_act = &s.z;
-        let output = &mut s.output;
+    arch.dispatch(ScanOp {
+        state: &mut s.state,
+        k: &s.k,
+        q: &s.q,
+        v_act: &s.v,
+        z_act: &s.z,
+        prediction: &mut s.prediction,
+        correction: &mut s.correction,
+        result: &mut s.result,
+        output: &mut s.output,
+        decay,
+        beta,
+        norm: weights.norm,
+        head,
+        kd,
+        vd,
+        length,
+        eps: cfg.eps,
+    });
+}
+
+/// The per-head recurrent token loop, written once and dispatched through
+/// `pulp` so a baseline-compiled binary still uses AVX2/FMA (or whatever the
+/// CPU supports) instead of relying on autovectorization.
+///
+/// The heavy inner loops (`S·k`, the fused `S ← factor·S + correction·kᵀ` /
+/// `result = S·q`) run on the contiguous value axis; the per-token correction
+/// gather and the strided output epilogue stay scalar.
+struct ScanOp<'a> {
+    state: &'a mut [f32],
+    k: &'a [f32],
+    q: &'a [f32],
+    v_act: &'a [f32],
+    z_act: &'a [f32],
+    prediction: &'a mut [f32],
+    correction: &'a mut [f32],
+    result: &'a mut [f32],
+    output: &'a mut [f32],
+    decay: &'a [f32],
+    beta: &'a [f32],
+    norm: &'a [f32],
+    head: usize,
+    kd: usize,
+    vd: usize,
+    length: usize,
+    eps: f32,
+}
+
+impl WithSimd for ScanOp<'_> {
+    type Output = ();
+
+    fn with_simd<S: Simd>(self, simd: S) {
+        let ScanOp {
+            state,
+            k,
+            q,
+            v_act,
+            z_act,
+            prediction,
+            correction,
+            result,
+            output,
+            decay,
+            beta,
+            norm,
+            head,
+            kd,
+            vd,
+            length,
+            eps,
+        } = self;
 
         for t in 0..length {
             let factor = decay[head * length + t].exp();
@@ -270,10 +334,16 @@ fn scan_head(
 
             // prediction = S · k.
             prediction.iter_mut().for_each(|value| *value = 0.0);
-            for (d, row) in state.chunks_exact(vd).enumerate() {
+            for d in 0..kd {
                 let key = k[d * length + t];
-                for (prediction, state) in prediction.iter_mut().zip(row) {
-                    *prediction += state * key;
+                let keys = simd.splat_f32s(key);
+                let (row, row_tail) = S::as_simd_f32s(&state[d * vd..d * vd + vd]);
+                let (pred, pred_tail) = S::as_mut_simd_f32s(prediction);
+                for (p, s) in pred.iter_mut().zip(row.iter()) {
+                    *p = simd.mul_add_f32s(keys, *s, *p);
+                }
+                for (p, s) in pred_tail.iter_mut().zip(row_tail.iter()) {
+                    *p += *s * key;
                 }
             }
             for (v, corr) in correction.iter_mut().enumerate() {
@@ -282,17 +352,32 @@ fn scan_head(
 
             // Fused update and readout: S ← factor·S + correction·kᵀ, result = S·q.
             result.iter_mut().for_each(|value| *value = 0.0);
-            for (d, row) in state.chunks_exact_mut(vd).enumerate() {
+            let factors = simd.splat_f32s(factor);
+            for d in 0..kd {
                 let key = k[d * length + t];
                 let query = q[d * length + t];
-                for (v, cell) in row.iter_mut().enumerate() {
-                    let updated = factor * (*cell) + correction[v] * key;
+                let keys = simd.splat_f32s(key);
+                let queries = simd.splat_f32s(query);
+                let (row, row_tail) = S::as_mut_simd_f32s(&mut state[d * vd..d * vd + vd]);
+                let (corr, corr_tail) = S::as_simd_f32s(correction);
+                let (res, res_tail) = S::as_mut_simd_f32s(result);
+                for ((cell, c), r) in row.iter_mut().zip(corr.iter()).zip(res.iter_mut()) {
+                    let updated = simd.mul_add_f32s(keys, *c, simd.mul_f32s(factors, *cell));
                     *cell = updated;
-                    result[v] += updated * query;
+                    *r = simd.mul_add_f32s(queries, updated, *r);
+                }
+                for ((cell, c), r) in row_tail
+                    .iter_mut()
+                    .zip(corr_tail.iter())
+                    .zip(res_tail.iter_mut())
+                {
+                    let updated = factor * (*cell) + *c * key;
+                    *cell = updated;
+                    *r += updated * query;
                 }
             }
 
-            rms_noncentered_in_place(result, weights.norm, cfg.eps);
+            rms_noncentered_in_place(result, norm, eps);
             for v in 0..vd {
                 output[v * length + t] = result[v] * silu(z_act[v * length + t]);
             }

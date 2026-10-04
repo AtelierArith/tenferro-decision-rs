@@ -11,6 +11,7 @@ authors.workspace = true
 [dependencies]
 decision-core.workspace = true
 cpu-kernels.workspace = true
+pulp.workspace = true
 rayon.workspace = true
 tenferro-ad.workspace = true
 tenferro-runtime.workspace = true

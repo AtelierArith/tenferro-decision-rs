@@ -54,17 +54,17 @@ which is why the host path is much faster than earlier tables.
 | Laya | L64 B1 | 213.0 ms | 428.3 ms | — | 2.01× | — |
 | Laya | L8 B8 | 211.9 ms | 279.6 ms | — | 1.32× | — |
 | Laya | model load | 1516 ms | 6463 ms | — | 4.26× | — |
-| Jeff | L8 | 137.5 ms (`-t 8`) | 171.2 ms | 337.5 ms | 1.24× | 2.45× |
-| Jeff | L16 | 143.3 ms | 178.9 ms | — | 1.25× | — |
-| Jeff | L64 | 238.3 ms | 347.4 ms | ~469 ms | 1.46× | 1.97× |
+| Jeff | L8 | 137.5 ms (`-t 8`) | 156.0 ms | 262.7 ms | 1.13× | 1.91× |
+| Jeff | L16 | 143.3 ms | 164.0 ms | 311.0 ms | 1.14× | 2.17× |
+| Jeff | L64 | 238.3 ms | 280.4 ms | 412.8 ms | 1.18× | 1.73× |
 | Jeff | model load | 5495 ms | 4369 ms | — | **0.79×** | — |
 
 - Laya's Rust best is the cached tenferro path at L8B1 and the Accelerate host
   elsewhere; the Laya host was not further optimized.
 - Jeff's Rust best is `host_opt` (the optimized host forward). It is within
-  ~1.24× (L8) of Julia's best and ~1.46× at L64. The tenferro
-  (host-recurrent DeltaNet) path is ~2.0–2.5× at L8 and roughly host-parity at
-  L64.
+  ~1.13× (L8) of Julia's best and ~1.18× at L64 (the DeltaNet scan runs through
+  `pulp`, runtime-dispatched SIMD). The tenferro (host-recurrent DeltaNet) path
+  shares the improved kernels and is ~1.7–2.2×.
 - The gap grows with length: the DeltaNet recurrent scan and the elementwise /
   normalization work dominate at L64.
 - Rust loads Jeff faster than Julia and Laya slower. Host numbers vary ~±20%
@@ -104,9 +104,9 @@ Warmup 3, 15 iterations, min.
 
 | shape | Julia (-t 8) | Rust oracle `forward_reference` | Rust `host_opt` | host_opt / Julia |
 |---|---|---|---|---|
-| L8 | 137.5 ms | 161.7 ms (1.18×) | 171.2 ms | 1.24× |
-| L16 | 143.3 ms | 184.4 ms (1.29×) | 178.9 ms | 1.25× |
-| L64 | 238.3 ms | 466.3 ms (1.96×) | 347.4 ms | 1.46× |
+| L8 | 137.5 ms | 146.8 ms (1.07×) | 156.0 ms | 1.13× |
+| L16 | 143.3 ms | 165.9 ms (1.16×) | 164.0 ms | 1.14× |
+| L64 | 238.3 ms | 405.9 ms (1.70×) | 280.4 ms | **1.18×** |
 | model load | 5495 ms | 4369 ms | — | — |
 
 - Julia's fastest configuration is `-t 8` (task-parallel, BLAS=1); the default
@@ -114,19 +114,16 @@ Warmup 3, 15 iterations, min.
 - The Rust host uses Accelerate for its GEMMs. `forward_reference` is the
   correctness oracle and is not optimized; `host_opt`
   (`JeffBackend::HostOpt`, `22_CPU_KERNEL_OPTIMIZATION.md`) is the optimized host
-  path. The two reach parity at L8/L16 (the rayon fan-out offsets the elementwise
-  win at short length) and `host_opt` is ~1.34× faster at L64.
-- Against Julia's best, the optimized host path is ~1.24× (L8) / 1.25× (L16) /
-  1.46× (L64).
+  path. It reaches near-parity at L8/L16 and is ~1.45× faster than the oracle at
+  L64. The DeltaNet scan runs through `pulp` (runtime-dispatched SIMD), which is
+  the main reason `host_opt` is now within ~1.2× of Julia (was ~1.5×).
+- Against Julia's best, the optimized host path is ~1.13× (L8) / 1.14× (L16) /
+  1.18× (L64).
 - The tenferro path runs the fused host recurrent DeltaNet via the `GatedDelta`
-  extension op (`DeltaKernel::HostRecurrent`, the default). `bench_tenferro_kernels`
-  (same run, best-of-15): at L8 host 164 ms / `HostRecurrent` 293 ms (1.79×); at
-  L64 `HostRecurrent` ~469 ms, ahead of the (noisy) host measurement in that run.
-  `TensorNative` (tensor-only, for portability) is ~1.2–1.8× slower than
-  `HostRecurrent`. See `22_CPU_KERNEL_OPTIMIZATION.md` for the remaining
-  tenferro-internal gap ([#1995](https://github.com/tensor4all/tenferro-rs/issues/1995)).
-- The gap grows with length: the Gated DeltaNet recurrent scan and the
-  elementwise/normalization work dominate at L64.
+  extension op (`DeltaKernel::HostRecurrent`, the default). It shares the
+  improved host kernels, so it is faster than the earlier tables; `TensorNative`
+  (tensor-only, for portability) remains ~1.2–1.8× slower. See
+  `22_CPU_KERNEL_OPTIMIZATION.md`.
 - Rust model loading is ~1.3× faster than Julia for Jeff.
 - `forward_tenferro` is rebuilt from tenferro ops with a reused `TensorCache`.
   `JeffEngine` defaults to `JeffBackend::Auto`, which picks `host_opt` for

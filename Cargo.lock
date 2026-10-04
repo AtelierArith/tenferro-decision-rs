@@ -2106,6 +2106,7 @@ version = "0.1.0"
 dependencies = [
  "cpu-kernels",
  "decision-core",
+ "pulp",
  "rayon",
  "tenferro-ad",
  "tenferro-cpu",

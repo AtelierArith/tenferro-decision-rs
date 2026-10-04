@@ -30,6 +30,8 @@ regex = "1"
 unicode-normalization = "0.1"
 # Portable, hand-tuned f32 GEMM for the host (non-tenferro) CPU kernels.
 matrixmultiply = "0.3"
+# Runtime-dispatched portable SIMD (used by the Gated DeltaNet host scan).
+pulp = "0.22"
 rayon = "1"
 # `jev-client`'s optional concrete HTTP/TLS transport. `rustls-tls` avoids
 # native OpenSSL; `blocking` matches the crate's synchronous transport trait.

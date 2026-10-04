@@ -105,6 +105,30 @@ least 16 tokens, the oracle below (the crossover measured on the production
 checkpoint, where the rayon fan-out does not pay off yet). `Host`, `HostOpt`,
 and `Tenferro` remain selectable.
 
+### Explicit SIMD via `pulp` (the largest recent win)
+
+Autovectorization did not fire for the DeltaNet scan's inner axpy loops (they
+compiled to scalar `mulss`/`addss`), and `-C target-cpu=native` did not help
+because the model build targets baseline x86-64. The scan token loop is now
+dispatched through **`pulp`** (`recurrent.rs::ScanOp`), which emits
+AVX2/FMA kernels and selects them at runtime via `Arch::new().dispatch(...)`, so
+a baseline-compiled binary still gets SIMD. `pulp` was already in the tree (via
+`faer`). Its isolated effect on the scan token loop is **1.83×**
+(0.344 → 0.188 ms/head, best-of-200).
+
+Whole-model effect (production Jeff, `RAYON_NUM_THREADS=8`, best-of-15):
+
+| length | oracle | `host_opt` | host_opt/Julia | Julia best |
+|---:|---:|---:|---:|---:|
+| 8 | 146.8 ms | 156.0 ms | 1.13× | 137.5 ms |
+| 16 | 165.9 ms | 164.0 ms | 1.14× | 143.3 ms |
+| 64 | 405.9 ms | **280.4 ms** | **1.18×** | 238.3 ms |
+
+The L64 delta layer dropped from 11.6 ms to **8.5 ms**; `host_opt` went from
+~1.47× to ~1.18× behind Julia. The explicit-SIMD lesson generalizes: the
+elementwise/normalization passes remain candidates, but the scan was the
+compute-bound one.
+
 ## A. GEMM (BLAS-class) candidates
 
 | location | operation | notes |
