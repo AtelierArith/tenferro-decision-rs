@@ -15,6 +15,7 @@
 //! fixture) to validate against the reference, per
 //! `docs/agents/specs/docs/06_ROADMAP.md` Phase 2.
 
+pub mod agent;
 pub mod calibration;
 pub mod checkpoint;
 pub mod config;
@@ -27,13 +28,16 @@ pub use decision_core;
 
 /// Common imports.
 pub mod prelude {
+    pub use crate::agent::LayaEngine;
     pub use crate::calibration::{
         action_probability, choice_answer, clamp_temperature, confidence_from_probs, noul_answer,
         round4, score_answer, softmax, temp_bucket, Calibration, LayaDecision, QType,
     };
+    pub use crate::checkpoint::{load_checkpoint, LayaCheckpoint};
     pub use crate::config::{AgentConfig, EncoderConfig, LayerKind};
     pub use crate::prompt::{
         build_prefix, build_sequence, py_float, py_json_content, render_criterion, render_options,
         serialize_state, Tokenizer,
     };
+    pub use crate::tokenizer::BpeTokenizer;
 }

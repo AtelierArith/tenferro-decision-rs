@@ -14,6 +14,8 @@ Updated as work lands.
   `471c4278dbc5a955b8a1664789c37e5d07e743cb` (the crates.io `0.7.1` release
   differs in the session-entry API).
 - `reference-data` fixture format + loader; `fixtures/`.
+- `safetensors-io`: a shared, dependency-light safetensors reader
+  (`F32`/`F64`/`F16`/`BF16`) used by both engines' checkpoint loaders.
 - `bench-suite` criterion skeleton with build/machine metadata capture.
 - CI: `cargo fmt --check`, `cargo clippy --workspace --all-targets -D warnings`,
   `cargo test --workspace`, and the `decision-core` `serde` feature.
@@ -69,15 +71,28 @@ bundled webpki roots).
 - `model`: the ModernBERT encoder + decision head — embedding + `embed_norm`,
   per-layer `attn_norm`, fused-QKV split, non-traditional RoPE with per-kind
   base, full/sliding masks with padded-query handling, GeGLU MLP, `final_norm`;
-  the typed head (no RoPE, ReLU MLP), marker gather/clamp, scorer softmax,
-  top-1/top-2/entropy pooling, and the action head. Both a host
-  `forward_encoder_reference` / `forward_reference` and a tenferro
+  the typed head (no RoPE, ReLU MLP), marker gather/clamp, scorer (`d→d` then
+  `d→1` with GELU), top-1/top-2/entropy pooling, and the action head. Both a
+  host `forward_encoder_reference` / `forward_reference` and a tenferro
   `forward_encoder_tenferro` / `forward_tenferro` are provided, with synthetic
   parity tests. The forward uses the tanh GELU on both sides so they can be
   compared; an `exact_gelu` / `erf` port of `mlx_erf` is included for the
   eventual exact path.
-- Remaining: concrete tokenizer (byte-level / Metaspace BPE), safetensors
-  loading, `DecisionEngine` wiring, plans/workspaces.
+- `checkpoint`: loads `encoder/config.json` + `rl_agent_config.json` +
+  `model.safetensors` into `LayaWeights` (name sanitizing, config-driven bias
+  handling, strict consumption) via the shared `safetensors-io` reader.
+- `tokenizer`: a concrete Hugging Face `tokenizer.json` encoder
+  (`BpeTokenizer`) implementing the `prompt::Tokenizer` trait — added-token
+  extraction, NFC/NFD/NFKC/NFKD + Lowercase/Replace/Prepend normalizers,
+  ByteLevel (GPT-2 regex, hand-written scanner) / Metaspace / Whitespace
+  pre-tokenizers, and BPE / WordLevel models with byte fallback and `fuse_unk`;
+  validated against Julia-generated goldens.
+- `agent`: `LayaEngine`, the `DecisionEngine` impl — text/JSON state →
+  tokenizer + `build_sequence` markers → forward → calibration → typed answers,
+  plus the action probability (`decide`). `load(dir)` wires checkpoint +
+  tokenizer + calibration.
+- Remaining: parity against a real Laya checkpoint (needs tokenizer/weights
+  assets), exact erf GELU, plans/workspaces.
 
 ### Phase 5 — `jeff-infer`
 
@@ -88,17 +103,20 @@ bundled webpki roots).
   mask, output projection) or Gated DeltaNet (`tenferro-gated-delta`), the
   SiLU-gated MLP, the final last-position RMSNorm, and the readout. Both a host
   `forward_reference` and a tenferro `forward_tenferro` are provided.
-- `checkpoint`: a self-contained safetensors reader (no added dependency;
-  `F32`/`F64`/`F16`/`BF16`) and a strict loader that maps `language_model.*`
-  tensors plus `readout.safetensors` into `JeffWeights` — interleaved per-head
-  `[query, gate]` split of the fused `q_proj`, consecutive GQA expansion,
-  `a_decay = -exp(A_log)`, and the `(channels, 1, taps)` convolution layout.
+- `checkpoint`: loads `config.json` + `decision_config.json` +
+  `model.safetensors` + `readout.safetensors` into `JeffWeights` via the shared
+  `safetensors-io` reader — interleaved per-head `[query, gate]` split of the
+  fused `q_proj`, consecutive GQA expansion, `a_decay = -exp(A_log)`, and the
+  `(channels, 1, taps)` convolution layout.
+- `engine`: `JeffEngine`, the prepared-token `DecisionEngine` — leading-padding
+  trim + per-row `forward_reference` → readout → typed answers, with row `i`
+  answering question `i`.
 - Real-fixture parity: against the `extern/JeffClient.jl` synthetic Qwen3.5
   fixture (lengths 1/3/63/64/65, batch 2, left padding), `forward_reference`
   matches the independent PyTorch logits to below `1e-4` (observed ~`5e-7`) and
   `forward_tenferro` to below `1e-3`. The tests skip when the fixture submodule
   is absent.
-- Remaining: tokenizer, prepared-token `DecisionEngine` wiring, plans/workspaces.
+- Remaining: tokenizer, plans/workspaces.
 
 ### Phase 6 — `tenferro-gated-delta`
 
@@ -139,6 +157,6 @@ bundled webpki roots).
 ## Verification snapshot
 
 - `cargo test --workspace`: decision-core 20, reference-data 4, tenferro-infer 13,
-  laya-infer 27, jeff-infer 24, tenferro-gated-delta 10, jev-client 49
+  laya-infer 41, jeff-infer 31, tenferro-gated-delta 10, jev-client 49
   (58 with `--features http`), bench-suite 1.
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean.
