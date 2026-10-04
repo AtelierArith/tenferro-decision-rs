@@ -111,21 +111,25 @@ bundled webpki roots).
   attention (GQA-expanded, split `q`/gate, Q/K RMSNorm, partial RoPE, causal
   mask, output projection) or Gated DeltaNet (`tenferro-gated-delta`), the
   SiLU-gated MLP, the final last-position RMSNorm, and the readout. Both a host
-  `forward_reference` and a tenferro `forward_tenferro` are provided.
+  `forward_reference` and a tenferro `forward_tenferro` are provided. The host
+  forward runs DeltaNet through the fused recurrent kernel; the tenferro forward
+  dispatches each DeltaNet layer through the plan-based `gated_delta` entry.
+  `_with` variants take a reusable `GatedDeltaWorkspace`; the engine reuses one
+  across rows.
 - `checkpoint`: loads `config.json` + `decision_config.json` +
   `model.safetensors` + `readout.safetensors` into `JeffWeights` via the shared
   `safetensors-io` reader — interleaved per-head `[query, gate]` split of the
   fused `q_proj`, consecutive GQA expansion, `a_decay = -exp(A_log)`, and the
   `(channels, 1, taps)` convolution layout.
 - `engine`: `JeffEngine`, the prepared-token `DecisionEngine` — leading-padding
-  trim + per-row `forward_reference` → readout → typed answers, with row `i`
-  answering question `i`.
+  trim + per-row `forward_reference_with` (shared workspace) → readout → typed
+  answers, with row `i` answering question `i`.
 - Real-fixture parity: against the `extern/JeffClient.jl` synthetic Qwen3.5
   fixture (lengths 1/3/63/64/65, batch 2, left padding), `forward_reference`
-  matches the independent PyTorch logits to below `1e-4` (observed ~`5e-7`) and
-  `forward_tenferro` to below `1e-3`. The tests skip when the fixture submodule
-  is absent.
-- Remaining: tokenizer, plans/workspaces.
+  matches the independent PyTorch logits to below `1e-4` (observed worst
+  `5.4e-7`) and `forward_tenferro` to below `1e-3` (observed worst `3.0e-7`).
+  The tests skip when the fixture submodule is absent.
+- Remaining: natural-language tokenizer.
 
 ### Phase 6 — `tenferro-gated-delta`
 
@@ -180,6 +184,6 @@ bundled webpki roots).
 ## Verification snapshot
 
 - `cargo test --workspace`: decision-core 20, reference-data 4, tenferro-infer 13,
-  tenferro-ext 2, laya-infer 44, jeff-infer 31, tenferro-gated-delta 19,
+  tenferro-ext 2, laya-infer 44, jeff-infer 33, tenferro-gated-delta 19,
   jev-client 49 (58 with `--features http`), bench-suite 1.
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean.

@@ -2,8 +2,8 @@
 //!
 //! This is the first engine seam for `jeff-infer`: it accepts
 //! [`State::Prepared`] tokens only, runs the host reference forward
-//! ([`forward_reference`]) once per row, and turns the readout logits into
-//! typed answers with [`crate::readout`].
+//! ([`forward_reference_with`]) once per row through a workspace reused across
+//! rows, and turns the readout logits into typed answers with [`crate::readout`].
 //!
 //! Row `i` of the prepared state answers question `i`, so the batch and the
 //! [`QuestionSet`] must have the same length. Each question selects its own
@@ -17,12 +17,15 @@
 //! yet; the initial engine rejects them (`docs/agents/specs/docs/14_JEFF_INFER_DESIGN.md`
 //! §9).
 
+use std::cell::RefCell;
+
 use decision_core::{
     Answer, DecisionEngine, DecisionError, PreparedState, Question, QuestionSet, Result, State,
 };
+use tenferro_gated_delta::GatedDeltaWorkspace;
 
 use crate::config::DecisionConfig;
-use crate::model::{forward_reference, JeffConfig, JeffWeights};
+use crate::model::{forward_reference_with, JeffConfig, JeffWeights};
 use crate::readout::{choice_answer, noul_answer, score_answer};
 
 /// A prepared-token Jeff engine: dimensions, decision settings, and weights.
@@ -31,6 +34,9 @@ pub struct JeffEngine {
     config: JeffConfig,
     decision: DecisionConfig,
     weights: JeffWeights,
+    /// DeltaNet scratch reused across rows (`RefCell` keeps `logits` a `&self`
+    /// method).
+    workspace: RefCell<GatedDeltaWorkspace>,
 }
 
 impl JeffEngine {
@@ -54,6 +60,7 @@ impl JeffEngine {
             config,
             decision,
             weights,
+            workspace: RefCell::new(GatedDeltaWorkspace::new()),
         })
     }
 
@@ -100,7 +107,8 @@ impl JeffEngine {
             .iter()
             .map(|active| if *active { 1.0 } else { 0.0 })
             .collect();
-        forward_reference(&self.config, &self.weights, ids, &mask)
+        let mut workspace = self.workspace.borrow_mut();
+        forward_reference_with(&mut workspace, &self.config, &self.weights, ids, &mask)
     }
 
     /// How many readout columns a question consumes.

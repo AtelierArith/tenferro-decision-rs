@@ -3,12 +3,12 @@
 //! containing both a Gated DeltaNet layer and a full-attention layer.
 
 use jeff_infer::model::{
-    forward_reference, forward_tenferro, AttentionWeights, FullAttentionWeights, JeffConfig,
-    JeffWeights, LayerWeights, MlpWeights,
+    forward_reference, forward_reference_with, forward_tenferro, forward_tenferro_with,
+    AttentionWeights, FullAttentionWeights, JeffConfig, JeffWeights, LayerWeights, MlpWeights,
 };
 use tenferro_ad::EagerRuntime;
 use tenferro_cpu::CpuBackend;
-use tenferro_gated_delta::{Algorithm, GatedDeltaConfig, GatedDeltaWeights};
+use tenferro_gated_delta::{Algorithm, GatedDeltaConfig, GatedDeltaWeights, GatedDeltaWorkspace};
 
 struct Lcg(u64);
 
@@ -187,4 +187,44 @@ fn reference_is_deterministic() {
     let a = forward_reference(&cfg, &weights, &ids, &mask).unwrap();
     let b = forward_reference(&cfg, &weights, &ids, &mask).unwrap();
     assert_eq!(a, b);
+}
+
+#[test]
+fn host_workspace_reuse_matches_fresh_forward() {
+    let cfg = config();
+    let weights = build_weights(&cfg, 12, 3, 11);
+    let ids = vec![3_i64, 1, 4, 1, 5, 2];
+    let mask = vec![1.0f32, 1.0, 0.0, 1.0, 1.0, 1.0];
+    let expected = forward_reference(&cfg, &weights, &ids, &mask).unwrap();
+    let mut workspace = GatedDeltaWorkspace::new();
+    for _ in 0..3 {
+        let got = forward_reference_with(&mut workspace, &cfg, &weights, &ids, &mask).unwrap();
+        assert_eq!(got, expected);
+    }
+    assert!(workspace.retained_bytes() > 0);
+}
+
+#[test]
+fn tenferro_workspace_reuse_matches_reference() {
+    let cfg = config();
+    let weights = build_weights(&cfg, 12, 3, 11);
+    let ids = vec![3_i64, 1, 4, 1, 5, 2];
+    let mask = vec![1.0f32, 1.0, 0.0, 1.0, 1.0, 1.0];
+    let reference = forward_reference(&cfg, &weights, &ids, &mask).unwrap();
+    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let mut workspace = GatedDeltaWorkspace::new();
+    for _ in 0..2 {
+        let tenferro = runtime
+            .with_eager_session(|session| {
+                forward_tenferro_with(&mut workspace, session, &cfg, &weights, &ids, &mask)
+            })
+            .unwrap()
+            .unwrap();
+        let max_diff = reference
+            .iter()
+            .zip(&tenferro)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(max_diff <= 2e-2, "workspace reuse diff {max_diff}");
+    }
 }

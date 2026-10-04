@@ -6,10 +6,15 @@
 //!
 //! Two forward implementations are provided:
 //!
-//! - [`forward_reference`]: all host, using [`tenferro_gated_delta`]'s
-//!   recurrent scan for linear layers.
+//! - [`forward_reference`]: all host, running the Gated DeltaNet layers through
+//!   the fused recurrent kernel ([`delta_layer_recurrent`]).
 //! - [`forward_tenferro`]: embedding, norms, full attention, the DeltaNet
-//!   layer, the MLP, and the readout run through the eager session.
+//!   layer, the MLP, and the readout run through the eager session. The
+//!   DeltaNet layer goes through the [`gated_delta`] plan-dispatched entry.
+//!
+//! Both have `_with` variants that take a reusable [`GatedDeltaWorkspace`] so a
+//! caller (e.g. an engine answering many rows) can avoid reallocating the
+//! scratch buffers.
 //!
 //! Full-attention weights are assumed **GQA-expanded** (one k/v head per query
 //! head) at preparation time, and the fused `q`/gate projection is split into
@@ -18,7 +23,8 @@
 use decision_core::{DecisionError, Result};
 use tenferro_ad::{EagerSession, EagerTensor};
 use tenferro_gated_delta::{
-    delta_layer_reference, delta_layer_tenferro, GatedDeltaConfig, GatedDeltaWeights,
+    delta_layer_recurrent, gated_delta, GatedDeltaConfig, GatedDeltaPlan, GatedDeltaWeights,
+    GatedDeltaWorkspace,
 };
 use tenferro_infer::{activation, embedding, linear, norm, rope};
 
@@ -339,6 +345,20 @@ pub fn forward_reference(
     ids: &[i64],
     mask: &[f32],
 ) -> Result<Vec<f32>> {
+    let mut workspace = GatedDeltaWorkspace::new();
+    forward_reference_with(&mut workspace, cfg, weights, ids, mask)
+}
+
+/// [`forward_reference`] with a reusable DeltaNet workspace.
+///
+/// A single workspace is shared across every Gated DeltaNet layer in the stack.
+pub fn forward_reference_with(
+    workspace: &mut GatedDeltaWorkspace,
+    cfg: &JeffConfig,
+    weights: &JeffWeights,
+    ids: &[i64],
+    mask: &[f32],
+) -> Result<Vec<f32>> {
     weights.validate(cfg)?;
     let length = ids.len();
     if mask.len() != length {
@@ -367,7 +387,7 @@ pub fn forward_reference(
         let mixed = match &layer.attention {
             AttentionWeights::Full(w) => full_attention_host(w, cfg, &normalized, mask),
             AttentionWeights::Delta { weights, config } => {
-                delta_layer_reference(config, weights, &normalized, mask)?
+                delta_layer_recurrent(config, weights, &normalized, mask, workspace)?.to_vec()
             }
         };
         let residual: Vec<f32> = hidden.iter().zip(&mixed).map(|(a, b)| a + b).collect();
@@ -539,6 +559,22 @@ pub fn forward_tenferro(
     ids: &[i64],
     mask: &[f32],
 ) -> tenferro_ad::Result<Vec<f32>> {
+    let mut workspace = GatedDeltaWorkspace::new();
+    forward_tenferro_with(&mut workspace, session, cfg, weights, ids, mask)
+}
+
+/// [`forward_tenferro`] with a reusable DeltaNet workspace.
+///
+/// The DeltaNet layers dispatch through the [`gated_delta`] plan entry, so the
+/// resolved algorithm comes from each layer's [`GatedDeltaConfig`].
+pub fn forward_tenferro_with(
+    workspace: &mut GatedDeltaWorkspace,
+    session: &mut EagerSession<'_>,
+    cfg: &JeffConfig,
+    weights: &JeffWeights,
+    ids: &[i64],
+    mask: &[f32],
+) -> tenferro_ad::Result<Vec<f32>> {
     weights.validate(cfg).map_err(config_error)?;
     let length = ids.len();
     if mask.len() != length {
@@ -576,7 +612,16 @@ pub fn forward_tenferro(
             }
             AttentionWeights::Delta { weights, config } => {
                 let normalized_host = extract(session, &normalized, cfg.hidden, length)?;
-                delta_layer_tenferro(session, config, weights, &normalized_host, mask)?
+                let plan = GatedDeltaPlan::from_config(config, length);
+                gated_delta(
+                    session,
+                    config,
+                    weights,
+                    &normalized_host,
+                    mask,
+                    &plan,
+                    workspace,
+                )?
             }
         };
         let mixed_t = host_to_tensor(session, cfg.hidden, length, &mixed)?;
