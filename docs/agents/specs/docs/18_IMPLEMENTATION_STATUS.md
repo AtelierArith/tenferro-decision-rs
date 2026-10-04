@@ -73,8 +73,16 @@ bundled webpki roots).
 
 - `config`: supported Qwen3.5 `TextConfig` subset and `DecisionConfig`.
 - `readout`: temperature-scaled softmax and the choice/noul/score formulas.
-- Remaining: checkpoint loading, embeddings, RMSNorm, partial RoPE, full
-  attention, reference Gated DeltaNet, SiLU MLP, prepared-token forward.
+- `model`: the Qwen3.5 layer stack — embedding, input/post RMSNorm, full
+  attention (GQA-expanded, split `q`/gate, Q/K RMSNorm, partial RoPE, causal
+  mask, output projection) or Gated DeltaNet (`tenferro-gated-delta`), the
+  SiLU-gated MLP, the final last-position RMSNorm, and the readout. Both a host
+  `forward_reference` and a tenferro `forward_tenferro` are provided.
+- Parity tests: the tenferro forward matches the host reference for a mixed
+  stack (DeltaNet + full attention) and for single-kind stacks, including mask
+  holes.
+- Remaining: safetensors checkpoint loading, tokenizer, prepared-token
+  `DecisionEngine` wiring, plans/workspaces.
 
 ### Phase 6 — `tenferro-gated-delta`
 
@@ -108,7 +116,7 @@ bundled webpki roots).
 
 ## Verification snapshot
 
-- `cargo test --workspace`: decision-core 19, reference-data 4, tenferro-infer 11,
-  laya-infer 22, jeff-infer 8, tenferro-gated-delta 9, jev-client 49
+- `cargo test --workspace`: decision-core 20, reference-data 4, tenferro-infer 14,
+  laya-infer 22, jeff-infer 16, tenferro-gated-delta 9, jev-client 49
   (58 with `--features http`), bench-suite 1.
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean.

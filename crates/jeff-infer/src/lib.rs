@@ -13,6 +13,7 @@
 //! Phase 5).
 
 pub mod config;
+pub mod model;
 pub mod readout;
 
 /// Re-export the shared decision types this crate produces.

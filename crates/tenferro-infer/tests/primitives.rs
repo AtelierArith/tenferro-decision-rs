@@ -142,6 +142,39 @@ fn softmax_matches_reference() {
     }
 }
 
+#[test]
+fn rms_norm_rank3_matches_reference() {
+    let a = 2;
+    let b = 3;
+    let c = 4;
+    let wv: [f64; 4] = [1.0, 0.5, -0.25, 2.0];
+    let eps = 1e-6;
+    let xv: Vec<f64> = (0..a * b * c).map(|i| (i as f64) * 0.37 - 2.0).collect();
+    for centered in [false, true] {
+        let out = run(|s| {
+            let x = s.constant_from(Tensor::from_vec_col_major(vec![a, b, c], xv.clone())?)?;
+            let w = s.constant_from(Tensor::from_vec_col_major(vec![c], wv.to_vec())?)?;
+            let y = ti::norm::rms_norm(s, &x, &w, centered, eps)?;
+            s.duplicate_value(&y)
+        });
+        // Column-major: index = i + a*j + a*b*k.
+        let mut expected = vec![0.0; a * b * c];
+        for i in 0..a {
+            for j in 0..b {
+                let base = i + a * j;
+                let mean_sq: f64 =
+                    (0..c).map(|k| xv[base + a * b * k].powi(2)).sum::<f64>() / c as f64;
+                let inv = 1.0 / (mean_sq + eps).sqrt();
+                for k in 0..c {
+                    let scale = if centered { 1.0 + wv[k] } else { wv[k] };
+                    expected[base + a * b * k] = xv[base + a * b * k] * inv * scale;
+                }
+            }
+        }
+        assert_close(out.as_slice::<f64>().unwrap(), &expected, 1e-9);
+    }
+}
+
 // ------------------------------------------------------- Activations
 
 #[test]
@@ -280,6 +313,115 @@ fn modernbert_rope_matches_reference() {
     for k in 0..head {
         assert!((values[k * seq] - xv[k * seq]).abs() < 1e-12);
     }
+}
+
+#[test]
+fn qwen_partial_rope_matches_reference() {
+    let heads = 2;
+    let seq = 3;
+    let head = 4;
+    let rotary = 2;
+    let base = 10000.0;
+    // Layout (heads, seq, head): flat = h + heads*t + heads*seq*d.
+    let data: Vec<f64> = (0..heads * seq * head)
+        .map(|i| (i as f64) * 0.1 - 0.3)
+        .collect();
+    let x = Tensor::from_vec_col_major(vec![heads, seq, head], data.clone()).unwrap();
+
+    let out = run(|s| {
+        let x = s.constant_from(x)?;
+        let y = ti::rope::rope_qwen_partial(s, &x, base, rotary)?;
+        s.duplicate_value(&y)
+    });
+
+    let half = rotary / 2;
+    let mut expected = data.clone();
+    for h in 0..heads {
+        for t in 0..seq {
+            let base_idx = h + heads * t;
+            for i in 0..half {
+                let angle = (t as f64) * base.powf(-2.0 * i as f64 / rotary as f64);
+                let first = data[base_idx + heads * seq * i];
+                let second = data[base_idx + heads * seq * (i + half)];
+                expected[base_idx + heads * seq * i] = first * angle.cos() - second * angle.sin();
+                expected[base_idx + heads * seq * (i + half)] =
+                    first * angle.sin() + second * angle.cos();
+            }
+        }
+    }
+    assert_close(out.as_slice::<f64>().unwrap(), &expected, 1e-12);
+}
+
+#[test]
+fn attention_masked_multi_head_matches_reference() {
+    let b = 1;
+    let h = 2;
+    let l = 2;
+    let hd = 2;
+    // Column-major (B,H,L,hd): flat = b + B*h + B*H*l + B*H*L*d.
+    let q = Tensor::from_vec_col_major(
+        vec![b, h, l, hd],
+        vec![1.0, 0.0, 0.0, 1.0, 0.5, 0.5, 0.2, 0.4],
+    )
+    .unwrap();
+    let k = Tensor::from_vec_col_major(
+        vec![b, h, l, hd],
+        vec![1.0, 0.0, 0.0, 1.0, 0.3, 0.7, 0.1, 0.9],
+    )
+    .unwrap();
+    let v = Tensor::from_vec_col_major(
+        vec![b, h, l, hd],
+        vec![1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0],
+    )
+    .unwrap();
+    // Causal mask: keep[r,c] = c <= r.
+    let mask = Tensor::from_vec_col_major(vec![l, l], vec![true, true, false, true]).unwrap();
+
+    let out = run(|s| {
+        let q = s.constant_from(q)?;
+        let k = s.constant_from(k)?;
+        let v = s.constant_from(v)?;
+        let mask = s.constant_from(mask)?;
+        let y = ti::attention::attention(s, &q, &k, &v, Some(&mask), None)?;
+        s.duplicate_value(&y)
+    });
+
+    let qv = [1.0, 0.0, 0.0, 1.0, 0.5, 0.5, 0.2, 0.4];
+    let kv = [1.0, 0.0, 0.0, 1.0, 0.3, 0.7, 0.1, 0.9];
+    let vv = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0];
+    let idx = |hh: usize, ll: usize, d: usize| hh + ll * h + d * h * l;
+    let scale = 1.0 / (hd as f64).sqrt();
+    let mut expected = vec![0.0; b * h * l * hd];
+    for hh in 0..h {
+        for qq in 0..l {
+            let mut scores = vec![0.0; l];
+            for kk in 0..l {
+                let mut acc = 0.0;
+                for d in 0..hd {
+                    acc += qv[idx(hh, qq, d)] * kv[idx(hh, kk, d)];
+                }
+                scores[kk] = if kk <= qq {
+                    acc * scale
+                } else {
+                    f64::NEG_INFINITY
+                };
+            }
+            let max = scores.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+            let exps: Vec<f64> = scores
+                .iter()
+                .map(|s| if s.is_finite() { (s - max).exp() } else { 0.0 })
+                .collect();
+            let sum: f64 = exps.iter().sum();
+            for d in 0..hd {
+                let mut acc = 0.0;
+                for kk in 0..l {
+                    acc += vv[idx(hh, kk, d)] * (exps[kk] / sum);
+                }
+                expected[idx(hh, qq, d)] = acc;
+            }
+        }
+    }
+    assert_close(out.as_slice::<f64>().unwrap(), &expected, 1e-12);
 }
 
 // ------------------------------------------------------------------- Attention

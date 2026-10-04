@@ -15,7 +15,7 @@ architecture.
 | `decision-core` | Backend-independent questions/answers, `Content`, and the `DecisionEngine` seam |
 | `tenferro-infer` | Shared inference primitives (norm, activations, softmax, RoPE, attention) |
 | `laya-infer` | Laya engine (config + calibration done; forward pending) |
-| `jeff-infer` | Jeff engine (config + readout done; forward pending) |
+| `jeff-infer` | Jeff engine (config + readout + Qwen3.5 layer stack; checkpoint loading pending) |
 | `tenferro-gated-delta` | Gated DeltaNet crate for Jeff (host reference started) |
 | `jev-client` | Independent TypeSafe System One API client |
 | `reference-data` | Reference fixture format and loader (test support) |
