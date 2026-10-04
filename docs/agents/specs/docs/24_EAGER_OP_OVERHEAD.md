@@ -115,17 +115,31 @@ re-prepares every call). Measured at `hidden=1024, length=64, value_heads=16`
 | 200-op elementwise `tanh` chain, 1024×64 | 23–35 ms | 71–128 ms | **0.27–0.33×** |
 
 The compiled layer matches the eager layer to `1.6e-5`, and saves ~10% on the
-DeltaNet layer. The pure elementwise chain, however, is **3–4× slower** on the
-compiled path — the opposite of the expected fused-SIMD win. So on these graphs
-fusion is either not engaging (the segment executor appears to fall back to
-per-instruction staging) or its per-instruction cost dominates at these sizes.
+DeltaNet layer.
 
-**Takeaway:** the DeltaNet layer is GEMM/solve-bound, so elementwise fusion
-cannot move it much; and the compiled elementwise path needs investigation
-before it can be adopted. Confirming whether the CPU runtime actually executes
-via `Segment::Fused` + `execute_elementwise_fusion` for these graphs (there is
-no public segment dump; a targeted microbench or upstream question is needed) is
-the next step.
+A chain-length sweep on a pure elementwise `tanh` chain (`1024×64`) settles why
+the compiled elementwise path does not win:
+
+| `k` (tanh ops) | eager | compiled | regions (planned) | covered insts | fused runs |
+|---:|---:|---:|---:|---:|---:|
+| 1 | 0.38 ms | 0.24 ms | 0 | 0 | 0 |
+| 10 | 1.95 ms | 5.95 ms | 1 | 10 | 6 |
+| 100 | 17.9 ms | 64.1 ms | 1 | 100 | 6 |
+| 200 | 35.3 ms | 128.1 ms | 1 | 200 | 6 |
+
+`PreparedCompiledGraph::elementwise_region_summary`/`_execution_counts` show that
+**fusion does engage**: one elementwise region covers all `k` instructions and is
+executed as **one fused command per run** (`fused = 6` = 1 region × 6 runs),
+with zero fallbacks. Yet the compiled time scales **linearly** at ~0.64 ms/op,
+while eager runs at ~0.18 ms/op — so on this CPU path the fused elementwise
+region is **~3.6× slower per op than the eager per-op SIMD kernels**.
+
+**Takeaway:** the DeltaNet layer is GEMM/solve-bound, so elementwise fusion cannot
+move it much (~1.1×); and tenferro's *fused* elementwise region is currently
+slower than sequential backend kernels for a long op chain, so the compiled path
+does not help the elementwise-heavy parts either. This is a tenferro-internal
+finding worth raising upstream (the fused region is entered and run, but its
+per-element cost exceeds the vectorized single-op kernels).
 
 ## Reference: eager native trajectory (Jeff, L8)
 

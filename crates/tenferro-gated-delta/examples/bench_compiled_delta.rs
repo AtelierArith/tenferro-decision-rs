@@ -178,65 +178,65 @@ fn main() {
     elementwise_bench(iters);
 }
 
-/// An elementwise-only chain: if the compiled path fuses it, it should beat the
-/// eager op-by-op execution by a wide margin.
+/// An elementwise-only chain: if the compiled path fuses it, total time stays
+/// roughly flat as the chain grows; if it runs op-by-op, time scales with `k`.
 fn elementwise_bench(iters: usize) {
-    const K: usize = 200;
     let hidden = 1024usize;
     let length = 64usize;
     let mut rng = Lcg(99);
     let x = rng.fill(hidden * length);
-
-    // eager
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
-    let eager =
-        |session: &mut tenferro_ad::EagerSession<'_>| -> Result<Vec<f32>, tenferro_ad::Error> {
-            let x = session.constant_from(AdTensor::from_vec_col_major(
-                vec![hidden, length],
-                col_major(hidden, length, &x),
-            )?)?;
-            let mut y = x;
-            for _ in 0..K {
-                y = session.tanh(&y)?;
-            }
-            let host = session.duplicate_value(&y)?;
-            Ok(host.as_slice::<f32>()?.to_vec())
-        };
-    let _ = runtime.with_eager_session(eager).unwrap().unwrap();
-    let t = Instant::now();
-    for _ in 0..iters {
-        let _ = runtime.with_eager_session(eager).unwrap().unwrap();
-    }
-    let eager_ms = t.elapsed().as_secs_f64() * 1e3 / iters as f64;
-
-    // compiled
-    let x_in = tenferro_runtime::TracedTensor::input_concrete_shape(DType::F32, &[hidden, length])
-        .unwrap();
-    let mut y = x_in.clone();
-    for _ in 0..K {
-        y = y.tanh().unwrap();
-    }
-    let mut compiler = GraphCompiler::new();
-    let program = compiler
-        .compile_with_input_specs(&y, &[(&x_in, DType::F32, &[hidden, length])])
-        .unwrap();
-    let mut builder = Runtime::builder();
-    builder
-        .register_engine(tenferro_cpu::runtime_engine_registration(&CpuBackend::new()).unwrap())
-        .unwrap();
-    let runtime = builder.build().unwrap();
     let x_t =
         AdTensor::from_vec_col_major(vec![hidden, length], col_major(hidden, length, &x)).unwrap();
-    let _ = runtime.run_compiled(&program, &[&x_t]).unwrap();
-    let prepared = runtime.prepare_compiled(&program, &[&x_t]).unwrap();
-    let t = Instant::now();
-    for _ in 0..iters {
-        let _ = runtime.run_prepared(&prepared, &[&x_t]).unwrap();
-    }
-    let compiled_ms = t.elapsed().as_secs_f64() * 1e3 / iters as f64;
+    let eager_runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
 
-    println!(
-        "\nelementwise chain ({K} ops, {hidden}x{length}): eager {eager_ms:.2} ms  compiled {compiled_ms:.2} ms  speedup {:.2}x",
-        eager_ms / compiled_ms
-    );
+    for k in [1usize, 10, 100, 200] {
+        let eager =
+            |session: &mut tenferro_ad::EagerSession<'_>| -> Result<Vec<f32>, tenferro_ad::Error> {
+                let mut y = session.constant_from(AdTensor::from_vec_col_major(
+                    vec![hidden, length],
+                    col_major(hidden, length, &x),
+                )?)?;
+                for _ in 0..k {
+                    y = session.tanh(&y)?;
+                }
+                let host = session.duplicate_value(&y)?;
+                Ok(host.as_slice::<f32>()?.to_vec())
+            };
+        let _ = eager_runtime.with_eager_session(eager).unwrap().unwrap();
+        let t = Instant::now();
+        for _ in 0..iters {
+            let _ = eager_runtime.with_eager_session(eager).unwrap().unwrap();
+        }
+        let eager_ms = t.elapsed().as_secs_f64() * 1e3 / iters as f64;
+
+        let x_in =
+            tenferro_runtime::TracedTensor::input_concrete_shape(DType::F32, &[hidden, length])
+                .unwrap();
+        let mut y = x_in.clone();
+        for _ in 0..k {
+            y = y.tanh().unwrap();
+        }
+        let mut compiler = GraphCompiler::new();
+        let program = compiler
+            .compile_with_input_specs(&y, &[(&x_in, DType::F32, &[hidden, length])])
+            .unwrap();
+        let mut builder = Runtime::builder();
+        builder
+            .register_engine(tenferro_cpu::runtime_engine_registration(&CpuBackend::new()).unwrap())
+            .unwrap();
+        let runtime = builder.build().unwrap();
+        let prepared = runtime.prepare_compiled(&program, &[&x_t]).unwrap();
+        let _ = runtime.run_prepared(&prepared, &[&x_t]).unwrap();
+        let t = Instant::now();
+        for _ in 0..iters {
+            let _ = runtime.run_prepared(&prepared, &[&x_t]).unwrap();
+        }
+        let compiled_ms = t.elapsed().as_secs_f64() * 1e3 / iters as f64;
+
+        let (planned, covered) = prepared.elementwise_region_summary();
+        let (fused, fallback) = prepared.elementwise_region_execution_counts();
+        println!(
+            "elementwise k={k:3} ({hidden}x{length}): eager {eager_ms:8.3} ms  compiled {compiled_ms:8.3} ms  regions={planned} covered_insts={covered} fused={fused} fallback={fallback}"
+        );
+    }
 }
