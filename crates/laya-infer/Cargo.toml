@@ -21,3 +21,4 @@ tenferro-infer.workspace = true
 
 [dev-dependencies]
 tenferro-cpu.workspace = true
+hf-fetch.workspace = true

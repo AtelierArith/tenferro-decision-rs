@@ -37,10 +37,11 @@ while `laya-infer` has a concrete `tokenizer.json` encoder, checkpoint loading,
 the ModernBERT + decision-head forward (with the exact erf GELU from the
 self-hosted `tenferro-ext` extension op), and a text/JSON engine, validated
 against a seeded Julia-generated fixture (`fixtures/laya-tiny/`, tokenizer and
-forward parity to ~2e-9). Production checkpoints can be fetched with
-`hf-fetch` (Laya `convaiinnovations/laya`, Jeff
-`mstrasser/Jeff-Qwen3.5-0.8B`); validating Laya against those production weights
-is next.
+forward parity to ~2e-9). The production `convaiinnovations/laya` checkpoint is
+fetchable with `hf-fetch` and its tokenizer/forward match `extern/Laya.jl`
+(logits `1.7e-6`); Jeff's production checkpoint
+(`mstrasser/Jeff-Qwen3.5-0.8B`) can also be fetched, and answer-level parity
+(prompt + calibration) is next.
 See
 [`docs/agents/specs/docs/18_IMPLEMENTATION_STATUS.md`](docs/agents/specs/docs/18_IMPLEMENTATION_STATUS.md)
 for the live status and blockers (CUDA hardware, tenferro `erf`/F16/BF16,

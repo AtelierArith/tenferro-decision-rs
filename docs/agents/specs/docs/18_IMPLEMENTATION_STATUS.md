@@ -120,8 +120,15 @@ bundled webpki roots).
   loaded by the Rust loader; the tokenizer ids and the `forward_reference`
   logits/action match the Julia `DecisionModel` to ~2e-9, and `LayaEngine::load`
   + `system_one` run on the same checkpoint.
-- Remaining: production Laya checkpoint assets (a real tokenizer/weights pair)
-  and plans/workspaces.
+- Production parity: `hf-fetch laya` resolved `convaiinnovations/laya@main`
+  (commit `7b928d82…`, ~843 MB); with the reference from
+  `tools/gen_laya_real_reference.jl` (pinned to that commit) the real tokenizer
+  ids match and `forward_reference` matches the Julia `DecisionModel` to
+  `1.7e-6` (logits; action within `~1.7e-7` relative). `tests/real_checkpoint.rs`
+  skips when the snapshot or reference is absent.
+- Remaining: production `system_one`/`predict` answer parity (prompt rendering +
+  calibration end to end); Jeff's production checkpoint
+  (`mstrasser/Jeff-Qwen3.5-0.8B`, ~1.7 GB) has not been fetched/validated yet.
 
 ### Phase 5 — `jeff-infer`
 
@@ -196,7 +203,7 @@ bundled webpki roots).
 
 | Area | Blocker |
 |---|---|
-| Laya numerical parity (Phase 2) | A seeded Julia-generated fixture covers tokenizer/forward/engine parity (`fixtures/laya-tiny/`); a production checkpoint (real tokenizer/weights) is still needed for end-to-end validation. (Jeff has real-fixture parity in `native_fixture.rs`.) |
+| Laya numerical parity (Phase 2) | Tokenizer and forward (encoder + decision head) match `extern/Laya.jl` on the production `convaiinnovations/laya` checkpoint (logits `1.7e-6`) and on the seeded tiny fixture (`~2e-9`). Full `system_one`/`predict` answer parity (prompt rendering + calibration) is not yet cross-checked. Jeff production weights (`mstrasser/Jeff-Qwen3.5-0.8B`) are not fetched/validated yet. |
 | Phase 4 / 7 CUDA | No CUDA hardware here; code can be written but not validated. |
 | Phase 8 FP16/BF16 | Deferred by decision: tenferro's public dtype set lacks `F16`/`BF16` at the pinned revision. |
 | Phase 10 Apple GPU | tenferro's WebGPU surface is effectively `dot_general` (F32/C32) plus transpose; most primitives are missing. |
@@ -204,7 +211,8 @@ bundled webpki roots).
 ## Verification snapshot
 
 - `cargo test --workspace`: decision-core 20, reference-data 4, tenferro-infer 13,
-  tenferro-ext 2, hf-fetch 9, laya-infer 44, jeff-infer 33,
+  tenferro-ext 2, hf-fetch 9, laya-infer 46, jeff-infer 33,
   tenferro-gated-delta 19, jev-client 49 (58 with `--features http`),
-  bench-suite 1 (194 total).
+  bench-suite 1 (196 total). `real_checkpoint.rs` adds ~70 s when the
+  production Laya snapshot is cached, and skips otherwise.
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean.

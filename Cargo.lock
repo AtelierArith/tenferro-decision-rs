@@ -1094,6 +1094,7 @@ name = "laya-infer"
 version = "0.1.0"
 dependencies = [
  "decision-core",
+ "hf-fetch",
  "regex",
  "safetensors-io",
  "serde_json",
