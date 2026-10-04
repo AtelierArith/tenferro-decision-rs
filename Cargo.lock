@@ -1266,6 +1266,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "tenferro-ad"
+version = "0.7.1"
+source = "git+https://github.com/tensor4all/tenferro-rs?rev=471c4278dbc5a955b8a1664789c37e5d07e743cb#471c4278dbc5a955b8a1664789c37e5d07e743cb"
+dependencies = [
+ "computegraph",
+ "lru",
+ "num-complex",
+ "num-traits",
+ "tenferro-cpu",
+ "tenferro-internal-ops",
+ "tenferro-runtime",
+ "tenferro-tensor",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "tenferro-core-ops"
 version = "0.7.1"
 source = "git+https://github.com/tensor4all/tenferro-rs?rev=471c4278dbc5a955b8a1664789c37e5d07e743cb#471c4278dbc5a955b8a1664789c37e5d07e743cb"
@@ -1321,9 +1337,10 @@ dependencies = [
 name = "tenferro-infer"
 version = "0.1.0"
 dependencies = [
+ "tenferro-ad",
  "tenferro-cpu",
- "tenferro-runtime",
  "tenferro-tensor",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

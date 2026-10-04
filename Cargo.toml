@@ -29,3 +29,4 @@ criterion = "0.5"
 tenferro-runtime = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb" }
 tenferro-cpu = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb" }
 tenferro-tensor = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb" }
+tenferro-ad = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb" }

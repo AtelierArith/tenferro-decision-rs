@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
-tenferro-runtime.workspace = true
+tenferro-ad.workspace = true
 tenferro-cpu.workspace = true
 tenferro-tensor.workspace = true
+thiserror.workspace = true
