@@ -129,5 +129,7 @@ Warmup 3, 15 iterations, min.
   elementwise/normalization work dominate at L64.
 - Rust model loading is ~1.3× faster than Julia for Jeff.
 - `forward_tenferro` is rebuilt from tenferro ops with a reused `TensorCache`.
-  `JeffEngine` defaults to the host backend and offers the optimized host and
-  tenferro backends (`JeffBackend::{Host, HostOpt, Tenferro}`).
+  `JeffEngine` defaults to `JeffBackend::Auto`, which picks `host_opt` for
+  sequences of at least 16 tokens and the oracle below that; `HostOpt` and
+  `Tenferro` can be selected explicitly (`JeffBackend::{Auto, Host, HostOpt,
+  Tenferro}`).

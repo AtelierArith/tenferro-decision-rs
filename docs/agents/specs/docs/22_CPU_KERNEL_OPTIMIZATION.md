@@ -100,6 +100,11 @@ remaining ~1.4× is the distributed cost of the recurrent scan's per-token state
 passes and the elementwise/transcendental work (SiLU `exp`, RMS `sqrt`), all of
 which Julia pays too but hides better across its 8 task workers.
 
+`JeffEngine` now defaults to `JeffBackend::Auto`: `host_opt` for sequences of at
+least 16 tokens, the oracle below (the crossover measured on the production
+checkpoint, where the rayon fan-out does not pay off yet). `Host`, `HostOpt`,
+and `Tenferro` remain selectable.
+
 ## A. GEMM (BLAS-class) candidates
 
 | location | operation | notes |

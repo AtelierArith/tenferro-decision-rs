@@ -359,6 +359,37 @@ fn constructor_rejects_option_limit_above_readout() {
 }
 
 #[test]
+fn auto_backend_dispatches_by_length() {
+    let weights = build_weights(&config(), 12, 4, 7);
+    let mut auto = JeffEngine::new(config(), decision(1.0, 3), weights.clone()).unwrap();
+    let mut host = JeffEngine::with_backend(
+        config(),
+        decision(1.0, 3),
+        weights.clone(),
+        JeffBackend::Host,
+    )
+    .unwrap();
+    let mut opt =
+        JeffEngine::with_backend(config(), decision(1.0, 3), weights, JeffBackend::HostOpt)
+            .unwrap();
+    assert_eq!(auto.backend(), JeffBackend::Auto);
+
+    // Short rows (< 16 tokens): Auto uses the oracle.
+    let short = PreparedState {
+        input_ids: vec![vec![3, 1, 4, 2]],
+        attention_mask: vec![vec![true; 4]],
+    };
+    assert_eq!(auto.logits(&short).unwrap(), host.logits(&short).unwrap());
+
+    // Long rows (>= 16 tokens): Auto uses the optimized path.
+    let long = PreparedState {
+        input_ids: vec![(0..16).map(|i| (i % 12) as i64).collect()],
+        attention_mask: vec![vec![true; 16]],
+    };
+    assert_eq!(auto.logits(&long).unwrap(), opt.logits(&long).unwrap());
+}
+
+#[test]
 fn host_opt_backend_matches_host_backend() {
     let mut host = build_engine(4, 3, 1.0, 7);
     let mut opt = JeffEngine::with_backend(
