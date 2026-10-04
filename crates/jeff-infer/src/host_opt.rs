@@ -204,7 +204,9 @@ fn full_attention_into(
     cpu_kernels::matmul_row_major_into(&w.o, width, cfg.hidden, attn_out, length, out);
 }
 
-/// SiLU-gated MLP on a `(hidden, length)` input, writing `(hidden, length)`.
+/// SiLU-gated MLP on a `(hidden, length)` input, **accumulating** the result
+/// into `out` (`out += down(silu(gate) * up)`), so the caller can fuse the
+/// residual add into the down projection.
 fn mlp_into(
     mlp: &MlpWeights,
     cfg: &JeffConfig,
@@ -220,7 +222,14 @@ fn mlp_into(
         let value = *g;
         *g = (value / (1.0 + (-value).exp())) * *u;
     });
-    cpu_kernels::matmul_row_major_into(&mlp.down, cfg.intermediate, cfg.hidden, gate, length, out);
+    cpu_kernels::matmul_row_major_add_into(
+        &mlp.down,
+        cfg.intermediate,
+        cfg.hidden,
+        gate,
+        length,
+        out,
+    );
 }
 
 /// `out = a + b`, parallel over elements.
@@ -485,10 +494,11 @@ pub fn forward_host_opt_with(
             length,
             &mut ws.mlp_gate,
             &mut ws.mlp_up,
-            &mut ws.mixed,
+            &mut ws.residual,
         );
-
-        residual_add_into(&ws.residual, &ws.mixed, &mut ws.state);
+        // The down projection accumulated into `residual`, so it now holds
+        // `residual + mlp`: the next layer's hidden state. Swap it in.
+        std::mem::swap(&mut ws.state, &mut ws.residual);
     }
 
     // Final centered RMSNorm on the last position, then the readout.
