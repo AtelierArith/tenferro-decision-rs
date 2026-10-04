@@ -122,9 +122,9 @@ pub struct LayaWeights {
     pub type_emb: Vec<f32>,
     /// Marker scorer normalization `(d,)`.
     pub scorer_norm: LayerNormWeights,
-    /// Marker scorer first projection `(d, 1)`.
+    /// Marker scorer first projection `(d, d)`.
     pub scorer1: LinearWeights,
-    /// Marker scorer second projection `(1, 1)`.
+    /// Marker scorer second projection `(d, 1)`.
     pub scorer2: LinearWeights,
     /// Action-head first projection `(d + 4, A)`.
     pub act1: LinearWeights,
@@ -251,8 +251,8 @@ impl LayaWeights {
             ));
         }
         validate_norm(&self.scorer_norm, d, "laya.scorer_norm")?;
-        validate_linear(&self.scorer1, d, 1, "laya.scorer1")?;
-        validate_linear(&self.scorer2, 1, 1, "laya.scorer2")?;
+        validate_linear(&self.scorer1, d, d, "laya.scorer1")?;
+        validate_linear(&self.scorer2, d, 1, "laya.scorer2")?;
         for (index, layer) in self.head.iter().enumerate() {
             let field = format!("laya.head[{index}]");
             if layer.num_heads == 0 || d % layer.num_heads != 0 {
@@ -930,9 +930,9 @@ pub fn forward_reference(
 
     let markers = gather_markers_host(&h, marker_pos, k_count, length, batch, d);
     let s0 = layer_norm_host(&weights.scorer_norm, &markers, d, k_count, batch, eps);
-    let s1 = linear_host(&weights.scorer1, d, 1, &s0, k_count, batch);
+    let s1 = linear_host(&weights.scorer1, d, d, &s0, k_count, batch);
     let g1: Vec<f32> = s1.iter().map(|value| gelu_tanh(*value)).collect();
-    let logits = linear_host(&weights.scorer2, 1, 1, &g1, k_count, batch);
+    let logits = linear_host(&weights.scorer2, d, 1, &g1, k_count, batch);
 
     let (masked_logits, features) = pool_host(&logits, marker_mask, k_count, batch);
 
@@ -1376,7 +1376,7 @@ pub fn forward_tenferro(
     let markers = gather_markers(session, &h, marker_pos, k_count, length, batch, d)?;
     let s0 =
         layer_norm_feature_first(session, &markers, &weights.scorer_norm, d, encoder.norm_eps)?;
-    let s1 = linear_feature_first(session, &s0, &weights.scorer1, 1)?;
+    let s1 = linear_feature_first(session, &s0, &weights.scorer1, d)?;
     let g1 = activation::gelu(session, &s1)?;
     let s2 = linear_feature_first(session, &g1, &weights.scorer2, 1)?;
     let s2 = session.reshape(&s2, vec![k_count, batch])?;

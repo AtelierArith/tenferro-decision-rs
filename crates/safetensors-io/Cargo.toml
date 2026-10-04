@@ -1,0 +1,13 @@
+[package]
+name = "safetensors-io"
+description = "Minimal, dependency-light safetensors reader shared by the decision engines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+decision-core.workspace = true
+serde_json.workspace = true

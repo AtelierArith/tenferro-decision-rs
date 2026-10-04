@@ -15,12 +15,16 @@ authors = ["Satoshi Terasaki <terasakisatoshi.math@gmail.com> and contributors"]
 decision-core = { path = "crates/decision-core" }
 tenferro-infer = { path = "crates/tenferro-infer" }
 reference-data = { path = "crates/reference-data" }
+safetensors-io = { path = "crates/safetensors-io" }
 
 # Shared third-party dependencies.
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 criterion = "0.5"
+# Laya tokenizer helpers (Hugging Face `tokenizer.json` subset).
+regex = "1"
+unicode-normalization = "0.1"
 # `jev-client`'s optional concrete HTTP/TLS transport. `rustls-tls` avoids
 # native OpenSSL; `blocking` matches the crate's synchronous transport trait.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "blocking"] }

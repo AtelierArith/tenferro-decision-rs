@@ -120,8 +120,8 @@ fn laya_weights(cfg: &EncoderConfig, agent: &AgentConfig, rng: &mut Lcg) -> Laya
             .collect(),
         type_emb: rng.fill(d * 3, -0.2, 0.2),
         scorer_norm: norm(rng, d, cfg.norm_bias),
-        scorer1: linear(rng, d, 1, cfg.mlp_bias),
-        scorer2: linear(rng, 1, 1, cfg.mlp_bias),
+        scorer1: linear(rng, d, d, cfg.mlp_bias),
+        scorer2: linear(rng, d, 1, cfg.mlp_bias),
         act1: linear(rng, d + 4, action_hidden, cfg.mlp_bias),
         act2: linear(rng, action_hidden, agent.action_count(), cfg.mlp_bias),
     }
