@@ -81,7 +81,7 @@ errors); HTTP-date `Retry-After`, an injectable monotonic clock, and a
 | Laya/Jeff numerical parity (Phases 2, 5) | No real checkpoints available in this environment; validate against `extern/Laya.jl` / `extern/JeffClient.jl` once checkpoints/fixtures exist. |
 | Exact GELU (Laya parity) | tenferro has no `erf`; needs a `tenferro-infer` extension op porting `mlx_erf`. |
 | Phase 4 / 7 CUDA | No CUDA hardware here; code can be written but not validated. |
-| Phase 8 FP16/BF16 | tenferro's public dtype set lacks `F16`/`BF16` at the pinned revision. |
+| Phase 8 FP16/BF16 | Deferred by decision: tenferro's public dtype set lacks `F16`/`BF16` at the pinned revision. |
 | Phase 10 Apple GPU | tenferro's WebGPU surface is effectively `dot_general` (F32/C32) plus transpose; most primitives are missing. |
 | Tokenizer (Laya) | Requires the checkpoint's tokenizer assets. |
 
