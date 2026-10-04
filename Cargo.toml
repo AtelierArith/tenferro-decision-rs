@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.85"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/atelierarith/tenferro-decision-rs"
+authors = ["Satoshi Terasaki <terasakisatoshi.math@gmail.com> and contributors"]
+
+[workspace.dependencies]
+# Local crates.
+decision-core = { path = "crates/decision-core" }
+tenferro-infer = { path = "crates/tenferro-infer" }
+reference-data = { path = "crates/reference-data" }
+
+# Shared third-party dependencies.
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+criterion = "0.5"
+
+# Pinned to the surveyed tenferro-rs revision (`11_TENFERRO_API_SURVEY.md`).
+# The crates.io 0.7.1 release predates this revision and differs in the
+# session-entry API (`with_backend_session` returns a nested `Result` here).
+# The MVP engine path uses the CPU provider only.
+tenferro-runtime = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb" }
+tenferro-cpu = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb" }
+tenferro-tensor = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb" }

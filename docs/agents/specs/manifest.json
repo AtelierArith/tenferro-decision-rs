@@ -1,0 +1,32 @@
+{
+  "project": "typed-decision-rs-design",
+  "date": "2026-10-04",
+  "priority": [
+    "inference_speed",
+    "correctness",
+    "memory_efficiency",
+    "cpu_cuda_portability"
+  ],
+  "primary_backends": [
+    "cpu",
+    "cuda"
+  ],
+  "future_backend": [
+    "apple_webgpu_metal"
+  ],
+  "models": [
+    "Laya",
+    "Jeff"
+  ],
+  "remote_client": [
+    "Jev"
+  ],
+  "non_goals": [
+    "training",
+    "autodiff",
+    "optimizers",
+    "generation",
+    "persistent_kv_cache"
+  ],
+  "recommended_first_release": "optimized Laya CPU inference"
+}

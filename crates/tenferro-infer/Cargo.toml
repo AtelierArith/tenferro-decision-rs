@@ -1,0 +1,14 @@
+[package]
+name = "tenferro-infer"
+description = "Shared inference primitives (norm, activations, softmax, RoPE, attention) for the decision engines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+tenferro-runtime.workspace = true
+tenferro-cpu.workspace = true
+tenferro-tensor.workspace = true

@@ -1,0 +1,20 @@
+[package]
+name = "decision-core"
+description = "Backend-independent typed-decision data model and DecisionEngine seam"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+thiserror.workspace = true
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[features]
+default = []
+# Optional JSON support for `Content` (never a generic struct serialization
+# surface; see `16_DECISION_CORE_DESIGN.md` §7).
+serde = ["dep:serde", "dep:serde_json"]

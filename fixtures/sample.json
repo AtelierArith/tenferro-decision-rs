@@ -1,0 +1,34 @@
+{
+  "name": "matmul_2x2",
+  "metadata": {
+    "source": "hand-computed",
+    "notes": "Phase 0 fixture-format example; not a model reference.",
+    "dtype": "f64"
+  },
+  "tensors": {
+    "a": {
+      "dtype": "f64",
+      "order": "col-major",
+      "shape": [2, 2],
+      "data": [1.0, 3.0, 2.0, 4.0]
+    },
+    "b": {
+      "dtype": "f64",
+      "order": "col-major",
+      "shape": [2, 2],
+      "data": [5.0, 7.0, 6.0, 8.0]
+    },
+    "product": {
+      "dtype": "f64",
+      "order": "col-major",
+      "shape": [2, 2],
+      "data": [19.0, 43.0, 22.0, 50.0]
+    },
+    "mask": {
+      "dtype": "bool",
+      "order": "col-major",
+      "shape": [3],
+      "data": [true, false, true]
+    }
+  }
+}

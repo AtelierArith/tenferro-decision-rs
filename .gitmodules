@@ -1,0 +1,9 @@
+[submodule "extern/Laya.jl"]
+	path = extern/Laya.jl
+	url = https://github.com/AtelierArith/Laya.jl
+[submodule "extern/JeffClient.jl"]
+	path = extern/JeffClient.jl
+	url = https://github.com/AtelierArith/JeffClient.jl
+[submodule "extern/JevClient.jl"]
+	path = extern/JevClient.jl
+	url = https://github.com/AtelierArith/JevClient.jl

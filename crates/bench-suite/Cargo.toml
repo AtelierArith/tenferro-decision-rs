@@ -1,0 +1,23 @@
+[package]
+name = "bench-suite"
+description = "Benchmark harness skeleton and metadata capture for the decision engines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+publish = false
+
+[dependencies]
+serde_json.workspace = true
+tenferro-runtime.workspace = true
+tenferro-cpu.workspace = true
+tenferro-tensor.workspace = true
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "wiring"
+harness = false
