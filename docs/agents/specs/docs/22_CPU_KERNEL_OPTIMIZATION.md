@@ -35,6 +35,71 @@ still pass.
 Still open below (attention `QKᵀ`/`PV`, SIMD elementwise, tenferro weight
 caching, DeltaNet scan).
 
+## Host-optimized forward (`host_opt`, Jeff) — 2026-10-04
+
+`forward_reference` (the oracle) is unchanged; a separate optimized host path
+was added in `jeff-infer/src/host_opt.rs` (`forward_host_opt{,_with}` +
+`HostOptWorkspace`, selectable as `JeffBackend::HostOpt`). It ports the Julia
+native-CPU techniques that the oracle lacks:
+
+- **rayon at the right granularity**: the oracle parallelizes only inside GEMMs
+  and the DeltaNet head loop. `host_opt` also parallelizes RMSNorm over tokens,
+  full attention / head-norm / RoPE over heads, and the SiLU gate / residual adds
+  over elements.
+- **RoPE tables precomputed once per length** (the oracle recomputes
+  `theta.powf(...)` + `cos`/`sin` per `(head, token, channel)`).
+- **Reusable activation buffers** (`HostOptWorkspace`), so a warmed forward is
+  allocation-free; the oracle allocates a `Vec` per intermediate and copies the
+  DeltaNet output.
+
+Parity: `host_opt` matches the oracle and the production reference to
+`max diff ~1.2e-5` (scale 10.4) on the `mstrasser/Jeff-Qwen3.5-0.8B` checkpoint
+(`real_checkpoint`), and the small-model tests (`tests/model.rs`,
+`tests/engine.rs`) cover mixed/delta-only/full-only stacks.
+
+Two shared mixed-precision-hotspots in `tenferro-gated-delta` were also fixed
+(these help the oracle too; its source is untouched and its output is
+**bit-identical**):
+
+- `conv.rs::causal_depthwise_silu_into` was a serial triple loop over
+  `channels=6144`; it is now parallel over channels. Delta-layer `conv+silu`
+  stage: **4.0 → 0.8 ms** at L64.
+- `recurrent.rs::scan_head` stored the state row-major `(value_dim, key_dim)` and
+  did a scalar reduction with a stride-`length` gather of `k`/`q`. The state is
+  now stored transposed `(key_dim, value_dim)` with the update and readout fused
+  into one contiguous axpy over value dims (the same formulation as Julia's
+  `cpu_delta_recurrent_heads!`). Delta layer: **14.8 → 11.6 ms** at L64.
+
+Whole-model effect (production Jeff, `RAYON_NUM_THREADS=8`, release, best-of-15):
+
+| length | oracle `forward_reference` | `host_opt` | host_opt/oracle | Julia best |
+|---:|---:|---:|---:|---:|
+| 8 | 161.7 ms | 171.2 ms | 1.06× | 137.5 ms |
+| 16 | 184.4 ms | 178.9 ms | 0.97× | 143.3 ms |
+| 64 | 466.3 ms | **347.4 ms** | **0.74×** | 238.3 ms |
+
+So `host_opt` is ~1.34× faster than the oracle at L64 (within noise at L8, where
+the rayon fan-out offsets the elementwise win) and ~1.24–1.46× behind Julia.
+
+### The GEMM backend is *not* the remaining gap
+
+Measured `cblas_sgemm` directly on the model shapes (best-of-30): Accelerate
+(`cpu-kernels`) and Homebrew OpenBLAS 0.3.34 are within a few percent, e.g.
+`(1024, 4096, len 64)`: Accelerate 1.42 ms vs OpenBLAS(8) 1.38 ms;
+`(1024, 2048, len 8)`: 0.36 vs 0.22 ms. So swapping Accelerate for OpenBLAS
+would not close the gap (unlike Laya, whose work is almost pure BLAS).
+
+### The chunked DeltaNet is not the lever on x86
+
+Julia's `cpu_defaults(apple)` sets `portable = !apple`, and `apple` requires
+`Sys.ARCH === :aarch64`. On our **x86_64** machine `apple = false`, so Julia runs
+`recurrent_delta = true` (chunk size 1) — the *same recurrent scan* we use.
+Chunked (`TensorNative`) is Apple-Silicon-only and is ~1.8× *slower* here. So
+porting a host chunked kernel would not explain or close the x86 gap; the
+remaining ~1.4× is the distributed cost of the recurrent scan's per-token state
+passes and the elementwise/transcendental work (SiLU `exp`, RMS `sqrt`), all of
+which Julia pays too but hides better across its 8 task workers.
+
 ## A. GEMM (BLAS-class) candidates
 
 | location | operation | notes |

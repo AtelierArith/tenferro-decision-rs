@@ -13,6 +13,7 @@ decision-core.workspace = true
 cpu-kernels.workspace = true
 serde_json.workspace = true
 safetensors-io.workspace = true
+rayon.workspace = true
 tenferro-ad.workspace = true
 tenferro-tensor.workspace = true
 tenferro-infer.workspace = true

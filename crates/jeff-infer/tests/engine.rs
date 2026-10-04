@@ -8,7 +8,7 @@ use decision_core::{
     Question, QuestionSet, ScoreQuestion, State,
 };
 use jeff_infer::config::DecisionConfig;
-use jeff_infer::engine::JeffEngine;
+use jeff_infer::engine::{JeffBackend, JeffEngine};
 use jeff_infer::model::{
     AttentionWeights, FullAttentionWeights, JeffConfig, JeffWeights, LayerWeights, MlpWeights,
     forward_reference,
@@ -356,4 +356,30 @@ fn constructor_rejects_option_limit_above_readout() {
         build_weights(&config(), 12, 4, 7),
     );
     assert!(engine.is_err());
+}
+
+#[test]
+fn host_opt_backend_matches_host_backend() {
+    let mut host = build_engine(4, 3, 1.0, 7);
+    let mut opt = JeffEngine::with_backend(
+        config(),
+        decision(1.0, 3),
+        build_weights(&config(), 12, 4, 7),
+        JeffBackend::HostOpt,
+    )
+    .unwrap();
+    assert_eq!(opt.backend(), JeffBackend::HostOpt);
+
+    let prepared = prepared();
+    let host_logits = host.logits(&prepared).unwrap();
+    let opt_logits = opt.logits(&prepared).unwrap();
+    assert_eq!(host_logits.len(), opt_logits.len());
+    for (row, (a, b)) in host_logits.iter().zip(&opt_logits).enumerate() {
+        let diff = a
+            .iter()
+            .zip(b)
+            .map(|(x, y)| (x - y).abs())
+            .fold(0.0f32, f32::max);
+        assert!(diff <= 2e-2, "row {row} differs by {diff}");
+    }
 }

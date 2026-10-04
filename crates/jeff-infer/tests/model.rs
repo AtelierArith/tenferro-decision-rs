@@ -2,6 +2,7 @@
 //! must match the host reference with identical weights, for a mixed stack
 //! containing both a Gated DeltaNet layer and a full-attention layer.
 
+use jeff_infer::host_opt::{HostOptWorkspace, forward_host_opt, forward_host_opt_with};
 use jeff_infer::model::{
     AttentionWeights, FullAttentionWeights, JeffConfig, JeffWeights, LayerWeights, MlpWeights,
     forward_reference, forward_reference_with, forward_tenferro, forward_tenferro_with,
@@ -176,6 +177,79 @@ fn compare(cfg: &JeffConfig, weights: &JeffWeights, ids: &[i64], mask: &[f32], t
         max_diff <= tol,
         "max diff {max_diff} exceeds {tol}; ref={reference:?} tenferro={tenferro:?}"
     );
+}
+
+#[test]
+fn host_opt_matches_reference_for_mixed_stack() {
+    let cfg = config();
+    let weights = build_weights(&cfg, 12, 3, 11);
+    let ids = vec![3_i64, 1, 4, 1, 5, 2];
+    let mask = vec![1.0f32, 1.0, 0.0, 1.0, 1.0, 1.0];
+    compare_opt(&cfg, &weights, &ids, &mask, 2e-2);
+}
+
+#[test]
+fn host_opt_delta_only_stack_matches() {
+    let cfg = config();
+    let mut weights = build_weights(&cfg, 12, 3, 11);
+    weights.layers.truncate(1);
+    let ids = vec![3_i64, 1, 4, 1, 5, 2];
+    let mask = vec![1.0f32, 1.0, 0.0, 1.0, 1.0, 1.0];
+    compare_opt(&cfg, &weights, &ids, &mask, 2e-2);
+}
+
+#[test]
+fn host_opt_full_only_stack_matches() {
+    let cfg = config();
+    let mut weights = build_weights(&cfg, 12, 3, 11);
+    weights.layers.remove(0);
+    let ids = vec![3_i64, 1, 4, 1, 5, 2];
+    let mask = vec![1.0f32, 1.0, 0.0, 1.0, 1.0, 1.0];
+    compare_opt(&cfg, &weights, &ids, &mask, 2e-2);
+}
+
+#[test]
+fn host_opt_full_only_single_token_matches() {
+    let cfg = config();
+    let mut weights = build_weights(&cfg, 12, 3, 11);
+    weights.layers.remove(0);
+    let ids = vec![4_i64];
+    let mask = vec![1.0f32];
+    compare_opt(&cfg, &weights, &ids, &mask, 2e-2);
+}
+
+fn compare_opt(cfg: &JeffConfig, weights: &JeffWeights, ids: &[i64], mask: &[f32], tol: f32) {
+    let reference = forward_reference(cfg, weights, ids, mask).unwrap();
+    let optimized = forward_host_opt(cfg, weights, ids, mask).unwrap();
+    let max_diff = reference
+        .iter()
+        .zip(&optimized)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    assert!(
+        max_diff <= tol,
+        "max diff {max_diff} exceeds {tol}; ref={reference:?} opt={optimized:?}"
+    );
+}
+
+#[test]
+fn host_opt_workspace_reuse_matches_fresh_forward() {
+    let cfg = config();
+    let weights = build_weights(&cfg, 12, 3, 11);
+    let ids = vec![3_i64, 1, 4, 1, 5, 2];
+    let mask = vec![1.0f32, 1.0, 0.0, 1.0, 1.0, 1.0];
+    let expected = forward_reference(&cfg, &weights, &ids, &mask).unwrap();
+    let mut workspace = HostOptWorkspace::new();
+    for _ in 0..3 {
+        let got = forward_host_opt_with(&mut workspace, &cfg, &weights, &ids, &mask).unwrap();
+        let diff = got
+            .iter()
+            .zip(&expected)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        assert!(diff <= 2e-2, "workspace reuse diff {diff}");
+    }
+    assert!(workspace.retained_bytes() > 0);
 }
 
 #[test]

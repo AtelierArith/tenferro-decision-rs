@@ -15,6 +15,7 @@ use std::path::PathBuf;
 
 use hf_fetch::{CheckpointSpec, Hub};
 use jeff_infer::checkpoint::load_checkpoint;
+use jeff_infer::host_opt::forward_host_opt;
 use jeff_infer::model::forward_reference;
 
 /// The `mstrasser/Jeff-Qwen3.5-0.8B` commit the committed reference was
@@ -77,5 +78,18 @@ fn forward_matches_production_reference() {
     assert!(
         diff < 1e-3 * scale,
         "logits differ by {diff} (scale {scale})"
+    );
+
+    // The host-optimized path must match the oracle (and thus the reference).
+    let optimized = forward_host_opt(&cfg, &weights, &ids, &mask).unwrap();
+    let opt_diff = optimized
+        .iter()
+        .zip(&got)
+        .map(|(a, b)| (a - b).abs())
+        .fold(0.0f32, f32::max);
+    eprintln!("production Jeff host-opt vs oracle: logit diff {opt_diff} (scale {scale})");
+    assert!(
+        opt_diff < 1e-4 * scale,
+        "host-opt logits differ from the oracle by {opt_diff} (scale {scale})"
     );
 }

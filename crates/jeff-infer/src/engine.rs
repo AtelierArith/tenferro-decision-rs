@@ -33,6 +33,7 @@ use tenferro_gated_delta::GatedDeltaWorkspace;
 use tenferro_infer::TensorCache;
 
 use crate::config::DecisionConfig;
+use crate::host_opt::{HostOptWorkspace, forward_host_opt_with};
 use crate::model::{
     DeltaKernel, JeffConfig, JeffWeights, forward_reference_with, forward_tenferro_cached_kernel,
 };
@@ -45,6 +46,10 @@ pub enum JeffBackend {
     /// correctness oracle).
     #[default]
     Host,
+    /// The host-optimized forward: same math as [`JeffBackend::Host`] but rayon
+    /// parallel (tokens/heads/elements) with a reusable workspace, ported from
+    /// the Julia native CPU runtime. The fastest CPU path.
+    HostOpt,
     /// The tenferro-native forward — backend-portable, with the DeltaNet
     /// running through the fused host recurrent kernel (`GatedDelta` extension
     /// op) on CPU by default.
@@ -62,6 +67,8 @@ pub struct JeffEngine {
     runtime: Arc<EagerRuntime>,
     /// DeltaNet scratch reused across rows.
     workspace: GatedDeltaWorkspace,
+    /// Activation buffers for the host-optimized forward.
+    host_opt: HostOptWorkspace,
     /// Weight tensors cached across rows (tenferro backend).
     cache: TensorCache,
     /// How the tenferro forward runs each Gated DeltaNet layer.
@@ -103,6 +110,7 @@ impl JeffEngine {
             backend,
             runtime,
             workspace: GatedDeltaWorkspace::new(),
+            host_opt: HostOptWorkspace::new(),
             cache: TensorCache::new(),
             delta_kernel: DeltaKernel::default(),
         })
@@ -165,6 +173,9 @@ impl JeffEngine {
         match self.backend {
             JeffBackend::Host => {
                 forward_reference_with(&mut self.workspace, &self.config, &self.weights, ids, &mask)
+            }
+            JeffBackend::HostOpt => {
+                forward_host_opt_with(&mut self.host_opt, &self.config, &self.weights, ids, &mask)
             }
             JeffBackend::Tenferro => self
                 .runtime

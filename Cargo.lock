@@ -1081,6 +1081,7 @@ dependencies = [
  "cpu-kernels",
  "decision-core",
  "hf-fetch",
+ "rayon",
  "safetensors-io",
  "serde_json",
  "tenferro-ad",

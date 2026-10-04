@@ -49,8 +49,28 @@ pub fn delta_layer_recurrent_slices<'a>(
     let value_width = vd * cfg.value_heads;
     let conv_channels = 2 * key_width + value_width;
 
+    // Optional stage profiling, enabled with `TENFERRO_DELTA_PROFILE=1`. The
+    // env lookup is cached so the disabled path is a single atomic load.
+    static DELTA_PROFILE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let profile =
+        *DELTA_PROFILE.get_or_init(|| std::env::var_os("TENFERRO_DELTA_PROFILE").is_some());
+    let mut lap = std::time::Instant::now();
+    macro_rules! stage {
+        ($name:literal) => {
+            if profile {
+                eprintln!(
+                    "    delta {:<10} {:8.3} ms",
+                    $name,
+                    lap.elapsed().as_secs_f64() * 1e3
+                );
+                lap = std::time::Instant::now();
+            }
+        };
+    }
+
     ws.masked.resize(cfg.hidden * length, 0.0);
     mask_rows_into(x, cfg.hidden, length, mask, &mut ws.masked);
+    stage!("mask");
 
     ws.qkv_proj.resize(conv_channels * length, 0.0);
     linear_into(
@@ -61,6 +81,7 @@ pub fn delta_layer_recurrent_slices<'a>(
         length,
         &mut ws.qkv_proj,
     );
+    stage!("qkv");
 
     ws.mixed.resize(conv_channels * length, 0.0);
     causal_depthwise_silu_into(
@@ -71,6 +92,7 @@ pub fn delta_layer_recurrent_slices<'a>(
         cfg.conv_taps,
         &mut ws.mixed,
     );
+    stage!("conv+silu");
 
     ws.z_proj.resize(value_width * length, 0.0);
     linear_into(
@@ -81,6 +103,7 @@ pub fn delta_layer_recurrent_slices<'a>(
         length,
         &mut ws.z_proj,
     );
+    stage!("z");
 
     ws.a_proj.resize(cfg.value_heads * length, 0.0);
     linear_into(
@@ -101,6 +124,7 @@ pub fn delta_layer_recurrent_slices<'a>(
         length,
         &mut ws.b_proj,
     );
+    stage!("ab");
 
     ws.beta.resize(cfg.value_heads * length, 0.0);
     ws.decay.resize(cfg.value_heads * length, 0.0);
@@ -112,6 +136,7 @@ pub fn delta_layer_recurrent_slices<'a>(
                 weights.a_decay[head] * softplus(ws.a_proj[index] + weights.dt_bias[head]);
         }
     }
+    stage!("beta/decay");
 
     // The value heads are independent: run them in parallel, each writing its
     // own `HeadScratch`.
@@ -128,6 +153,7 @@ pub fn delta_layer_recurrent_slices<'a>(
             );
         });
     }
+    stage!("scan");
 
     ws.out.resize(value_width * length, 0.0);
     {
@@ -138,6 +164,7 @@ pub fn delta_layer_recurrent_slices<'a>(
             out[start..start + vd * length].copy_from_slice(&scratch.output);
         }
     }
+    stage!("out-copy");
 
     ws.output.resize(cfg.hidden * length, 0.0);
     linear_into(
@@ -148,6 +175,8 @@ pub fn delta_layer_recurrent_slices<'a>(
         length,
         &mut ws.output,
     );
+    stage!("out_proj");
+    let _ = lap;
     Ok(&ws.output)
 }
 
@@ -213,43 +242,60 @@ fn scan_head(
         }
     }
 
+    // The state S (value_dim × key_dim) is stored transposed as `(key_dim,
+    // value_dim)`, so every scan loop is a contiguous axpy over the value
+    // dimension with a scalar key/query — no stride-`length` gather. This
+    // matches the Julia recurrent kernel and vectorizes; the summation order is
+    // unchanged, so the result is bit-identical to the row-major scan.
     s.state.resize(vd * kd, 0.0);
     s.prediction.resize(vd, 0.0);
     s.correction.resize(vd, 0.0);
     s.result.resize(vd, 0.0);
     s.state.iter_mut().for_each(|value| *value = 0.0);
 
-    for t in 0..length {
-        let factor = decay[head * length + t].exp();
-        let write = beta[head * length + t];
+    {
+        let state = &mut s.state;
+        let prediction = &mut s.prediction;
+        let correction = &mut s.correction;
+        let result = &mut s.result;
+        let k = &s.k;
+        let q = &s.q;
+        let v_act = &s.v;
+        let z_act = &s.z;
+        let output = &mut s.output;
 
-        for v in 0..vd {
-            let mut acc = 0.0f32;
-            for d in 0..kd {
-                acc += s.state[v * kd + d] * s.k[d * length + t];
-            }
-            s.prediction[v] = acc;
-        }
-        for v in 0..vd {
-            s.correction[v] = write * (s.v[v * length + t] - factor * s.prediction[v]);
-        }
-        for v in 0..vd {
-            for d in 0..kd {
-                s.state[v * kd + d] =
-                    factor * s.state[v * kd + d] + s.correction[v] * s.k[d * length + t];
-            }
-        }
-        for v in 0..vd {
-            let mut acc = 0.0f32;
-            for d in 0..kd {
-                acc += s.state[v * kd + d] * s.q[d * length + t];
-            }
-            s.result[v] = acc;
-        }
+        for t in 0..length {
+            let factor = decay[head * length + t].exp();
+            let write = beta[head * length + t];
 
-        rms_noncentered_in_place(&mut s.result, weights.norm, cfg.eps);
-        for v in 0..vd {
-            s.output[v * length + t] = s.result[v] * silu(s.z[v * length + t]);
+            // prediction = S · k.
+            prediction.iter_mut().for_each(|value| *value = 0.0);
+            for (d, row) in state.chunks_exact(vd).enumerate() {
+                let key = k[d * length + t];
+                for (prediction, state) in prediction.iter_mut().zip(row) {
+                    *prediction += state * key;
+                }
+            }
+            for (v, corr) in correction.iter_mut().enumerate() {
+                *corr = write * (v_act[v * length + t] - factor * prediction[v]);
+            }
+
+            // Fused update and readout: S ← factor·S + correction·kᵀ, result = S·q.
+            result.iter_mut().for_each(|value| *value = 0.0);
+            for (d, row) in state.chunks_exact_mut(vd).enumerate() {
+                let key = k[d * length + t];
+                let query = q[d * length + t];
+                for (v, cell) in row.iter_mut().enumerate() {
+                    let updated = factor * (*cell) + correction[v] * key;
+                    *cell = updated;
+                    result[v] += updated * query;
+                }
+            }
+
+            rms_noncentered_in_place(result, weights.norm, cfg.eps);
+            for v in 0..vd {
+                output[v * length + t] = result[v] * silu(z_act[v * length + t]);
+            }
         }
     }
 }

@@ -9,6 +9,7 @@
 use std::time::Instant;
 
 use jeff_infer::checkpoint::load_checkpoint;
+use jeff_infer::host_opt::{HostOptWorkspace, forward_host_opt_with};
 use jeff_infer::model::{
     DeltaKernel, forward_reference, forward_tenferro, forward_tenferro_cached_kernel,
 };
@@ -50,6 +51,7 @@ fn main() {
     let (cfg, weights) = (checkpoint.config, checkpoint.weights);
 
     let mut shapes = Vec::new();
+    let mut host_opt_ws = HostOptWorkspace::new();
     for length in [8usize, 16, 64] {
         let ids: Vec<i64> = (0..length).map(|i| BASE[i % BASE.len()]).collect();
         let mask = vec![1.0f32; length];
@@ -65,6 +67,18 @@ fn main() {
         let mut value = stats(samples);
         value["length"] = json!(length);
         value["batch"] = json!(1);
+
+        // The host-optimized path with a reused activation workspace.
+        for _ in 0..warmup {
+            let _ = forward_host_opt_with(&mut host_opt_ws, &cfg, &weights, &ids, &mask).unwrap();
+        }
+        let mut opt_samples = Vec::new();
+        for _ in 0..iters {
+            let timer = Instant::now();
+            let _ = forward_host_opt_with(&mut host_opt_ws, &cfg, &weights, &ids, &mask).unwrap();
+            opt_samples.push(timer.elapsed().as_secs_f64() * 1000.0);
+        }
+        value["host_opt"] = stats(opt_samples);
         shapes.push(value);
     }
 
