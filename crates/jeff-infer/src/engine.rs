@@ -33,7 +33,9 @@ use tenferro_gated_delta::GatedDeltaWorkspace;
 use tenferro_infer::TensorCache;
 
 use crate::config::DecisionConfig;
-use crate::model::{JeffConfig, JeffWeights, forward_reference_with, forward_tenferro_cached};
+use crate::model::{
+    DeltaKernel, JeffConfig, JeffWeights, forward_reference_with, forward_tenferro_cached_kernel,
+};
 use crate::readout::{choice_answer, noul_answer, score_answer};
 
 /// Which forward the engine runs.
@@ -43,8 +45,9 @@ pub enum JeffBackend {
     /// correctness oracle).
     #[default]
     Host,
-    /// The tenferro-native forward — backend-portable, but slower on CPU today
-    /// (per-layer host/tensor round trips and the chunked DeltaNet).
+    /// The tenferro-native forward — backend-portable, with the DeltaNet
+    /// running through the fused host recurrent kernel (`GatedDelta` extension
+    /// op) on CPU by default.
     Tenferro,
 }
 
@@ -61,6 +64,8 @@ pub struct JeffEngine {
     workspace: GatedDeltaWorkspace,
     /// Weight tensors cached across rows (tenferro backend).
     cache: TensorCache,
+    /// How the tenferro forward runs each Gated DeltaNet layer.
+    delta_kernel: DeltaKernel,
 }
 
 impl JeffEngine {
@@ -99,7 +104,14 @@ impl JeffEngine {
             runtime,
             workspace: GatedDeltaWorkspace::new(),
             cache: TensorCache::new(),
+            delta_kernel: DeltaKernel::default(),
         })
+    }
+
+    /// Select how the tenferro forward runs each Gated DeltaNet layer.
+    pub fn with_delta_kernel(mut self, kernel: DeltaKernel) -> Self {
+        self.delta_kernel = kernel;
+        self
     }
 
     /// The selected forward.
@@ -157,7 +169,7 @@ impl JeffEngine {
             JeffBackend::Tenferro => self
                 .runtime
                 .with_eager_session(|session| {
-                    forward_tenferro_cached(
+                    forward_tenferro_cached_kernel(
                         &mut self.workspace,
                         &mut self.cache,
                         session,
@@ -165,6 +177,7 @@ impl JeffEngine {
                         &self.weights,
                         ids,
                         &mask,
+                        self.delta_kernel,
                     )
                 })
                 .map_err(forward_error)?

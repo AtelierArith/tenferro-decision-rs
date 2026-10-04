@@ -30,8 +30,16 @@ every weight tensor on every call.
   DeltaNet workspace; `JeffEngine` owns the runtime, workspace, and cache.
 - **`tenferro-gated-delta::tensor_layer`** — a fully tensor-native,
   **head-batched** Gated DeltaNet (mask, causal depthwise conv, Q/K L2-norm,
-  gates, chunked scan, output projection). Jeff's tenferro path calls it
-  directly, so there are no host round-trips between layers.
+  gates, chunked scan, output projection). `DeltaKernel::TensorNative` keeps the
+  DeltaNet entirely in-session for backend portability.
+- **Host recurrent DeltaNet via the `GatedDelta` extension op** — the default
+  `DeltaKernel::HostRecurrent` runs the fused host recurrent kernel *through the
+  session* (`EagerSessionGatedDeltaExt::gated_delta`). The op reads every weight
+  in place (the column-major buffers *are* the kernel's row-major operands) and
+  borrows them (`GatedDeltaWeightSlices`), so switching kernels costs no extra
+  copies. This keeps the forward tenferro-first while calling the fastest CPU
+  kernel on the DeltaNet; on a non-CPU backend the op is unsupported and the
+  layer falls back to `TensorNative`.
 - The engines' `decide` / `logits` / `row_logits` now take `&mut self` for the
   cache (the eager session API requires a `Send` closure, so a `RefCell` borrow
   cannot cross it).
@@ -61,17 +69,22 @@ Julia's OpenBLAS).
 
 Jeff, L8 (host `+GEMM+rayon` is the oracle / CPU best):
 
-| path | L8 |
-|---|---:|
-| host + GEMM + rayon | 177 ms |
-| tenferro, fresh cache each call | 4677 ms |
-| tenferro, reused cache, old host-round-trip chunked path | 1693 ms |
-| tenferro, reused cache, tensor-native (head-sequential) | 496 ms |
-| **tenferro, reused cache, tensor-native, head-batched** | **342 ms** |
+| path | L8 | L64 |
+|---|---:|---:|
+| host + GEMM + rayon | 178 ms | 841 ms |
+| tenferro, fresh cache each call | 4677 ms | — |
+| tenferro, reused cache, old host-round-trip chunked path | 1693 ms | — |
+| tenferro, reused cache, tensor-native (head-sequential) | 496 ms | — |
+| tenferro, reused cache, tensor-native, head-batched | 365 ms | 878 ms |
+| **tenferro, reused cache, host recurrent DeltaNet (`GatedDelta` op)** | **298 ms** | **601 ms** |
 
-Caching plus the tensor-native rewrite cut the tenferro path ~5× (1693 → 342 ms),
-to ~1.9× the host path on CPU. The remaining gap is the tenferro eager-op /
-small-GEMM overhead; the payoff is a single backend-portable code path.
+Caching plus the tensor-native rewrite cut the tenferro path ~5× (1693 → 342 ms).
+Routing the DeltaNet through the fused host recurrent kernel (`DeltaKernel::HostRecurrent`,
+the default, via the zero-copy `GatedDelta` extension op — see below) cuts it
+further, to ~1.7× the host at L8 and **0.71× at L64** (the tenferro path is
+faster there). The remaining L8 gap is the tenferro eager-op / small-GEMM
+overhead spread across attention/MLP; the payoff is a single backend-portable
+code path that reaches the fastest CPU kernel per op.
 
 ## Backend selection
 
@@ -90,9 +103,24 @@ Making the extension op execute through tenferro session ops is **not feasible**
 with the current extension API: `execute_in_session` receives only a
 `&mut dyn BackendSession`, and `ExtensionExecutionContext` exposes just the
 backend and caches — no tensor-op helpers (`dot_general`, `triangular_solve`,
-…). The op therefore keeps its CPU fused kernel. This is not a GPU blocker for
-the production path, which already runs Gated DeltaNet through
-`tensor_layer::delta_layer_tenferro_native` (session ops).
+…). The op therefore keeps its CPU fused kernel.
+
+Because the host recurrent kernel is faster than the tensor-native chunked scan
+on CPU (measured ~1.8× on the layer; see `bench_delta_paths`), the Jeff tenferro
+forward **uses the extension op by default**: `DeltaKernel::HostRecurrent`
+invokes it through the eager session, so the forward stays tenferro-first and
+the kernel is the host fast path. `DeltaKernel::TensorNative` selects the
+in-session chunked formulation instead (what a future non-CPU backend would
+need), and is available via `JeffEngine::with_delta_kernel`. The forward is
+tenferro-native on every other op regardless.
+
+The op is zero-copy: the inputs are the host kernel's operands in row-major
+order held as column-major tenferro tensors (`prepare_kernel_weights` builds
+them with `TensorCache::col_major`, no transpose), and `delta_layer_recurrent_slices`
+borrows them via `GatedDeltaWeightSlices` instead of owning copies. Feeding the
+old "textbook" column-major `(in, out)` layout made the op transpose every
+weight per call and run 3–11× slower than the bare kernel; the row-major input
+layout removes that entirely.
 
 ## Next
 

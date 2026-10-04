@@ -15,7 +15,7 @@ use rayon::prelude::*;
 
 use crate::config::GatedDeltaConfig;
 use crate::conv::causal_depthwise_silu_into;
-use crate::layer::{GatedDeltaWeights, linear_into, mask_rows_into};
+use crate::layer::{GatedDeltaWeightSlices, GatedDeltaWeights, linear_into, mask_rows_into};
 use crate::ops::{l2_normalize, rms_noncentered_in_place, sigmoid, silu, softplus};
 use crate::workspace::{GatedDeltaWorkspace, HeadScratch};
 
@@ -24,6 +24,19 @@ use crate::workspace::{GatedDeltaWorkspace, HeadScratch};
 pub fn delta_layer_recurrent<'a>(
     cfg: &GatedDeltaConfig,
     weights: &GatedDeltaWeights,
+    x: &[f32],
+    mask: &[f32],
+    ws: &'a mut GatedDeltaWorkspace,
+) -> decision_core::Result<&'a [f32]> {
+    let slices = weights.slices();
+    delta_layer_recurrent_slices(cfg, &slices, x, mask, ws)
+}
+
+/// [`delta_layer_recurrent`] on borrowed weight slices, so the fused kernel can
+/// run directly on the tenferro extension op's in-place inputs (no copy).
+pub fn delta_layer_recurrent_slices<'a>(
+    cfg: &GatedDeltaConfig,
+    weights: &GatedDeltaWeightSlices<'_>,
     x: &[f32],
     mask: &[f32],
     ws: &'a mut GatedDeltaWorkspace,
@@ -41,7 +54,7 @@ pub fn delta_layer_recurrent<'a>(
 
     ws.qkv_proj.resize(conv_channels * length, 0.0);
     linear_into(
-        &weights.qkv,
+        weights.qkv,
         cfg.hidden,
         conv_channels,
         &ws.masked,
@@ -54,14 +67,14 @@ pub fn delta_layer_recurrent<'a>(
         &ws.qkv_proj,
         conv_channels,
         length,
-        &weights.conv,
+        weights.conv,
         cfg.conv_taps,
         &mut ws.mixed,
     );
 
     ws.z_proj.resize(value_width * length, 0.0);
     linear_into(
-        &weights.z,
+        weights.z,
         cfg.hidden,
         value_width,
         &ws.masked,
@@ -71,7 +84,7 @@ pub fn delta_layer_recurrent<'a>(
 
     ws.a_proj.resize(cfg.value_heads * length, 0.0);
     linear_into(
-        &weights.a,
+        weights.a,
         cfg.hidden,
         cfg.value_heads,
         &ws.masked,
@@ -81,7 +94,7 @@ pub fn delta_layer_recurrent<'a>(
 
     ws.b_proj.resize(cfg.value_heads * length, 0.0);
     linear_into(
-        &weights.b,
+        weights.b,
         cfg.hidden,
         cfg.value_heads,
         &ws.masked,
@@ -128,7 +141,7 @@ pub fn delta_layer_recurrent<'a>(
 
     ws.output.resize(cfg.hidden * length, 0.0);
     linear_into(
-        &weights.out_proj,
+        weights.out_proj,
         value_width,
         cfg.hidden,
         &ws.out,
@@ -142,7 +155,7 @@ pub fn delta_layer_recurrent<'a>(
 #[allow(clippy::too_many_arguments)]
 fn scan_head(
     cfg: &GatedDeltaConfig,
-    weights: &GatedDeltaWeights,
+    weights: &GatedDeltaWeightSlices<'_>,
     mixed: &[f32],
     z_proj: &[f32],
     beta: &[f32],
@@ -234,7 +247,7 @@ fn scan_head(
             s.result[v] = acc;
         }
 
-        rms_noncentered_in_place(&mut s.result, &weights.norm, cfg.eps);
+        rms_noncentered_in_place(&mut s.result, weights.norm, cfg.eps);
         for v in 0..vd {
             s.output[v * length + t] = s.result[v] * silu(s.z[v * length + t]);
         }

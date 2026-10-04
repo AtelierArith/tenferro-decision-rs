@@ -1,6 +1,6 @@
 [package]
 name = "tenferro-ext"
-description = "Self-hosted tenferro extension ops for the decision engines (erf, exact GELU)"
+description = "Self-hosted tenferro extension ops for the decision engines (erf, exact GELU, CPU GEMM)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,3 +13,4 @@ tenferro-ad.workspace = true
 tenferro-runtime.workspace = true
 tenferro-tensor.workspace = true
 tenferro-cpu.workspace = true
+cpu-kernels.workspace = true

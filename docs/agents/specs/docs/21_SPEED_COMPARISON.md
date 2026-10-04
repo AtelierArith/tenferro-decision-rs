@@ -117,9 +117,13 @@ Warmup 1, 3 iterations, median.
   single-threaded elementwise/normalization work dominate at L64.
 - Rust model loading is ~1.2–2.6× faster than Julia (4297–4542 ms vs
   5442–11756 ms).
-- `forward_tenferro` is rebuilt from tenferro ops (`tensor_layer`: mask, causal
-  conv, Q/K L2-norm, gates, head-batched chunked scan, output projection) with a
-  reused `TensorCache`. At L8 it is **342 ms** (fresh cache 4677 ms), ~1.9× the
-  host path; the trajectory was 1693 → 496 (tensor-native) → 418 (head-batched)
-  → 342 ms. `JeffEngine` defaults to the host backend and offers the tenferro
-  one (`JeffBackend::Tenferro`) for portability.
+- `forward_tenferro` is rebuilt from tenferro ops (`tensor_layer` for the
+  fallback kernel; the `GatedDelta` extension op for the default) with a reused
+  `TensorCache`. At L8 the cached path was 342 ms with the tensor-native chunked
+  DeltaNet; routing the DeltaNet through the fused host recurrent kernel
+  (`DeltaKernel::HostRecurrent`, the default) cuts it further — measured
+  298 ms vs 365 ms (tensor-native) at L8 and 601 ms vs 878 ms at L64 in
+  `bench_tenferro_kernels` (where the host oracle was 178 ms / 841 ms). The
+  tenferro path is now faster than the host at L64. `JeffEngine` defaults to
+  the host backend and offers the tenferro one (`JeffBackend::Tenferro`) for
+  portability.

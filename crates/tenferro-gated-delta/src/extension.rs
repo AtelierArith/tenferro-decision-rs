@@ -6,13 +6,16 @@
 //! and the self-hosted `erf` op. Descriptor fields are semantic only; `x`,
 //! `mask`, and the nine weight tensors are inputs in the fixed order below:
 //!
-//! `x (hidden, L)`, `mask (L,)`, `qkv (hidden, 2k+v)`, `z (hidden, v)`,
-//! `a (hidden, value_heads)`, `b (hidden, value_heads)`,
-//! `conv (conv_taps, 2k+v)`, `a_decay (value_heads,)`, `dt_bias (value_heads,)`,
-//! `norm (value_dim,)`, `out_proj (v, hidden)`.
+//! `x (L, hidden)`, `mask (L,)`, `qkv (2k+v, hidden)`, `z (v, hidden)`,
+//! `a (value_heads, hidden)`, `b (value_heads, hidden)`,
+//! `conv (2k+v, conv_taps)`, `a_decay (value_heads,)`, `dt_bias (value_heads,)`,
+//! `norm (value_dim,)`, `out_proj (hidden, v)`.
 //!
-//! Execution runs the fused host recurrent kernel on the CPU; no hidden
-//! transfer or process-global cache is involved.
+//! Each 2-D input is column-major, so its buffer is exactly the fused host
+//! kernel's row-major operand (`x` is row-major `(hidden, L)`, `qkv` is
+//! row-major `(hidden, 2k+v)`, ...). Execution therefore reads every input in
+//! place and runs the fused host recurrent kernel on the CPU; no hidden transfer
+//! or process-global cache is involved. The output is `(hidden, L)` column-major.
 
 use std::any::Any;
 use std::hash::Hasher;
@@ -30,8 +33,8 @@ use tenferro_runtime::{ErrorPhase, ExtensionModule};
 use tenferro_tensor::{BackendSession, DType, Tensor, TensorBackend, TensorRead};
 
 use crate::config::{Algorithm, GatedDeltaConfig};
-use crate::layer::GatedDeltaWeights;
-use crate::recurrent::delta_layer_recurrent;
+use crate::layer::GatedDeltaWeightSlices;
+use crate::recurrent::delta_layer_recurrent_slices;
 use crate::workspace::GatedDeltaWorkspace;
 
 /// Stable family identifier for the `GatedDelta` extension op.
@@ -140,22 +143,18 @@ impl ExtensionOp for GatedDeltaOp {
         &self,
         ctx: &mut ExtensionShapeContext<'_>,
     ) -> tenferro_tensor::Result<Vec<(DType, Vec<SymDim>)>> {
-        Ok(vec![(ctx.input_dtype(0)?, ctx.input_shape(0)?.to_vec())])
+        // `x` is `(L, hidden)`; the layer returns `(hidden, L)`.
+        let shape = ctx.input_shape(0)?.to_vec();
+        if shape.len() != 2 {
+            return Err(tensor_error("x", "expected a 2-D `x`"));
+        }
+        let out = vec![shape[1].clone(), shape[0].clone()];
+        Ok(vec![(ctx.input_dtype(0)?, out)])
     }
 }
 
 fn tensor_error(field: &'static str, message: impl Into<String>) -> tenferro_tensor::Error {
     tenferro_tensor::Error::invalid_argument("tenferro-gated-delta::gated_delta", field, message)
-}
-
-fn matrix_row_major(rows: usize, cols: usize, column_major: &[f32]) -> Vec<f32> {
-    let mut out = vec![0.0f32; rows * cols];
-    for row in 0..rows {
-        for col in 0..cols {
-            out[row * cols + col] = column_major[row + col * rows];
-        }
-    }
-    out
 }
 
 fn execute_gated_delta_in_session(
@@ -174,59 +173,57 @@ fn execute_gated_delta_in_session(
         ));
     }
 
-    // Convert a 2-D column-major input to the row-major `(rows, cols)` layout the
-    // host kernel uses; 1-D inputs are copied verbatim.
-    let matrix = |index: usize, field: &'static str| -> tenferro_tensor::Result<Vec<f32>> {
-        let shape = inputs[index].shape();
-        let data = inputs[index]
+    // Every input is read in place: the column-major buffers are already the
+    // fused kernel's row-major operands, so no transpose or copy is needed.
+    let slice = |index: usize, field: &'static str| -> tenferro_tensor::Result<&[f32]> {
+        inputs[index]
             .as_slice::<f32>()
-            .map_err(|error| tensor_error(field, error.to_string()))?;
-        match shape {
-            [rows, cols] => Ok(matrix_row_major(*rows, *cols, data)),
-            [_] => Ok(data.to_vec()),
-            _ => Err(tensor_error(field, "expected a 1-D or 2-D f32 tensor")),
-        }
+            .map_err(|error| tensor_error(field, error.to_string()))
     };
 
     let x_shape = inputs[0].shape();
-    if x_shape.len() != 2 || x_shape[0] != op.hidden {
+    if x_shape.len() != 2 || x_shape[1] != op.hidden {
         return Err(tensor_error(
             "x",
-            "expected a 2-D tensor whose first dimension is `hidden`",
+            "expected a 2-D `x` whose second dimension is `hidden`",
         ));
     }
-    let length = x_shape[1];
+    let length = x_shape[0];
     if inputs[1].shape() != [length] {
         return Err(tensor_error(
             "mask",
-            "length must equal `x`'s second dimension",
+            "length must equal `x`'s first dimension",
         ));
     }
 
-    let x = matrix(0, "x")?;
-    let mask = matrix(1, "mask")?;
-
-    let weights = GatedDeltaWeights {
-        qkv: matrix(2, "qkv")?,
-        z: matrix(3, "z")?,
-        a: matrix(4, "a")?,
-        b: matrix(5, "b")?,
-        conv: matrix(6, "conv")?,
-        a_decay: matrix(7, "a_decay")?,
-        dt_bias: matrix(8, "dt_bias")?,
-        norm: matrix(9, "norm")?,
-        out_proj: matrix(10, "out_proj")?,
+    let weight_slices = GatedDeltaWeightSlices {
+        qkv: slice(2, "qkv")?,
+        z: slice(3, "z")?,
+        a: slice(4, "a")?,
+        b: slice(5, "b")?,
+        conv: slice(6, "conv")?,
+        a_decay: slice(7, "a_decay")?,
+        dt_bias: slice(8, "dt_bias")?,
+        norm: slice(9, "norm")?,
+        out_proj: slice(10, "out_proj")?,
     };
     let config = op.config();
-    weights
+    weight_slices
         .validate(&config)
         .map_err(|error| tensor_error("weights", error.to_string()))?;
 
     let mut workspace = GatedDeltaWorkspace::new();
-    let output = delta_layer_recurrent(&config, &weights, &x, &mask, &mut workspace)
-        .map_err(|error| tensor_error("weights", error.to_string()))?;
+    let output = delta_layer_recurrent_slices(
+        &config,
+        &weight_slices,
+        slice(0, "x")?,
+        slice(1, "mask")?,
+        &mut workspace,
+    )
+    .map_err(|error| tensor_error("weights", error.to_string()))?;
 
-    // The layer output is row-major `(hidden, length)`; tensors are column-major.
+    // The kernel output is row-major `(hidden, length)`; tensors are
+    // column-major, so transpose into the `(hidden, length)` output buffer.
     let mut column_major = vec![0.0f32; op.hidden * length];
     for row in 0..op.hidden {
         for column in 0..length {

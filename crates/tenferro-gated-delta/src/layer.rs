@@ -46,6 +46,55 @@ pub struct GatedDeltaWeights {
 impl GatedDeltaWeights {
     /// Validate tensor lengths against the config.
     pub fn validate(&self, cfg: &GatedDeltaConfig) -> Result<(), DecisionError> {
+        self.slices().validate(cfg)
+    }
+
+    /// Borrow the weights as slices, so the fused host kernel can run on
+    /// borrowed buffers (the tenferro extension op reads its inputs in place).
+    pub fn slices(&self) -> GatedDeltaWeightSlices<'_> {
+        GatedDeltaWeightSlices {
+            qkv: &self.qkv,
+            z: &self.z,
+            a: &self.a,
+            b: &self.b,
+            conv: &self.conv,
+            a_decay: &self.a_decay,
+            dt_bias: &self.dt_bias,
+            norm: &self.norm,
+            out_proj: &self.out_proj,
+        }
+    }
+}
+
+/// Borrowed view of [`GatedDeltaWeights`], in the same row-major `(in, out)`
+/// layouts. The fused recurrent kernel takes this so callers that already hold
+/// the weights as slices (e.g. the tenferro extension op reading its inputs)
+/// need not copy them.
+#[derive(Clone, Copy, Debug)]
+pub struct GatedDeltaWeightSlices<'a> {
+    /// Fused q/k/v projection `(hidden, 2*key_width + value_width)`.
+    pub qkv: &'a [f32],
+    /// Output gate projection `(hidden, value_width)`.
+    pub z: &'a [f32],
+    /// Decay projection `(hidden, value_heads)`.
+    pub a: &'a [f32],
+    /// Write-strength projection `(hidden, value_heads)`.
+    pub b: &'a [f32],
+    /// Depthwise convolution kernel `(conv_taps, conv_channels)`.
+    pub conv: &'a [f32],
+    /// Precomputed `-exp(A_log)` `(value_heads,)`.
+    pub a_decay: &'a [f32],
+    /// Decay bias `(value_heads,)`.
+    pub dt_bias: &'a [f32],
+    /// Non-centered RMSNorm scale `(value_dim,)`.
+    pub norm: &'a [f32],
+    /// Output projection `(value_width, hidden)`.
+    pub out_proj: &'a [f32],
+}
+
+impl GatedDeltaWeightSlices<'_> {
+    /// Validate tensor lengths against the config.
+    pub fn validate(&self, cfg: &GatedDeltaConfig) -> Result<(), DecisionError> {
         let key_width = cfg.key_dim * cfg.key_heads;
         let value_width = cfg.value_dim * cfg.value_heads;
         let conv_channels = 2 * key_width + value_width;

@@ -81,7 +81,7 @@ fn main() {
             .unwrap()
             .unwrap();
     };
-    let _ = eager_run();
+    eager_run();
     let start = Instant::now();
     for _ in 0..iters {
         eager_run();

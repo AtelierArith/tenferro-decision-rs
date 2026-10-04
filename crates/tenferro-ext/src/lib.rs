@@ -7,8 +7,15 @@
 //! The `f32` kernel ports the MLX Metal `erff`/`expm1f` sequence used by Laya's
 //! reference (`extern/Laya.jl/src/mathfns.jl`), so the eager GELU matches the
 //! host reference bit-for-bit in `f32`. `f64` uses Abramowitz–Stegun 7.1.26.
+//!
+//! [`gemm`] adds a dense `y = weightᵀ · x` op backed by the shared
+//! `cpu-kernels` GEMM, so the eager session can reach our BLAS-class host path.
 
 #![allow(clippy::approx_constant, clippy::excessive_precision)]
+
+mod gemm;
+
+pub use gemm::{EagerSessionGemmExt, GEMM_FAMILY_ID, GemmOp};
 
 use std::any::Any;
 use std::hash::Hasher;

@@ -163,3 +163,44 @@ For these projection shapes faer was even **faster** than our host
 `matrixmultiply`/Accelerate kernel (~1.3–2.1×), so eager's GEMM provider is not
 the whole-model bottleneck. The two fixable items are the per-call analysis
 (cache slot unused) and the BLAS-without-linalg limitation (filed as #1992).
+
+## Our usage: calling the fastest CPU kernel through the session
+
+Since tenferro-rs itself is pinned, the wins that need no upstream change come
+from how **we** use it. Two self-hosted extension ops put our host CPU kernels
+behind the eager session, so the forward stays tenferro-first:
+
+- `tenferro-gated-delta::extension::GatedDeltaOp` — the fused host recurrent
+  Gated DeltaNet. **Now the Jeff tenferro default** (`DeltaKernel::HostRecurrent`;
+  `TensorNative` remains for backend portability). Zero-copy: the op reads the
+  host kernel's row-major operands from the column-major input buffers in place
+  and borrows them (`GatedDeltaWeightSlices`). The old `(in, out)` column-major
+  input layout transposed every weight per call (3–11× slower than the kernel);
+  the row-major input layout removes it. Layer effect (`bench_delta_paths`,
+  L8/16/64): extension op 1.0–1.13× the bare kernel and ~1.8× faster than the
+  tensor-native chunked layer.
+- `tenferro-ext::gemm::GemmOp` — a dense `y = weightᵀ x` projection backed by
+  `cpu-kernels` (Accelerate). Correct and zero-copy, but **not** wired in: for
+  our tall-skinny decode shapes faer (tenferro's default) is already faster
+  (see the MWE above), so this op only proves the mechanism.
+
+Whole-model effect (`bench_tenferro_kernels`, production Jeff checkpoint,
+`RAYON_NUM_THREADS=8`, release):
+
+| length | host | tenferro `HostRecurrent` | tenferro `TensorNative` |
+|---:|---:|---:|---:|
+| 8 | 178 ms | 298 ms (1.68×) | 365 ms (2.05×) |
+| 16 | 261 ms | 346 ms (1.33×) | 480 ms (1.84×) |
+| 64 | 841 ms | **601 ms (0.71×)** | 878 ms (1.04×) |
+
+So `HostRecurrent` is consistently ~1.2–1.45× faster than `TensorNative` and
+makes the tenferro path faster than the host at L64, all without touching
+tenferro-rs.
+
+A sampling profile of the L8 forward (`sample`) shows the remaining L8 gap is not
+in the DeltaNet: the largest real costs are faer's skinny-GEMM microkernels,
+Accelerate (the host DeltaNet kernels), and tenferro-cpu's **layout copies**
+(`structural::typed_copy_into_uninit`, from the forward's transposes/reshapes),
+with much idle time in thread-pool/barrier waits — i.e. small-shape parallel
+inefficiency, not Rust bookkeeping. Reducing our own transpose/reshape count is
+the next our-usage lever.

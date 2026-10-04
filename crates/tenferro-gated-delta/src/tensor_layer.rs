@@ -74,6 +74,59 @@ pub fn prepare_tensor_weights(
     })
 }
 
+/// Prepared weights for the fused host recurrent kernel, in its **row-major**
+/// layout, held as column-major tenferro tensors so their buffers *are* the
+/// kernel operands (zero transpose). Build with [`prepare_kernel_weights`].
+#[derive(Clone, Debug)]
+pub struct GatedDeltaKernelWeights {
+    /// `qkv (2k+v, hidden)`, buffer is row-major `(hidden, 2k+v)`.
+    pub qkv: EagerTensor,
+    /// `z (v, hidden)`, buffer is row-major `(hidden, v)`.
+    pub z: EagerTensor,
+    /// `a (value_heads, hidden)`.
+    pub a: EagerTensor,
+    /// `b (value_heads, hidden)`.
+    pub b: EagerTensor,
+    /// `conv (2k+v, conv_taps)`, buffer is row-major `(conv_taps, 2k+v)`.
+    pub conv: EagerTensor,
+    /// `a_decay (value_heads,)`.
+    pub a_decay: EagerTensor,
+    /// `dt_bias (value_heads,)`.
+    pub dt_bias: EagerTensor,
+    /// `norm (value_dim,)`.
+    pub norm: EagerTensor,
+    /// `out_proj (hidden, v)`, buffer is row-major `(v, hidden)`.
+    pub out_proj: EagerTensor,
+}
+
+/// Build the [`GatedDeltaKernelWeights`] for a layer, reusing `cache`.
+///
+/// Unlike [`prepare_tensor_weights`], these tensors keep the host kernel's
+/// row-major buffers verbatim (their logical shapes are transposed), so the
+/// `GatedDelta` extension op can read them in place.
+pub fn prepare_kernel_weights(
+    session: &mut EagerSession<'_>,
+    cfg: &GatedDeltaConfig,
+    weights: &GatedDeltaWeights,
+    cache: &mut TensorCache,
+) -> AdResult<GatedDeltaKernelWeights> {
+    weights.validate(cfg).map_err(invalid_weights)?;
+    let key_width = cfg.key_dim * cfg.key_heads;
+    let value_width = cfg.value_dim * cfg.value_heads;
+    let conv_channels = 2 * key_width + value_width;
+    Ok(GatedDeltaKernelWeights {
+        qkv: cache.col_major(session, vec![conv_channels, cfg.hidden], &weights.qkv)?,
+        z: cache.col_major(session, vec![value_width, cfg.hidden], &weights.z)?,
+        a: cache.col_major(session, vec![cfg.value_heads, cfg.hidden], &weights.a)?,
+        b: cache.col_major(session, vec![cfg.value_heads, cfg.hidden], &weights.b)?,
+        conv: cache.col_major(session, vec![conv_channels, cfg.conv_taps], &weights.conv)?,
+        a_decay: cache.col_major(session, vec![cfg.value_heads], &weights.a_decay)?,
+        dt_bias: cache.col_major(session, vec![cfg.value_heads], &weights.dt_bias)?,
+        norm: cache.col_major(session, vec![cfg.value_dim], &weights.norm)?,
+        out_proj: cache.col_major(session, vec![cfg.hidden, value_width], &weights.out_proj)?,
+    })
+}
+
 /// A rank-1 constant, used for broadcast scalars.
 fn scalar(session: &mut EagerSession<'_>, value: f32) -> AdResult<EagerTensor> {
     constant(session, &[1], &[value])

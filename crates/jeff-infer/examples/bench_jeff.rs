@@ -9,7 +9,9 @@
 use std::time::Instant;
 
 use jeff_infer::checkpoint::load_checkpoint;
-use jeff_infer::model::{forward_reference, forward_tenferro, forward_tenferro_cached};
+use jeff_infer::model::{
+    DeltaKernel, forward_reference, forward_tenferro, forward_tenferro_cached_kernel,
+};
 use serde_json::json;
 use tenferro_ad::EagerRuntime;
 use tenferro_cpu::CpuBackend;
@@ -73,41 +75,16 @@ fn main() {
     let mask = vec![1.0f32; length];
     let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
 
-    let time = |cached: bool| -> serde_json::Value {
+    let time = |cached: bool, kernel: DeltaKernel| -> serde_json::Value {
         let mut workspace = GatedDeltaWorkspace::new();
         let mut cache = TensorCache::new();
-        let _ = runtime
-            .with_eager_session(|session| {
-                if cached {
-                    forward_tenferro_cached(
-                        &mut workspace,
-                        &mut cache,
-                        session,
-                        &cfg,
-                        &weights,
-                        &ids,
-                        &mask,
-                    )
-                } else {
-                    forward_tenferro(session, &cfg, &weights, &ids, &mask)
-                }
-            })
-            .unwrap()
-            .unwrap();
-        let mut samples = Vec::new();
-        for _ in 0..2 {
+        let run = |workspace: &mut GatedDeltaWorkspace, cache: &mut TensorCache| -> f64 {
             let timer = Instant::now();
             let _ = runtime
                 .with_eager_session(|session| {
                     if cached {
-                        forward_tenferro_cached(
-                            &mut workspace,
-                            &mut cache,
-                            session,
-                            &cfg,
-                            &weights,
-                            &ids,
-                            &mask,
+                        forward_tenferro_cached_kernel(
+                            workspace, cache, session, &cfg, &weights, &ids, &mask, kernel,
                         )
                     } else {
                         forward_tenferro(session, &cfg, &weights, &ids, &mask)
@@ -115,15 +92,22 @@ fn main() {
                 })
                 .unwrap()
                 .unwrap();
-            samples.push(timer.elapsed().as_secs_f64() * 1000.0);
+            timer.elapsed().as_secs_f64() * 1000.0
+        };
+        let _ = run(&mut workspace, &mut cache);
+        let mut samples = Vec::new();
+        for _ in 0..2 {
+            samples.push(run(&mut workspace, &mut cache));
         }
         let mut value = stats(samples);
         value["cached"] = json!(cached);
+        value["delta_kernel"] = json!(format!("{kernel:?}"));
         value["cache_entries"] = json!(cache.len());
         value
     };
-    let tenferro = time(false);
-    let tenferro_cached = time(true);
+    let tenferro = time(false, DeltaKernel::default());
+    let tenferro_cached = time(true, DeltaKernel::HostRecurrent);
+    let tenferro_native = time(true, DeltaKernel::TensorNative);
 
     let out = json!({
         "runtime": "rust-cpu",
@@ -133,6 +117,7 @@ fn main() {
         "shapes": shapes,
         "tenferro_forward_8": tenferro,
         "tenferro_cached_forward_8": tenferro_cached,
+        "tenferro_native_forward_8": tenferro_native,
     });
     println!("{}", serde_json::to_string(&out).unwrap());
 }

@@ -46,9 +46,11 @@ fn main() {
 
     println!("eager dot_general vs direct faer GEMM (Par::rayon(0)), iters={iters}");
     let shapes = [
-        (1024usize, 1024usize, 64usize),
-        (1024, 4096, 8),
-        (2048, 1024, 64),
+        (1024usize, 1024usize, 8usize),
+        (1024, 1024, 64),
+        (1024, 1024, 512),
+        (4096, 1024, 512),
+        (4096, 4096, 512),
     ];
     for &(in_dim, out_dim, length) in &shapes {
         let mut state = 7u64;

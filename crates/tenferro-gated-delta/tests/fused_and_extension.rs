@@ -57,16 +57,6 @@ fn weights(cfg: &GatedDeltaConfig, seed: u64) -> GatedDeltaWeights {
     }
 }
 
-fn col_major(rows: usize, cols: usize, row_major: &[f32]) -> Vec<f32> {
-    let mut out = vec![0.0f32; rows * cols];
-    for row in 0..rows {
-        for col in 0..cols {
-            out[row + col * rows] = row_major[row * cols + col];
-        }
-    }
-    out
-}
-
 fn row_major(rows: usize, cols: usize, col_major: &[f32]) -> Vec<f32> {
     let mut out = vec![0.0f32; rows * cols];
     for row in 0..rows {
@@ -150,30 +140,30 @@ fn extension_op_matches_reference() {
     let out = runtime
         .with_eager_session(|session| {
             let x_t = session.constant_from(Tensor::from_vec_col_major(
-                vec![cfg.hidden, length],
-                col_major(cfg.hidden, length, &x),
+                vec![length, cfg.hidden],
+                x.clone(),
             )?)?;
             let mask_t =
                 session.constant_from(Tensor::from_vec_col_major(vec![length], mask.clone())?)?;
             let qkv = session.constant_from(Tensor::from_vec_col_major(
-                vec![cfg.hidden, conv_channels],
-                col_major(cfg.hidden, conv_channels, &w.qkv),
+                vec![conv_channels, cfg.hidden],
+                w.qkv.clone(),
             )?)?;
             let z = session.constant_from(Tensor::from_vec_col_major(
-                vec![cfg.hidden, value_width],
-                col_major(cfg.hidden, value_width, &w.z),
+                vec![value_width, cfg.hidden],
+                w.z.clone(),
             )?)?;
             let a = session.constant_from(Tensor::from_vec_col_major(
-                vec![cfg.hidden, cfg.value_heads],
-                col_major(cfg.hidden, cfg.value_heads, &w.a),
+                vec![cfg.value_heads, cfg.hidden],
+                w.a.clone(),
             )?)?;
             let b = session.constant_from(Tensor::from_vec_col_major(
-                vec![cfg.hidden, cfg.value_heads],
-                col_major(cfg.hidden, cfg.value_heads, &w.b),
+                vec![cfg.value_heads, cfg.hidden],
+                w.b.clone(),
             )?)?;
             let conv = session.constant_from(Tensor::from_vec_col_major(
-                vec![cfg.conv_taps, conv_channels],
-                col_major(cfg.conv_taps, conv_channels, &w.conv),
+                vec![conv_channels, cfg.conv_taps],
+                w.conv.clone(),
             )?)?;
             let a_decay = session.constant_from(Tensor::from_vec_col_major(
                 vec![cfg.value_heads],
@@ -188,8 +178,8 @@ fn extension_op_matches_reference() {
                 w.norm.clone(),
             )?)?;
             let out_proj = session.constant_from(Tensor::from_vec_col_major(
-                vec![value_width, cfg.hidden],
-                col_major(value_width, cfg.hidden, &w.out_proj),
+                vec![cfg.hidden, value_width],
+                w.out_proj.clone(),
             )?)?;
             session.gated_delta(
                 op,

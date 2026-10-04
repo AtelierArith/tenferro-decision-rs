@@ -23,10 +23,24 @@
 use decision_core::{DecisionError, Result};
 use tenferro_ad::{EagerSession, EagerTensor};
 use tenferro_gated_delta::{
-    GatedDeltaConfig, GatedDeltaWeights, GatedDeltaWorkspace, delta_layer_recurrent,
-    delta_layer_tenferro_native, prepare_tensor_weights,
+    EagerSessionGatedDeltaExt, GatedDeltaConfig, GatedDeltaOp, GatedDeltaWeights,
+    GatedDeltaWorkspace, delta_layer_recurrent, delta_layer_tenferro_native,
+    prepare_kernel_weights, prepare_tensor_weights,
 };
 use tenferro_infer::{TensorCache, activation, embedding, linear, norm, rope};
+
+/// How the tenferro forward runs a Gated DeltaNet layer.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DeltaKernel {
+    /// The fused host recurrent kernel, invoked through the `GatedDelta`
+    /// extension op (CPU only). The session stays tenferro-first; only the
+    /// layer's kernel is the host fast path.
+    #[default]
+    HostRecurrent,
+    /// The fully tensor-native chunked formulation. Backend-portable, but ~1.8x
+    /// slower on CPU.
+    TensorNative,
+}
 
 /// Shared model dimensions.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -574,6 +588,29 @@ pub fn forward_tenferro_with(
 /// [`forward_tenferro_with`] with a reusable DeltaNet workspace **and** weight
 /// cache, so the weights are not re-transposed and re-created on every call.
 pub fn forward_tenferro_cached(
+    workspace: &mut GatedDeltaWorkspace,
+    cache: &mut TensorCache,
+    session: &mut EagerSession<'_>,
+    cfg: &JeffConfig,
+    weights: &JeffWeights,
+    ids: &[i64],
+    mask: &[f32],
+) -> tenferro_ad::Result<Vec<f32>> {
+    forward_tenferro_cached_kernel(
+        workspace,
+        cache,
+        session,
+        cfg,
+        weights,
+        ids,
+        mask,
+        DeltaKernel::default(),
+    )
+}
+
+/// [`forward_tenferro_cached`] with an explicit [`DeltaKernel`].
+#[allow(clippy::too_many_arguments)]
+pub fn forward_tenferro_cached_kernel(
     _workspace: &mut GatedDeltaWorkspace,
     cache: &mut TensorCache,
     session: &mut EagerSession<'_>,
@@ -581,6 +618,7 @@ pub fn forward_tenferro_cached(
     weights: &JeffWeights,
     ids: &[i64],
     mask: &[f32],
+    kernel: DeltaKernel,
 ) -> tenferro_ad::Result<Vec<f32>> {
     weights.validate(cfg).map_err(config_error)?;
     let length = ids.len();
@@ -608,16 +646,49 @@ pub fn forward_tenferro_cached(
         // rms_norm normalizes the last axis, so work on (length, hidden).
         let hidden_t = session.transpose(&hidden, &[1, 0])?;
         let normalized_t = norm::rms_norm(session, &hidden_t, &input_norm, true, cfg.eps as f64)?;
-        let normalized = session.transpose(&normalized_t, &[1, 0])?; // [hidden, length]
 
         let mixed_t = match &layer.attention {
             AttentionWeights::Full(w) => {
+                let normalized = session.transpose(&normalized_t, &[1, 0])?; // [hidden, length]
                 full_attention_tenferro(session, cache, w, cfg, &normalized, mask, length)?
             }
-            AttentionWeights::Delta { weights, config } => {
-                let tensor_weights = prepare_tensor_weights(session, config, weights, cache)?;
-                delta_layer_tenferro_native(session, config, &tensor_weights, &normalized, mask)?
-            }
+            AttentionWeights::Delta { weights, config } => match kernel {
+                DeltaKernel::TensorNative => {
+                    let normalized = session.transpose(&normalized_t, &[1, 0])?; // [hidden, length]
+                    let tensor_weights = prepare_tensor_weights(session, config, weights, cache)?;
+                    delta_layer_tenferro_native(
+                        session,
+                        config,
+                        &tensor_weights,
+                        &normalized,
+                        mask,
+                    )?
+                }
+                DeltaKernel::HostRecurrent => {
+                    let kernel_weights = prepare_kernel_weights(session, config, weights, cache)?;
+                    let op = GatedDeltaOp::from_config(config);
+                    let mask_t = session.constant_from(tenferro_ad::Tensor::from_vec_col_major(
+                        vec![length],
+                        mask.to_vec(),
+                    )?)?;
+                    session.gated_delta(
+                        op,
+                        &[
+                            &normalized_t,
+                            &mask_t,
+                            &kernel_weights.qkv,
+                            &kernel_weights.z,
+                            &kernel_weights.a,
+                            &kernel_weights.b,
+                            &kernel_weights.conv,
+                            &kernel_weights.a_decay,
+                            &kernel_weights.dt_bias,
+                            &kernel_weights.norm,
+                            &kernel_weights.out_proj,
+                        ],
+                    )?
+                }
+            },
         };
         let residual = session.add(&hidden, &mixed_t)?;
 

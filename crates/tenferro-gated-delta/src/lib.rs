@@ -35,12 +35,15 @@ pub mod workspace;
 pub use config::{Algorithm, GatedDeltaConfig};
 pub use conv::{causal_depthwise_silu, causal_depthwise_silu_into};
 pub use extension::{EagerSessionGatedDeltaExt, GATED_DELTA_FAMILY_ID, GatedDeltaOp};
-pub use layer::{GatedDeltaWeights, delta_layer_reference, delta_layer_tenferro};
+pub use layer::{
+    GatedDeltaWeightSlices, GatedDeltaWeights, delta_layer_reference, delta_layer_tenferro,
+};
 pub use plan::{AlgorithmChoice, BackendCaps, GatedDeltaPlan, resolve_algorithm};
-pub use recurrent::delta_layer_recurrent;
+pub use recurrent::{delta_layer_recurrent, delta_layer_recurrent_slices};
 pub use reference::{DeltaScanInputs, delta_scan_reference};
 pub use tensor_layer::{
-    GatedDeltaTensorWeights, delta_layer_tenferro_native, prepare_tensor_weights,
+    GatedDeltaKernelWeights, GatedDeltaTensorWeights, delta_layer_tenferro_native,
+    prepare_kernel_weights, prepare_tensor_weights,
 };
 pub use workspace::GatedDeltaWorkspace;
 
