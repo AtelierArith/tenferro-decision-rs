@@ -148,7 +148,7 @@ bundled webpki roots).
 | Area | Blocker |
 |---|---|
 | Laya numerical parity (Phase 2) | No Laya checkpoint/fixture in this environment; validate against `extern/Laya.jl` once tokenizer/weights assets exist. (Jeff now has real-fixture parity in `native_fixture.rs`.) |
-| Exact GELU (Laya parity) | tenferro has no `erf`; needs a `tenferro-infer` extension op porting `mlx_erf`. |
+| Exact GELU (Laya parity) | tenferro has no `erf`; implement `erf`/`gelu_erf` as a self-hosted extension op (upstream issue #1973 closed as not planned). |
 | Phase 4 / 7 CUDA | No CUDA hardware here; code can be written but not validated. |
 | Phase 8 FP16/BF16 | Deferred by decision: tenferro's public dtype set lacks `F16`/`BF16` at the pinned revision. |
 | Phase 10 Apple GPU | tenferro's WebGPU surface is effectively `dot_general` (F32/C32) plus transpose; most primitives are missing. |

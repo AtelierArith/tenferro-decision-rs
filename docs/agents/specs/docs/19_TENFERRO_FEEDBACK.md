@@ -14,7 +14,7 @@ against revision `471c4278` (workspace version `0.7.1`).
 
 | # | Issue |
 |---|---|
-| [#1973](https://github.com/tensor4all/tenferro-rs/issues/1973) | Add an elementwise `erf` op (needed for exact GELU) |
+| [#1973](https://github.com/tensor4all/tenferro-rs/issues/1973) | Add an elementwise `erf` op (needed for exact GELU) — **closed as not planned**; handled by a self-hosted extension op |
 | [#1974](https://github.com/tensor4all/tenferro-rs/issues/1974) | Add `cumsum` / `cumprod` |
 | [#1975](https://github.com/tensor4all/tenferro-rs/issues/1975) | Add `sigmoid` / `silu` / `softplus` / `gelu` convenience ops |
 | [#1976](https://github.com/tensor4all/tenferro-rs/issues/1976) | Add `argmax` / `reduce_mean` / `softmax` / `log_softmax` |
