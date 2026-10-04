@@ -2,8 +2,8 @@
 
 mod common;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::Duration;
 
@@ -11,8 +11,8 @@ use decision_core::State;
 
 use jev_client::testing::MockTransport;
 use jev_client::{
-    with_client, ClientBuilder, HttpRequest, HttpResponse, JevError, PinnedModel, RecordingSleeper,
-    StaticCredential, SystemOneRequest, Transport, TransportError,
+    ClientBuilder, HttpRequest, HttpResponse, JevError, PinnedModel, RecordingSleeper,
+    StaticCredential, SystemOneRequest, Transport, TransportError, with_client,
 };
 
 use common::{build_client, json_ok, noul_questions, noul_response};

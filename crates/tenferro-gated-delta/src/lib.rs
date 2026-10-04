@@ -32,11 +32,11 @@ pub mod workspace;
 
 pub use config::{Algorithm, GatedDeltaConfig};
 pub use conv::{causal_depthwise_silu, causal_depthwise_silu_into};
-pub use extension::{EagerSessionGatedDeltaExt, GatedDeltaOp, GATED_DELTA_FAMILY_ID};
-pub use layer::{delta_layer_reference, delta_layer_tenferro, GatedDeltaWeights};
-pub use plan::{resolve_algorithm, AlgorithmChoice, BackendCaps, GatedDeltaPlan};
+pub use extension::{EagerSessionGatedDeltaExt, GATED_DELTA_FAMILY_ID, GatedDeltaOp};
+pub use layer::{GatedDeltaWeights, delta_layer_reference, delta_layer_tenferro};
+pub use plan::{AlgorithmChoice, BackendCaps, GatedDeltaPlan, resolve_algorithm};
 pub use recurrent::delta_layer_recurrent;
-pub use reference::{delta_scan_reference, DeltaScanInputs};
+pub use reference::{DeltaScanInputs, delta_scan_reference};
 pub use workspace::GatedDeltaWorkspace;
 
 use decision_core::{DecisionError, Result};

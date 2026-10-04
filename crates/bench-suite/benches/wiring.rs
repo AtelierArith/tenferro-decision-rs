@@ -5,7 +5,7 @@
 //! primitive and model benchmarks replace this in later phases.
 
 use bench_suite::BenchMetadata;
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion};
+use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use tenferro_cpu::CpuBackend;
 use tenferro_runtime::{Tensor, TensorSessionOpsExt};
 use tenferro_tensor::BackendSessionHost;

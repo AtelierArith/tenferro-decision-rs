@@ -7,8 +7,8 @@ use decision_core::State;
 
 use jev_client::testing::MockTransport;
 use jev_client::{
-    endpoint_url, EnvCredential, HttpResponse, JevError, RecordingSleeper, StaticCredential,
-    SystemOneRequest, MODELS_PATH, SYSTEM_ONE_PATH,
+    EnvCredential, HttpResponse, JevError, MODELS_PATH, RecordingSleeper, SYSTEM_ONE_PATH,
+    StaticCredential, SystemOneRequest, endpoint_url,
 };
 
 use common::{build_client, json_ok, noul_questions, noul_response};
@@ -99,8 +99,15 @@ fn endpoint_is_fixed_and_paths_are_allowlisted() {
 
 #[test]
 fn proxy_env_does_not_change_the_endpoint() {
-    std::env::set_var("HTTPS_PROXY", "http://attacker.example:8080");
+    // SAFETY: edition 2024 makes environment mutation unsafe because it can
+    // race with other threads. This test only sets the variable around one
+    // call and removes it immediately.
+    unsafe {
+        std::env::set_var("HTTPS_PROXY", "http://attacker.example:8080");
+    }
     let result = endpoint_url(SYSTEM_ONE_PATH);
-    std::env::remove_var("HTTPS_PROXY");
+    unsafe {
+        std::env::remove_var("HTTPS_PROXY");
+    }
     assert_eq!(result.unwrap(), "https://api.typesafe.ai:443/v1/systemone");
 }

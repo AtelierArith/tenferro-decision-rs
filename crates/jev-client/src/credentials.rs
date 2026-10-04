@@ -7,8 +7,8 @@
 //! values longer than 4 KiB.
 
 use std::fmt;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::errors::{JevError, Result};
 

@@ -6,9 +6,9 @@
 
 use laya_infer::config::{AgentConfig, EncoderConfig, LayerKind};
 use laya_infer::model::{
-    erf, exact_gelu, forward_encoder_reference, forward_encoder_tenferro, forward_reference,
-    forward_tenferro, forward_tenferro_cached, EncoderLayerWeights, HeadLayerWeights, LayaWeights,
-    LayerNormWeights, LinearWeights, ModernBertWeights, TensorCache,
+    EncoderLayerWeights, HeadLayerWeights, LayaWeights, LayerNormWeights, LinearWeights,
+    ModernBertWeights, TensorCache, erf, exact_gelu, forward_encoder_reference,
+    forward_encoder_tenferro, forward_reference, forward_tenferro, forward_tenferro_cached,
 };
 use tenferro_ad::EagerRuntime;
 use tenferro_cpu::CpuBackend;

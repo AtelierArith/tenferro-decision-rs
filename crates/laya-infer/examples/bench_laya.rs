@@ -10,7 +10,7 @@ use std::time::Instant;
 
 use laya_infer::checkpoint::load_checkpoint;
 use laya_infer::model::{
-    forward_reference, forward_tenferro, forward_tenferro_cached, TensorCache,
+    TensorCache, forward_reference, forward_tenferro, forward_tenferro_cached,
 };
 use serde_json::json;
 use tenferro_ad::EagerRuntime;

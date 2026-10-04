@@ -15,7 +15,7 @@ use rayon::prelude::*;
 
 use crate::config::GatedDeltaConfig;
 use crate::conv::causal_depthwise_silu_into;
-use crate::layer::{linear_into, mask_rows_into, GatedDeltaWeights};
+use crate::layer::{GatedDeltaWeights, linear_into, mask_rows_into};
 use crate::ops::{l2_normalize, rms_noncentered_in_place, sigmoid, silu, softplus};
 use crate::workspace::{GatedDeltaWorkspace, HeadScratch};
 

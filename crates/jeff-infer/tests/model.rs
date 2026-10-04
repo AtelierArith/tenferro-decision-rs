@@ -3,8 +3,8 @@
 //! containing both a Gated DeltaNet layer and a full-attention layer.
 
 use jeff_infer::model::{
-    forward_reference, forward_reference_with, forward_tenferro, forward_tenferro_with,
     AttentionWeights, FullAttentionWeights, JeffConfig, JeffWeights, LayerWeights, MlpWeights,
+    forward_reference, forward_reference_with, forward_tenferro, forward_tenferro_with,
 };
 use tenferro_ad::EagerRuntime;
 use tenferro_cpu::CpuBackend;

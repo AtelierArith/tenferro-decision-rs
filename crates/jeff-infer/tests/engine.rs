@@ -10,8 +10,8 @@ use decision_core::{
 use jeff_infer::config::DecisionConfig;
 use jeff_infer::engine::JeffEngine;
 use jeff_infer::model::{
-    forward_reference, AttentionWeights, FullAttentionWeights, JeffConfig, JeffWeights,
-    LayerWeights, MlpWeights,
+    AttentionWeights, FullAttentionWeights, JeffConfig, JeffWeights, LayerWeights, MlpWeights,
+    forward_reference,
 };
 use jeff_infer::readout::probabilities;
 
@@ -272,9 +272,11 @@ fn temperature_changes_the_distribution() {
 fn rejects_text_and_json_states() {
     let mut engine = build_engine(4, 3, 1.0, 7);
     let set = question_set();
-    assert!(engine
-        .system_one(&State::Text("natural language".into()), &set)
-        .is_err());
+    assert!(
+        engine
+            .system_one(&State::Text("natural language".into()), &set)
+            .is_err()
+    );
     let json = State::Json(Content::object([("prompt", Content::string("hi"))]));
     assert!(engine.system_one(&json, &set).is_err());
 }
@@ -286,9 +288,11 @@ fn rejects_batch_question_count_mismatch() {
     set.push("choice", choice_question()).unwrap();
     set.push("noul", noul_question()).unwrap();
     // Three prepared rows but only two questions.
-    assert!(engine
-        .system_one(&State::Prepared(prepared()), &set)
-        .is_err());
+    assert!(
+        engine
+            .system_one(&State::Prepared(prepared()), &set)
+            .is_err()
+    );
 }
 
 #[test]

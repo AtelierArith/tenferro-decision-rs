@@ -16,7 +16,7 @@ use decision_core::{
 
 use crate::errors::{JevError, Result};
 use crate::limits::ResourceLimits;
-use crate::models::{validate_iso_date, ModelInfo, ModelList};
+use crate::models::{ModelInfo, ModelList, validate_iso_date};
 
 /// Probability sums must be within this tolerance of one.
 const SUM_TOLERANCE: f64 = 1e-4;
@@ -699,12 +699,9 @@ mod tests {
     fn rejects_negative_usage() {
         // `-1` is a valid JSON number but not a non-negative integer.
         let body = br#"{"model":"m","usage":{"input_tokens":-1,"output_tokens":0},"answers":{"q":{"type":"noul","noul":0.5}}}"#;
-        assert!(parse_system_one_response(
-            body,
-            &noul_questions(),
-            &ResourceLimits::default(),
-            None
-        )
-        .is_err());
+        assert!(
+            parse_system_one_response(body, &noul_questions(), &ResourceLimits::default(), None)
+                .is_err()
+        );
     }
 }

@@ -39,10 +39,12 @@ fn serializes_the_wire_request_shape() {
     assert_eq!(request.path, "/v1/systemone");
     assert_eq!(request.header("accept"), Some("application/json"));
     assert_eq!(request.header("accept-encoding"), Some("identity"));
-    assert!(request
-        .header("content-type")
-        .unwrap()
-        .starts_with("application/json"));
+    assert!(
+        request
+            .header("content-type")
+            .unwrap()
+            .starts_with("application/json")
+    );
     assert!(request.header("authorization").is_none());
     assert_eq!(
         request.credential.expose_secret(),

@@ -194,8 +194,10 @@ fn subfolder_scopes_the_checkpoint() {
     assert_eq!(dir, cache.join("models--test--repo/snapshots/cafe/a"));
     assert!(dir.join("config.json").is_file());
     assert!(dir.join("data.bin").is_file());
-    assert!(!cache
-        .join("models--test--repo/snapshots/cafe/b/config.json")
-        .exists());
+    assert!(
+        !cache
+            .join("models--test--repo/snapshots/cafe/b/config.json")
+            .exists()
+    );
     std::fs::remove_dir_all(&cache).unwrap();
 }

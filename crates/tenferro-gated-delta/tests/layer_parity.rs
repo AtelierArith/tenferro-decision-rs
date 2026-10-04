@@ -4,7 +4,7 @@
 use tenferro_ad::EagerRuntime;
 use tenferro_cpu::CpuBackend;
 use tenferro_gated_delta::{
-    delta_layer_reference, delta_layer_tenferro, Algorithm, GatedDeltaConfig, GatedDeltaWeights,
+    Algorithm, GatedDeltaConfig, GatedDeltaWeights, delta_layer_reference, delta_layer_tenferro,
 };
 
 struct Lcg(u64);

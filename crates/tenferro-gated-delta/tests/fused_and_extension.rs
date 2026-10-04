@@ -4,9 +4,9 @@
 use tenferro_ad::{EagerRuntime, Tensor};
 use tenferro_cpu::CpuBackend;
 use tenferro_gated_delta::{
-    delta_layer_recurrent, delta_layer_reference, gated_delta, Algorithm, AlgorithmChoice,
-    BackendCaps, EagerSessionGatedDeltaExt, GatedDeltaConfig, GatedDeltaOp, GatedDeltaPlan,
-    GatedDeltaWeights, GatedDeltaWorkspace,
+    Algorithm, AlgorithmChoice, BackendCaps, EagerSessionGatedDeltaExt, GatedDeltaConfig,
+    GatedDeltaOp, GatedDeltaPlan, GatedDeltaWeights, GatedDeltaWorkspace, delta_layer_recurrent,
+    delta_layer_reference, gated_delta,
 };
 
 struct Lcg(u64);

@@ -69,18 +69,24 @@ fn parses_decision_config() {
     assert_eq!(config.temperature, 0.75);
     assert_eq!(config.max_options, 255);
 
-    assert!(DecisionConfig::from_json_str(
-        r#"{"format_version": 2, "temperature": 1.0, "max_options": 10}"#
-    )
-    .is_err());
-    assert!(DecisionConfig::from_json_str(
-        r#"{"format_version": 1, "temperature": 0.0, "max_options": 10}"#
-    )
-    .is_err());
-    assert!(DecisionConfig::from_json_str(
-        r#"{"format_version": 1, "temperature": 1.0, "max_options": 0}"#
-    )
-    .is_err());
+    assert!(
+        DecisionConfig::from_json_str(
+            r#"{"format_version": 2, "temperature": 1.0, "max_options": 10}"#
+        )
+        .is_err()
+    );
+    assert!(
+        DecisionConfig::from_json_str(
+            r#"{"format_version": 1, "temperature": 0.0, "max_options": 10}"#
+        )
+        .is_err()
+    );
+    assert!(
+        DecisionConfig::from_json_str(
+            r#"{"format_version": 1, "temperature": 1.0, "max_options": 0}"#
+        )
+        .is_err()
+    );
 }
 
 #[test]

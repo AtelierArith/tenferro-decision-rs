@@ -25,7 +25,7 @@ use decision_core::{
 use tenferro_gated_delta::GatedDeltaWorkspace;
 
 use crate::config::DecisionConfig;
-use crate::model::{forward_reference_with, JeffConfig, JeffWeights};
+use crate::model::{JeffConfig, JeffWeights, forward_reference_with};
 use crate::readout::{choice_answer, noul_answer, score_answer};
 
 /// A prepared-token Jeff engine: dimensions, decision settings, and weights.
@@ -160,12 +160,12 @@ impl DecisionEngine for JeffEngine {
             State::Text(_) => {
                 return Err(DecisionError::unsupported(
                     "jeff-infer accepts only prepared token states, not text",
-                ))
+                ));
             }
             State::Json(_) => {
                 return Err(DecisionError::unsupported(
                     "jeff-infer accepts only prepared token states, not JSON",
-                ))
+                ));
             }
         };
         prepared.validate()?;

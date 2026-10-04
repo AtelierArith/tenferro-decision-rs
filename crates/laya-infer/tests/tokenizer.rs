@@ -22,7 +22,7 @@ use std::path::{Path, PathBuf};
 
 use laya_infer::prompt::Tokenizer as _;
 use laya_infer::tokenizer::BpeTokenizer;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 /// GPT-2 byte-to-unicode table, matching `Laya.BYTE_TO_CHAR`.
 fn byte_to_char_table() -> [char; 256] {

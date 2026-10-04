@@ -23,8 +23,8 @@
 use decision_core::{DecisionError, Result};
 use tenferro_ad::{EagerSession, EagerTensor};
 use tenferro_gated_delta::{
-    delta_layer_recurrent, gated_delta, GatedDeltaConfig, GatedDeltaPlan, GatedDeltaWeights,
-    GatedDeltaWorkspace,
+    GatedDeltaConfig, GatedDeltaPlan, GatedDeltaWeights, GatedDeltaWorkspace,
+    delta_layer_recurrent, gated_delta,
 };
 use tenferro_infer::{activation, embedding, linear, norm, rope};
 

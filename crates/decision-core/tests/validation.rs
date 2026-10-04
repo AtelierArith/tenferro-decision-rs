@@ -32,16 +32,20 @@ fn choice_requires_between_two_and_255_candidates() {
 fn score_requires_two_to_ten_levels() {
     assert!(ScoreQuestion::new(Content::string("q"), vec!["only".into()]).is_err());
     assert!(ScoreQuestion::new(Content::string("q"), vec!["".into(), "b".into()]).is_err());
-    assert!(ScoreQuestion::new(
-        Content::string("q"),
-        (0..11).map(|i| i.to_string()).collect()
-    )
-    .is_err());
-    assert!(ScoreQuestion::new(
-        Content::string("q"),
-        (0..5).map(|i| i.to_string()).collect()
-    )
-    .is_ok());
+    assert!(
+        ScoreQuestion::new(
+            Content::string("q"),
+            (0..11).map(|i| i.to_string()).collect()
+        )
+        .is_err()
+    );
+    assert!(
+        ScoreQuestion::new(
+            Content::string("q"),
+            (0..5).map(|i| i.to_string()).collect()
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -68,16 +72,20 @@ fn duplicate_candidate_ids_rejected() {
 
 #[test]
 fn empty_instructions_rejected() {
-    assert!(ChoiceQuestion::new(
-        Content::string(""),
-        vec![("a".into(), Content::Null), ("b".into(), Content::Null)]
-    )
-    .is_err());
-    assert!(ChoiceQuestion::new(
-        Content::Null,
-        vec![("a".into(), Content::Null), ("b".into(), Content::Null)]
-    )
-    .is_err());
+    assert!(
+        ChoiceQuestion::new(
+            Content::string(""),
+            vec![("a".into(), Content::Null), ("b".into(), Content::Null)]
+        )
+        .is_err()
+    );
+    assert!(
+        ChoiceQuestion::new(
+            Content::Null,
+            vec![("a".into(), Content::Null), ("b".into(), Content::Null)]
+        )
+        .is_err()
+    );
 }
 
 #[test]
@@ -161,9 +169,11 @@ fn prepared_state_shape_consistency() {
 fn state_validation_dispatches() {
     assert!(State::Text("hello".into()).validate().is_ok());
     assert!(State::Text(String::new()).validate().is_err());
-    assert!(State::Json(Content::object([("a", Content::Int(1))]))
-        .validate()
-        .is_ok());
+    assert!(
+        State::Json(Content::object([("a", Content::Int(1))]))
+            .validate()
+            .is_ok()
+    );
 }
 
 #[test]

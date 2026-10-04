@@ -188,7 +188,7 @@ impl EncoderConfig {
                 return Err(DecisionError::invalid_field(
                     "encoder.layer_types",
                     "expected an array",
-                ))
+                ));
             }
             None => default_layer_types(num_hidden_layers, global_attn_every_n_layers),
         };
@@ -317,7 +317,7 @@ impl AgentConfig {
                 return Err(DecisionError::invalid_field(
                     "rl_agent.act_costs",
                     "expected an object or array",
-                ))
+                ));
             }
         };
 

@@ -283,11 +283,7 @@ fn f16_to_f32(bits: u16) -> f32 {
     } else {
         (1.0 + fraction as f32 / 1024.0) * 2f32.powi(exponent as i32 - 15)
     };
-    if sign == 1 {
-        -magnitude
-    } else {
-        magnitude
-    }
+    if sign == 1 { -magnitude } else { magnitude }
 }
 
 fn invalid_file(path: &Path, message: impl Into<String>) -> DecisionError {

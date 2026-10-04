@@ -15,12 +15,12 @@ use std::hash::Hasher;
 use std::sync::Arc;
 
 use tenferro_ad::extension::{
-    apply_eager_with_targeted_extension_in_session, EagerExtensionTarget,
+    EagerExtensionTarget, apply_eager_with_targeted_extension_in_session,
 };
 use tenferro_ad::{EagerSession, EagerTensor};
 use tenferro_cpu::CpuBackend;
 use tenferro_runtime::extension::{
-    define_extension_runtime, ExtensionOp, ExtensionShapeContext, SymDim,
+    ExtensionOp, ExtensionShapeContext, SymDim, define_extension_runtime,
 };
 use tenferro_runtime::{ErrorPhase, ExtensionModule};
 use tenferro_tensor::{BackendSession, DType, Tensor, TensorBackend, TensorRead};
@@ -96,7 +96,7 @@ fn execute_erf_in_session(
                 "tenferro-ext::erf",
                 "dtype",
                 format!("unsupported dtype {other:?}"),
-            ))
+            ));
         }
     };
     Ok(vec![output])
@@ -190,7 +190,7 @@ fn scalar_like(
                     "dtype",
                     format!("unsupported dtype {other:?}"),
                 ),
-            ))
+            ));
         }
     };
     session.constant_from(tensor)

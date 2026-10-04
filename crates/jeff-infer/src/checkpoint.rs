@@ -397,7 +397,7 @@ fn build_delta(
                 format!(
                     "conv1d weight `{prefix}linear_attn.conv1d.weight` must be [channels, 1, taps], found {conv_shape:?}"
                 ),
-            ))
+            ));
         }
     };
     if channels != conv_channels {
@@ -480,7 +480,7 @@ fn load_readout(file: &SafetensorsFile, hidden: usize) -> Result<(usize, Vec<f32
             return Err(DecisionError::invalid_field(
                 "checkpoint.readout",
                 format!("readout `weight` must be [options, {hidden}], found {shape:?}"),
-            ))
+            ));
         }
     };
     if options > 255 {

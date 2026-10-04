@@ -19,11 +19,11 @@ use tenferro_ad::EagerRuntime;
 use tenferro_cpu::CpuBackend;
 
 use crate::calibration::{
-    action_probability, choice_answer, noul_answer, score_answer, Calibration, LayaDecision, QType,
+    Calibration, LayaDecision, QType, action_probability, choice_answer, noul_answer, score_answer,
 };
 use crate::checkpoint::LayaCheckpoint;
 use crate::config::{AgentConfig, EncoderConfig};
-use crate::model::{forward_tenferro_cached, LayaWeights, TensorCache};
+use crate::model::{LayaWeights, TensorCache, forward_tenferro_cached};
 use crate::prompt::build_sequence;
 use crate::tokenizer::BpeTokenizer;
 

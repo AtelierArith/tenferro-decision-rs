@@ -2,8 +2,8 @@ use std::collections::BTreeMap;
 
 use decision_core::Answer;
 use laya_infer::calibration::{
-    action_probability, choice_answer, clamp_temperature, confidence_from_probs, noul_answer,
-    score_answer, softmax, temp_bucket, Calibration, QType,
+    Calibration, QType, action_probability, choice_answer, clamp_temperature,
+    confidence_from_probs, noul_answer, score_answer, softmax, temp_bucket,
 };
 use laya_infer::config::{AgentConfig, EncoderConfig, LayerKind};
 

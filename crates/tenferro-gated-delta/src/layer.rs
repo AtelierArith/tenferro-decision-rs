@@ -18,7 +18,7 @@ use crate::chunked::{col_major, constant, delta_scan_chunked};
 use crate::config::GatedDeltaConfig;
 use crate::conv::causal_depthwise_silu;
 use crate::ops::{l2_normalize, sigmoid, softplus};
-use crate::reference::{delta_scan_reference, DeltaScanInputs};
+use crate::reference::{DeltaScanInputs, delta_scan_reference};
 
 /// Prepared layer weights, row-major `(in, out)`.
 #[derive(Clone, Debug)]

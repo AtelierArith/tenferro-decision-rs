@@ -3,7 +3,7 @@
 
 use tenferro_ad::EagerRuntime;
 use tenferro_cpu::CpuBackend;
-use tenferro_gated_delta::{chunked::delta_scan_chunked, delta_scan_reference, DeltaScanInputs};
+use tenferro_gated_delta::{DeltaScanInputs, chunked::delta_scan_chunked, delta_scan_reference};
 
 struct Lcg(u64);
 

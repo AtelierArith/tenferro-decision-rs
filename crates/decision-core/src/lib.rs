@@ -26,9 +26,9 @@ pub use content::{Content, MAX_CONTENT_DEPTH};
 pub use engine::{DecisionEngine, PreparedState, State};
 pub use error::{DecisionError, Result};
 pub use question::{
-    ChoiceQuestion, NoulCriteria, NoulQuestion, Question, QuestionId, QuestionSet, ScoreQuestion,
-    MAX_CHOICE_CANDIDATES, MAX_QUESTIONS, MAX_QUESTION_ID_CHARS, MAX_SCORE_LEVELS,
-    MIN_CHOICE_CANDIDATES, MIN_SCORE_LEVELS,
+    ChoiceQuestion, MAX_CHOICE_CANDIDATES, MAX_QUESTION_ID_CHARS, MAX_QUESTIONS, MAX_SCORE_LEVELS,
+    MIN_CHOICE_CANDIDATES, MIN_SCORE_LEVELS, NoulCriteria, NoulQuestion, Question, QuestionId,
+    QuestionSet, ScoreQuestion,
 };
 pub use response::{SystemOneResponse, Usage};
 

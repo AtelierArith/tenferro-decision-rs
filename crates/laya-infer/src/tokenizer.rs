@@ -327,7 +327,7 @@ impl PreTokenizer {
                             _ => {
                                 return Err(DecisionError::invalid(
                                     "Metaspace `replacement` must be a single character",
-                                ))
+                                ));
                             }
                         }
                     }
@@ -340,7 +340,7 @@ impl PreTokenizer {
                     Some(other) => {
                         return Err(DecisionError::unsupported(format!(
                             "unsupported Metaspace prepend_scheme: {other}"
-                        )))
+                        )));
                     }
                     None => match spec.get("add_prefix_space").and_then(Value::as_bool) {
                         Some(false) => PrependScheme::Never,

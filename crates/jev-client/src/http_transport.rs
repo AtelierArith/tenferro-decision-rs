@@ -25,14 +25,14 @@ use std::io::Read;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use reqwest::blocking::{Client, ClientBuilder, Response};
-use reqwest::header::{HeaderMap, HeaderName, HeaderValue, AUTHORIZATION, CONTENT_ENCODING};
-use reqwest::redirect::Policy;
 use reqwest::Method;
+use reqwest::blocking::{Client, ClientBuilder, Response};
+use reqwest::header::{AUTHORIZATION, CONTENT_ENCODING, HeaderMap, HeaderName, HeaderValue};
+use reqwest::redirect::Policy;
 
 use crate::credentials::Secret;
 use crate::transport::{
-    endpoint_url, HttpMethod, HttpRequest, HttpResponse, Transport, TransportError,
+    HttpMethod, HttpRequest, HttpResponse, Transport, TransportError, endpoint_url,
 };
 
 /// The security-critical `reqwest` client configuration.

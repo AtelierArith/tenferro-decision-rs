@@ -79,10 +79,10 @@ mod retry;
 mod serialization;
 mod transport;
 
-pub use client::{with_client, Client, ClientBuilder, SystemOneRequest};
+pub use client::{Client, ClientBuilder, SystemOneRequest, with_client};
 pub use credentials::{
-    validate_credential, CredentialCallback, CredentialCallbackError, CredentialProvider,
-    EnvCredential, Secret, StaticCredential, DEFAULT_ENV_VAR, MAX_CREDENTIAL_BYTES,
+    CredentialCallback, CredentialCallbackError, CredentialProvider, DEFAULT_ENV_VAR,
+    EnvCredential, MAX_CREDENTIAL_BYTES, Secret, StaticCredential, validate_credential,
 };
 pub use errors::{ApiErrorKind, JevError, Result};
 #[cfg(feature = "http")]
@@ -90,8 +90,8 @@ pub use http_transport::ReqwestTransport;
 pub use limits::{ResourceLimits, RetryPolicy, TimeoutPolicy};
 pub use logging::{Event, EventSink, NoopEventSink, Operation};
 pub use models::{ModelInfo, ModelList, ModelRef, MovingAlias, PinnedModel};
-pub use retry::{parse_retry_after, RealSleeper, RecordingSleeper, Sleeper};
+pub use retry::{RealSleeper, RecordingSleeper, Sleeper, parse_retry_after};
 pub use transport::{
-    endpoint_url, testing, HttpMethod, HttpRequest, HttpResponse, Transport, TransportError,
-    UnsupportedTransport, API_HOST, API_PORT, MODELS_PATH, SYSTEM_ONE_PATH, USER_AGENT,
+    API_HOST, API_PORT, HttpMethod, HttpRequest, HttpResponse, MODELS_PATH, SYSTEM_ONE_PATH,
+    Transport, TransportError, USER_AGENT, UnsupportedTransport, endpoint_url, testing,
 };

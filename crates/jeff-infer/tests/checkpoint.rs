@@ -6,10 +6,10 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use jeff_infer::checkpoint::{load_checkpoint, DEFAULT_DELTA_CHUNK_SIZE};
+use jeff_infer::checkpoint::{DEFAULT_DELTA_CHUNK_SIZE, load_checkpoint};
 use jeff_infer::model::{
-    forward_reference, AttentionWeights, FullAttentionWeights, JeffConfig, JeffWeights,
-    LayerWeights, MlpWeights,
+    AttentionWeights, FullAttentionWeights, JeffConfig, JeffWeights, LayerWeights, MlpWeights,
+    forward_reference,
 };
 use tenferro_gated_delta::{Algorithm, GatedDeltaConfig, GatedDeltaWeights};
 

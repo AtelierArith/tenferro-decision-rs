@@ -12,19 +12,19 @@ use std::time::{Duration, Instant};
 
 use decision_core::{QuestionSet, State, SystemOneResponse};
 
-use crate::credentials::{CredentialProvider, EnvCredential, DEFAULT_ENV_VAR};
+use crate::credentials::{CredentialProvider, DEFAULT_ENV_VAR, EnvCredential};
 use crate::errors::{ApiErrorKind, JevError, Result};
 use crate::limits::{ResourceLimits, RetryPolicy, TimeoutPolicy};
 use crate::logging::{Event, EventSink, NoopEventSink, Operation};
 use crate::models::{ModelList, ModelRef};
 use crate::responses::{parse_model_list, parse_system_one_response};
-use crate::retry::{parse_retry_after, RealSleeper, Sleeper};
+use crate::retry::{RealSleeper, Sleeper, parse_retry_after};
 use crate::serialization::serialize_request;
 #[cfg(not(feature = "http"))]
 use crate::transport::UnsupportedTransport;
 use crate::transport::{
-    endpoint_url, HttpMethod, HttpRequest, HttpResponse, Transport, TransportError, MODELS_PATH,
-    SYSTEM_ONE_PATH, USER_AGENT,
+    HttpMethod, HttpRequest, HttpResponse, MODELS_PATH, SYSTEM_ONE_PATH, Transport, TransportError,
+    USER_AGENT, endpoint_url,
 };
 
 const DEFAULT_MAX_INFLIGHT: usize = 8;
