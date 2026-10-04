@@ -1,0 +1,13 @@
+[package]
+name = "laya-infer"
+description = "Laya typed-decision engine (ModernBERT encoder, decision head, calibration)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+decision-core.workspace = true
+serde_json.workspace = true

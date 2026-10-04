@@ -1,0 +1,12 @@
+[package]
+name = "tenferro-gated-delta"
+description = "Chunked and recurrent Gated DeltaNet for the Jeff engine"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+decision-core.workspace = true

@@ -72,6 +72,13 @@ impl DecisionError {
         }
     }
 
+    /// Build an unsupported-configuration error.
+    pub fn unsupported(message: impl Into<String>) -> Self {
+        Self::UnsupportedConfig {
+            message: message.into(),
+        }
+    }
+
     /// The field path, when one was recorded.
     pub fn field(&self) -> Option<&str> {
         match self {
