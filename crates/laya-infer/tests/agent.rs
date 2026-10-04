@@ -250,7 +250,7 @@ fn answers_choice_score_and_noul_from_text() {
 
 #[test]
 fn decide_reports_action_probability_and_json_states_work() {
-    let (_dir, engine) = engine("json");
+    let (_dir, mut engine) = engine("json");
     let state = State::Json(Content::object([("body", Content::string("hello world"))]));
     let decisions = engine.decide(&state, &question_set()).unwrap();
     assert_eq!(decisions.len(), 3);

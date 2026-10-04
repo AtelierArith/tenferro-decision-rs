@@ -19,7 +19,7 @@ tenferro-ad.workspace = true
 tenferro-ext.workspace = true
 tenferro-tensor.workspace = true
 tenferro-infer.workspace = true
+tenferro-cpu.workspace = true
 
 [dev-dependencies]
-tenferro-cpu.workspace = true
 hf-fetch.workspace = true

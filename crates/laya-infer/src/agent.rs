@@ -13,13 +13,17 @@
 use decision_core::{Answer, DecisionEngine, DecisionError, Question, QuestionSet, Result, State};
 
 use std::path::Path;
+use std::sync::Arc;
+
+use tenferro_ad::EagerRuntime;
+use tenferro_cpu::CpuBackend;
 
 use crate::calibration::{
     action_probability, choice_answer, noul_answer, score_answer, Calibration, LayaDecision, QType,
 };
 use crate::checkpoint::LayaCheckpoint;
 use crate::config::{AgentConfig, EncoderConfig};
-use crate::model::{forward_reference, LayaWeights};
+use crate::model::{forward_tenferro_cached, LayaWeights, TensorCache};
 use crate::prompt::build_sequence;
 use crate::tokenizer::BpeTokenizer;
 
@@ -31,6 +35,10 @@ pub struct LayaEngine {
     weights: LayaWeights,
     tokenizer: BpeTokenizer,
     calibration: Calibration,
+    /// The tenferro runtime the production forward runs on (CPU today).
+    runtime: Arc<EagerRuntime>,
+    /// Weight tensors cached across forwards (see [`TensorCache`]).
+    cache: TensorCache,
 }
 
 impl LayaEngine {
@@ -44,12 +52,15 @@ impl LayaEngine {
     ) -> Result<Self> {
         agent.validate(&encoder)?;
         weights.validate(&encoder, &agent)?;
+        let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).map_err(backend_error)?;
         Ok(Self {
             encoder,
             agent,
             weights,
             tokenizer,
             calibration,
+            runtime,
+            cache: TensorCache::new(),
         })
     }
 
@@ -110,7 +121,7 @@ impl LayaEngine {
     }
 
     /// Answer every question and report the action probability.
-    pub fn decide(&self, state: &State, questions: &QuestionSet) -> Result<Vec<LayaDecision>> {
+    pub fn decide(&mut self, state: &State, questions: &QuestionSet) -> Result<Vec<LayaDecision>> {
         state.validate()?;
         questions.validate()?;
         questions
@@ -121,7 +132,7 @@ impl LayaEngine {
     }
 
     /// Answer one question for the whole state.
-    fn decide_one(&self, state: &State, question: &Question) -> Result<LayaDecision> {
+    fn decide_one(&mut self, state: &State, question: &Question) -> Result<LayaDecision> {
         let (ids, markers) = build_sequence(
             &self.tokenizer,
             state,
@@ -146,16 +157,24 @@ impl LayaEngine {
         }
         let mask = vec![true; ids.len()];
         let qtype = question_type(question);
-        let (logits, action) = forward_reference(
-            &self.encoder,
-            &self.agent,
-            &self.weights,
-            &ids,
-            &mask,
-            &marker_pos,
-            &marker_mask,
-            &[qtype.index() as i64],
-        )?;
+        let (logits, action) = self
+            .runtime
+            .with_eager_session(|session| {
+                forward_tenferro_cached(
+                    session,
+                    &mut self.cache,
+                    &self.encoder,
+                    &self.agent,
+                    &self.weights,
+                    &ids,
+                    &mask,
+                    &marker_pos,
+                    &marker_mask,
+                    &[qtype.index() as i64],
+                )
+            })
+            .map_err(forward_error)?
+            .map_err(forward_error)?;
 
         let active: Vec<f64> = logits
             .get(..used)
@@ -197,6 +216,22 @@ fn question_type(question: &Question) -> QType {
         Question::Choice(_) => QType::Choice,
         Question::Score(_) => QType::Score,
         Question::Noul(_) => QType::Noul,
+    }
+}
+
+/// Map a tenferro backend-construction error into a decision error.
+fn backend_error(error: tenferro_ad::Error) -> DecisionError {
+    DecisionError::Backend {
+        message: format!("failed to create the tenferro CPU runtime: {error}"),
+        source: Some(Box::new(error)),
+    }
+}
+
+/// Map a tenferro forward error into a decision error.
+fn forward_error(error: tenferro_ad::Error) -> DecisionError {
+    DecisionError::Backend {
+        message: format!("tenferro forward failed: {error}"),
+        source: Some(Box::new(error)),
     }
 }
 
