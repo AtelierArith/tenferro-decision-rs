@@ -83,7 +83,7 @@ fn parses_agent_config() {
     }"#;
     let agent = AgentConfig::from_json_str(json).unwrap();
     assert_eq!(agent.head_layers, 2);
-    assert_eq!(agent.action_count(), 2);
+    assert_eq!(agent.action_count(), 3);
     assert_eq!(agent.action_names, vec!["escalate", "notify"]); // BTreeMap order? value is serde Map (preserve order off) -> sorted
 }
 

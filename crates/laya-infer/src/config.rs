@@ -245,7 +245,7 @@ fn default_layer_types(layers: usize, every: usize) -> Vec<LayerKind> {
         .collect()
 }
 
-/// Agent-level settings (`rl_agent_config.json`).
+/// Action names from `act_costs`; the action head width is one larger.
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentConfig {
     /// Number of decision-head transformer layers.
@@ -254,14 +254,17 @@ pub struct AgentConfig {
     pub max_len: usize,
     /// Maximum prefix length (option rendering budget).
     pub head_max_len: usize,
-    /// Action names; the action head width.
+    /// Action names from the `act_costs` map.
     pub action_names: Vec<String>,
 }
 
 impl AgentConfig {
-    /// Number of actions.
+    /// Number of action-head outputs.
+    ///
+    /// Mirrors `weights.jl`: `length(act_costs) + 1` (the extra slot is the
+    /// implicit passthrough action).
     pub fn action_count(&self) -> usize {
-        self.action_names.len()
+        self.action_names.len() + 1
     }
 
     /// Validate the agent settings against the encoder limits.
@@ -276,12 +279,6 @@ impl AgentConfig {
             return Err(DecisionError::invalid_field(
                 "rl_agent.max_len",
                 "max_len exceeds max_position_embeddings",
-            ));
-        }
-        if self.action_names.is_empty() {
-            return Err(DecisionError::invalid_field(
-                "rl_agent.act_costs",
-                "at least one action is required",
             ));
         }
         Ok(())

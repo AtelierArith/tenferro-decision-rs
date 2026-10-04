@@ -22,7 +22,7 @@ const INTERMEDIATE: usize = 12;
 const ENC_LAYERS: usize = 2;
 const HEAD_LAYERS: usize = 1;
 const VOCAB: usize = 20;
-const ACTION_COUNT: usize = 2;
+const ACTION_COUNT: usize = 3; // act_costs (2) + the implicit passthrough action
 const ACTION_HIDDEN: usize = 256;
 /// Decision-head MLP width is fixed at `4 * hidden` by `weights.jl`.
 const HEAD_FF: usize = 4 * HIDDEN;

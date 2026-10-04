@@ -34,8 +34,10 @@ loading, a prepared-token engine, and real-fixture parity against the
 `extern/JeffClient.jl` synthetic Qwen3.5 model's independent PyTorch logits,
 while `laya-infer` has a concrete `tokenizer.json` encoder, checkpoint loading,
 the ModernBERT + decision-head forward (with the exact erf GELU from the
-self-hosted `tenferro-ext` extension op), and a text/JSON engine. Validating
-Laya against real checkpoint assets and plans/workspaces remain.
+self-hosted `tenferro-ext` extension op), and a text/JSON engine, validated
+against a seeded Julia-generated fixture (`fixtures/laya-tiny/`, tokenizer and
+forward parity to ~2e-9). Production Laya checkpoint assets and
+plans/workspaces remain.
 See
 [`docs/agents/specs/docs/18_IMPLEMENTATION_STATUS.md`](docs/agents/specs/docs/18_IMPLEMENTATION_STATUS.md)
 for the live status and blockers (CUDA hardware, tenferro `erf`/F16/BF16,
