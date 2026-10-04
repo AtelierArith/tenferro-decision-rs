@@ -185,22 +185,30 @@ behind the eager session, so the forward stays tenferro-first:
   (see the MWE above), so this op only proves the mechanism.
 
 Whole-model effect (`bench_tenferro_kernels`, production Jeff checkpoint,
-`RAYON_NUM_THREADS=8`, release):
+`RAYON_NUM_THREADS=8`, release, best-of-10):
 
 | length | host | tenferro `HostRecurrent` | tenferro `TensorNative` |
 |---:|---:|---:|---:|
-| 8 | 178 ms | 298 ms (1.68×) | 365 ms (2.05×) |
-| 16 | 261 ms | 346 ms (1.33×) | 480 ms (1.84×) |
-| 64 | 841 ms | **601 ms (0.71×)** | 878 ms (1.04×) |
+| 8 | 169 ms | 292 ms (1.73×) | 344 ms (2.04×) |
+| 16 | 224 ms | 360 ms (1.60×) | 459 ms (2.04×) |
+| 64 | 739 ms | **629 ms (0.85×)** | 894 ms (1.21×) |
 
-So `HostRecurrent` is consistently ~1.2–1.45× faster than `TensorNative` and
-makes the tenferro path faster than the host at L64, all without touching
-tenferro-rs.
+So `HostRecurrent` is consistently ~1.2–1.2× faster than `TensorNative` and
+brings the tenferro path within ~1.7× of the host at L8 and ahead of it at L64,
+all without touching tenferro-rs.
 
-A sampling profile of the L8 forward (`sample`) shows the remaining L8 gap is not
-in the DeltaNet: the largest real costs are faer's skinny-GEMM microkernels,
-Accelerate (the host DeltaNet kernels), and tenferro-cpu's **layout copies**
-(`structural::typed_copy_into_uninit`, from the forward's transposes/reshapes),
-with much idle time in thread-pool/barrier waits — i.e. small-shape parallel
-inefficiency, not Rust bookkeeping. Reducing our own transpose/reshape count is
-the next our-usage lever.
+**Unified `(length, hidden)` orientation (our-usage lever).** The Jeff tenferro
+forward was re-oriented to `(length, hidden)` end-to-end (embedding gather,
+rms_norm over the last axis, `linear` contracting the last axis), removing the
+per-layer `(hidden, length) ↔ (length, hidden)` transposes and making the
+`GatedDelta` op's `(length, hidden)` output zero-copy. It is correct (all model,
+fixture, and extension tests pass) and removes redundant ops, but the measured
+wall-clock effect is **within noise** — a sampling profile shows
+tenferro-cpu's `structural::typed_copy_into_uninit` barely moves (13898 → 13167
+self samples at L8), so our forward transposes were not the bulk of the layout
+copies; those come from elsewhere (norm broadcasts, RoPE, attention, the
+`dot_general` path). The remaining L8 gap is faer's skinny-GEMM microkernels,
+Accelerate (the host DeltaNet kernels), and thread-pool/barrier waits — small
+-shape parallel inefficiency, not Rust bookkeeping. `TensorNative` gains two
+transposes (it is written for `(hidden, length)`), so it is slightly slower than
+before; it only matters off-CPU.

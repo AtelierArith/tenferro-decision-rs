@@ -40,6 +40,12 @@ every weight tensor on every call.
   copies. This keeps the forward tenferro-first while calling the fastest CPU
   kernel on the DeltaNet; on a non-CPU backend the op is unsupported and the
   layer falls back to `TensorNative`.
+- **`(length, hidden)` end-to-end** — the Jeff tenferro forward keeps hidden
+  states in `(length, hidden)` (embedding gather, rms_norm over the last axis,
+  `linear` contracting the last axis), so there are no per-layer
+  `(hidden, length) ↔ (length, hidden)` transposes and the `GatedDelta` op's
+  `(length, hidden)` output is zero-copy. The measured wall-clock effect is
+  within noise, but it removes redundant ops (see `22_CPU_KERNEL_OPTIMIZATION.md`).
 - The engines' `decide` / `logits` / `row_logits` now take `&mut self` for the
   cache (the eager session API requires a `Send` closure, so a `RefCell` borrow
   cannot cross it).
@@ -71,12 +77,12 @@ Jeff, L8 (host `+GEMM+rayon` is the oracle / CPU best):
 
 | path | L8 | L64 |
 |---|---:|---:|
-| host + GEMM + rayon | 178 ms | 841 ms |
+| host + GEMM + rayon | 169 ms | 739 ms |
 | tenferro, fresh cache each call | 4677 ms | — |
 | tenferro, reused cache, old host-round-trip chunked path | 1693 ms | — |
 | tenferro, reused cache, tensor-native (head-sequential) | 496 ms | — |
-| tenferro, reused cache, tensor-native, head-batched | 365 ms | 878 ms |
-| **tenferro, reused cache, host recurrent DeltaNet (`GatedDelta` op)** | **298 ms** | **601 ms** |
+| tenferro, reused cache, tensor-native, head-batched | 344 ms | 894 ms |
+| **tenferro, reused cache, host recurrent DeltaNet (`GatedDelta` op)** | **292 ms** | **629 ms** |
 
 Caching plus the tensor-native rewrite cut the tenferro path ~5× (1693 → 342 ms).
 Routing the DeltaNet through the fused host recurrent kernel (`DeltaKernel::HostRecurrent`,

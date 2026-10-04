@@ -57,16 +57,6 @@ fn weights(cfg: &GatedDeltaConfig, seed: u64) -> GatedDeltaWeights {
     }
 }
 
-fn row_major(rows: usize, cols: usize, col_major: &[f32]) -> Vec<f32> {
-    let mut out = vec![0.0f32; rows * cols];
-    for row in 0..rows {
-        for col in 0..cols {
-            out[row * cols + col] = col_major[row + col * rows];
-        }
-    }
-    out
-}
-
 fn max_diff(a: &[f32], b: &[f32]) -> f32 {
     a.iter()
         .zip(b)
@@ -192,7 +182,14 @@ fn extension_op_matches_reference() {
         .unwrap();
     let values = out.value().unwrap();
     let col = values.as_slice::<f32>().unwrap();
-    let got = row_major(cfg.hidden, length, col);
+    // The op returns `(length, hidden)`; the reference is row-major
+    // `(hidden, length)`.
+    let mut got = vec![0.0f32; cfg.hidden * length];
+    for h in 0..cfg.hidden {
+        for l in 0..length {
+            got[h * length + l] = col[l + h * length];
+        }
+    }
     assert!(max_diff(&reference, &got) < 1e-6);
 }
 

@@ -458,6 +458,7 @@ fn extract(
     Ok(out)
 }
 
+#[cfg(test)]
 fn linear_col(
     session: &mut EagerSession<'_>,
     x: &EagerTensor,
@@ -476,6 +477,8 @@ fn linear_col(
     session.transpose(&y, &[1, 0])
 }
 
+/// Full attention over `x` in `(length, hidden)` orientation, returning
+/// `(length, hidden)`.
 fn full_attention_tenferro(
     session: &mut EagerSession<'_>,
     cache: &mut TensorCache,
@@ -499,18 +502,19 @@ fn full_attention_tenferro(
     let q_norm = session.reshape(&q_norm, vec![hd])?;
     let k_norm = session.reshape(&k_norm, vec![hd])?;
 
+    // `(length, width)` -> `(length, hd, heads)` -> `(heads, length, hd)`.
     let project_heads = |session: &mut EagerSession<'_>,
                          weight: &EagerTensor|
      -> tenferro_ad::Result<EagerTensor> {
-        let projected = linear_col(session, x, weight)?; // [width, length]
-        let shaped = session.reshape(&projected, vec![hd, heads, length])?;
-        session.transpose(&shaped, &[1, 2, 0]) // (heads, length, hd)
+        let projected = linear::linear(session, x, weight)?; // (length, width)
+        let shaped = session.reshape(&projected, vec![length, hd, heads])?;
+        session.transpose(&shaped, &[2, 0, 1]) // (heads, length, hd)
     };
 
     let q = project_heads(session, &q_w)?;
     let k = project_heads(session, &k_w)?;
     let v = project_heads(session, &v_w)?;
-    let gate = linear_col(session, x, &gate_w)?; // [width, length]
+    let gate = linear::linear(session, x, &gate_w)?; // (length, width)
 
     let q = norm::rms_norm(session, &q, &q_norm, true, cfg.eps as f64)?;
     let k = norm::rms_norm(session, &k, &k_norm, true, cfg.eps as f64)?;
@@ -544,16 +548,16 @@ fn full_attention_tenferro(
     let attended = tenferro_infer::attention::attention(session, &q, &k, &v, Some(&mask_t), None)?; // (1,heads,length,hd)
     let attended = session.reshape(&attended, vec![heads, length, hd])?;
 
-    // gate: [width, length] -> (heads, length, hd)
-    let gate = session.reshape(&gate, vec![hd, heads, length])?;
-    let gate = session.transpose(&gate, &[1, 2, 0])?;
+    // gate: (length, width) -> (length, hd, heads) -> (heads, length, hd)
+    let gate = session.reshape(&gate, vec![length, hd, heads])?;
+    let gate = session.transpose(&gate, &[2, 0, 1])?;
     let gate = activation::sigmoid(session, &gate)?;
     let gated = session.mul(&attended, &gate)?; // (heads, length, hd)
 
-    // Merge heads: (heads, length, hd) -> (hd, heads, length) -> [width, length].
-    let merged = session.transpose(&gated, &[2, 0, 1])?;
-    let merged = session.reshape(&merged, vec![width, length])?;
-    let out = linear_col(session, &merged, &o_w)?; // [hidden, length]
+    // Merge heads: (heads, length, hd) -> (length, hd, heads) -> (length, width).
+    let merged = session.transpose(&gated, &[1, 2, 0])?;
+    let merged = session.reshape(&merged, vec![length, width])?;
+    let out = linear::linear(session, &merged, &o_w)?; // (length, hidden)
     Ok(out)
 }
 
@@ -631,38 +635,38 @@ pub fn forward_tenferro_cached_kernel(
 
     // Embedding: gather rows of (vocab, hidden) by token ids. The row-major
     // `(hidden, vocab)` table is already the column-major `(vocab, hidden)`
-    // tensor, so no transpose is needed.
+    // tensor, so no transpose is needed. `embedding` returns `(length, hidden)`,
+    // the orientation the whole forward stays in — rms_norm normalizes the last
+    // axis and `linear` contracts the last axis, so no per-layer transposes.
     let table = cache.col_major(session, vec![weights.vocab, cfg.hidden], &weights.embedding)?;
     let ids_t = session.constant_from(tenferro_ad::Tensor::from_vec_col_major(
         vec![length],
         ids.to_vec(),
     )?)?;
     let mut hidden = embedding::embedding(session, &table, &ids_t)?; // (length, hidden)
-    hidden = session.transpose(&hidden, &[1, 0])?; // [hidden, length]
 
     for layer in &weights.layers {
         let input_norm = cache.col(session, vec![cfg.hidden, 1], &layer.input_norm)?;
         let input_norm = session.reshape(&input_norm, vec![cfg.hidden])?;
-        // rms_norm normalizes the last axis, so work on (length, hidden).
-        let hidden_t = session.transpose(&hidden, &[1, 0])?;
-        let normalized_t = norm::rms_norm(session, &hidden_t, &input_norm, true, cfg.eps as f64)?;
+        let normalized = norm::rms_norm(session, &hidden, &input_norm, true, cfg.eps as f64)?;
 
-        let mixed_t = match &layer.attention {
+        let mixed = match &layer.attention {
             AttentionWeights::Full(w) => {
-                let normalized = session.transpose(&normalized_t, &[1, 0])?; // [hidden, length]
                 full_attention_tenferro(session, cache, w, cfg, &normalized, mask, length)?
             }
             AttentionWeights::Delta { weights, config } => match kernel {
                 DeltaKernel::TensorNative => {
-                    let normalized = session.transpose(&normalized_t, &[1, 0])?; // [hidden, length]
+                    // The chunked kernel is written for `(hidden, length)`.
+                    let normalized_t = session.transpose(&normalized, &[1, 0])?;
                     let tensor_weights = prepare_tensor_weights(session, config, weights, cache)?;
-                    delta_layer_tenferro_native(
+                    let mixed_t = delta_layer_tenferro_native(
                         session,
                         config,
                         &tensor_weights,
-                        &normalized,
+                        &normalized_t,
                         mask,
-                    )?
+                    )?;
+                    session.transpose(&mixed_t, &[1, 0])?
                 }
                 DeltaKernel::HostRecurrent => {
                     let kernel_weights = prepare_kernel_weights(session, config, weights, cache)?;
@@ -674,7 +678,7 @@ pub fn forward_tenferro_cached_kernel(
                     session.gated_delta(
                         op,
                         &[
-                            &normalized_t,
+                            &normalized,
                             &mask_t,
                             &kernel_weights.qkv,
                             &kernel_weights.z,
@@ -690,28 +694,25 @@ pub fn forward_tenferro_cached_kernel(
                 }
             },
         };
-        let residual = session.add(&hidden, &mixed_t)?;
+        let residual = session.add(&hidden, &mixed)?; // (length, hidden)
 
         let post_norm = cache.col(session, vec![cfg.hidden, 1], &layer.post_norm)?;
         let post_norm = session.reshape(&post_norm, vec![cfg.hidden])?;
-        let residual_t = session.transpose(&residual, &[1, 0])?;
-        let normalized2_t = norm::rms_norm(session, &residual_t, &post_norm, true, cfg.eps as f64)?;
+        let normalized2 = norm::rms_norm(session, &residual, &post_norm, true, cfg.eps as f64)?;
 
         let gate_w = cache.col(session, vec![cfg.hidden, cfg.intermediate], &layer.mlp.gate)?;
         let up_w = cache.col(session, vec![cfg.hidden, cfg.intermediate], &layer.mlp.up)?;
         let down_w = cache.col(session, vec![cfg.intermediate, cfg.hidden], &layer.mlp.down)?;
-        let gate = linear::linear(session, &normalized2_t, &gate_w)?;
-        let up = linear::linear(session, &normalized2_t, &up_w)?;
+        let gate = linear::linear(session, &normalized2, &gate_w)?; // (length, intermediate)
+        let up = linear::linear(session, &normalized2, &up_w)?;
         let gated = activation::gated_silu(session, &gate, &up)?;
-        let mlp_t = linear::linear(session, &gated, &down_w)?; // (length, hidden)
-        let mlp = session.transpose(&mlp_t, &[1, 0])?;
+        let mlp = linear::linear(session, &gated, &down_w)?; // (length, hidden)
         hidden = session.add(&residual, &mlp)?;
     }
 
     // Final norm on the last position.
-    let hidden_t = session.transpose(&hidden, &[1, 0])?; // (length, hidden)
     let last = session.slice(
-        &hidden_t,
+        &hidden,
         tenferro_ad::SliceConfig {
             starts: vec![length - 1, 0],
             limits: vec![length, cfg.hidden],
@@ -843,7 +844,13 @@ mod tests {
             let host = full_attention_host(&w, &cfg, &x, &mask);
             let ten = runtime
                 .with_eager_session(|session| {
-                    let x_t = host_to_tensor(session, cfg.hidden, length, &x)?;
+                    // The forward now works on `(length, hidden)`; the host `x` is
+                    // row-major `(hidden, length)`, which is exactly the
+                    // column-major `(length, hidden)` buffer.
+                    let x_t = session.constant_from(tenferro_ad::Tensor::from_vec_col_major(
+                        vec![length, cfg.hidden],
+                        x.to_vec(),
+                    )?)?;
                     let mut cache = TensorCache::new();
                     let out = full_attention_tenferro(
                         session, &mut cache, &w, &cfg, &x_t, &mask, length,
@@ -851,9 +858,9 @@ mod tests {
                     let host = session.duplicate_value(&out)?;
                     let values = host.as_slice::<f32>()?;
                     let mut row_major = vec![0.0f32; cfg.hidden * length];
-                    for col in 0..length {
-                        for row in 0..cfg.hidden {
-                            row_major[row * length + col] = values[row + col * cfg.hidden];
+                    for h in 0..cfg.hidden {
+                        for l in 0..length {
+                            row_major[h * length + l] = values[l + h * length];
                         }
                     }
                     Ok::<Vec<f32>, tenferro_ad::Error>(row_major)

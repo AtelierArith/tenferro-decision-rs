@@ -122,8 +122,8 @@ Warmup 1, 3 iterations, median.
   `TensorCache`. At L8 the cached path was 342 ms with the tensor-native chunked
   DeltaNet; routing the DeltaNet through the fused host recurrent kernel
   (`DeltaKernel::HostRecurrent`, the default) cuts it further — measured
-  298 ms vs 365 ms (tensor-native) at L8 and 601 ms vs 878 ms at L64 in
-  `bench_tenferro_kernels` (where the host oracle was 178 ms / 841 ms). The
+  292 ms vs 344 ms (tensor-native) at L8 and 629 ms vs 894 ms at L64 in
+  `bench_tenferro_kernels` (best-of-10; the host oracle was 169 ms / 739 ms). The
   tenferro path is now faster than the host at L64. `JeffEngine` defaults to
   the host backend and offers the tenferro one (`JeffBackend::Tenferro`) for
   portability.

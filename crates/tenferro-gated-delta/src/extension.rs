@@ -15,7 +15,8 @@
 //! kernel's row-major operand (`x` is row-major `(hidden, L)`, `qkv` is
 //! row-major `(hidden, 2k+v)`, ...). Execution therefore reads every input in
 //! place and runs the fused host recurrent kernel on the CPU; no hidden transfer
-//! or process-global cache is involved. The output is `(hidden, L)` column-major.
+//! or process-global cache is involved. The output is `(L, hidden)`
+//! column-major, whose buffer is the kernel's row-major `(hidden, L)` result.
 
 use std::any::Any;
 use std::hash::Hasher;
@@ -143,13 +144,9 @@ impl ExtensionOp for GatedDeltaOp {
         &self,
         ctx: &mut ExtensionShapeContext<'_>,
     ) -> tenferro_tensor::Result<Vec<(DType, Vec<SymDim>)>> {
-        // `x` is `(L, hidden)`; the layer returns `(hidden, L)`.
+        // The layer returns the same `(L, hidden)` orientation as `x`.
         let shape = ctx.input_shape(0)?.to_vec();
-        if shape.len() != 2 {
-            return Err(tensor_error("x", "expected a 2-D `x`"));
-        }
-        let out = vec![shape[1].clone(), shape[0].clone()];
-        Ok(vec![(ctx.input_dtype(0)?, out)])
+        Ok(vec![(ctx.input_dtype(0)?, shape)])
     }
 }
 
@@ -222,17 +219,12 @@ fn execute_gated_delta_in_session(
     )
     .map_err(|error| tensor_error("weights", error.to_string()))?;
 
-    // The kernel output is row-major `(hidden, length)`; tensors are
-    // column-major, so transpose into the `(hidden, length)` output buffer.
-    let mut column_major = vec![0.0f32; op.hidden * length];
-    for row in 0..op.hidden {
-        for column in 0..length {
-            column_major[row + column * op.hidden] = output[row * length + column];
-        }
-    }
+    // The kernel output is row-major `(hidden, length)`, which is exactly the
+    // column-major buffer of the logical `(length, hidden)` result, so return it
+    // in place (one copy, no index transpose).
     Ok(vec![Tensor::from_vec_col_major(
-        vec![op.hidden, length],
-        column_major,
+        vec![length, op.hidden],
+        output.to_vec(),
     )?])
 }
 

@@ -27,11 +27,14 @@ fn main() {
 
         let host = {
             let _ = forward_reference(&cfg, &weights, &ids, &mask).unwrap();
-            let timer = Instant::now();
+            let mut samples = Vec::new();
             for _ in 0..iters {
+                let timer = Instant::now();
                 let _ = forward_reference(&cfg, &weights, &ids, &mask).unwrap();
+                samples.push(timer.elapsed().as_secs_f64() * 1e3);
             }
-            timer.elapsed().as_secs_f64() * 1e3 / iters as f64
+            samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            samples[0]
         };
 
         let mut kernels = Vec::new();
@@ -56,14 +59,17 @@ fn main() {
                     .unwrap()
             };
             let _ = run();
-            let timer = Instant::now();
+            let mut samples = Vec::new();
             for _ in 0..iters {
+                let timer = Instant::now();
                 let _ = run();
+                samples.push(timer.elapsed().as_secs_f64() * 1e3);
             }
-            kernels.push((kernel, timer.elapsed().as_secs_f64() * 1e3 / iters as f64));
+            samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+            kernels.push((kernel, samples[0]));
         }
 
-        println!("len={length:3} host {host:8.3} ms");
+        println!("len={length:3} best-of-{iters}: host {host:8.3} ms");
         for (kernel, ms) in kernels {
             println!(
                 "        tenferro {kernel:?} {ms:8.3} ms  ({:.2}x host)",
