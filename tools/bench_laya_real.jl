@@ -6,7 +6,7 @@
 # Prints one JSON object on stdout. Model loading is measured and reported
 # separately from the forward.
 
-using Laya, JSON, Statistics
+using Laya, JSON, Statistics, LinearAlgebra
 
 const DIR = ARGS[1]
 const WARMUP = length(ARGS) >= 2 ? parse(Int, ARGS[2]) : 2
@@ -66,5 +66,7 @@ out = Dict(
     "warmup" => WARMUP,
     "shapes" => shapes,
     "julia_version" => string(VERSION),
+    "julia_threads" => Threads.nthreads(),
+    "blas_threads" => BLAS.get_num_threads(),
 )
 println(JSON.json(out))

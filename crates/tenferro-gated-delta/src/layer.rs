@@ -94,15 +94,7 @@ pub(crate) fn linear_into(
     length: usize,
     y: &mut [f32],
 ) {
-    for o in 0..out_dim {
-        for t in 0..length {
-            let mut acc = 0.0f32;
-            for i in 0..in_dim {
-                acc += weight[i * out_dim + o] * x[i * length + t];
-            }
-            y[o * length + t] = acc;
-        }
-    }
+    cpu_kernels::matmul_row_major_into(weight, in_dim, out_dim, x, length, y);
 }
 
 fn mask_rows(x: &[f32], hidden: usize, length: usize, mask: &[f32]) -> Vec<f32> {

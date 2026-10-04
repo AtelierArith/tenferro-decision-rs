@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 decision-core.workspace = true
+cpu-kernels.workspace = true
 safetensors-io.workspace = true
 serde_json.workspace = true
 regex.workspace = true

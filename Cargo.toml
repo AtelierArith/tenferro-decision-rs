@@ -18,6 +18,7 @@ tenferro-ext = { path = "crates/tenferro-ext" }
 reference-data = { path = "crates/reference-data" }
 safetensors-io = { path = "crates/safetensors-io" }
 hf-fetch = { path = "crates/hf-fetch" }
+cpu-kernels = { path = "crates/cpu-kernels" }
 
 # Shared third-party dependencies.
 serde = { version = "1", features = ["derive"] }
@@ -27,6 +28,9 @@ criterion = "0.5"
 # Laya tokenizer helpers (Hugging Face `tokenizer.json` subset).
 regex = "1"
 unicode-normalization = "0.1"
+# Portable, hand-tuned f32 GEMM for the host (non-tenferro) CPU kernels.
+matrixmultiply = "0.3"
+rayon = "1"
 # `jev-client`'s optional concrete HTTP/TLS transport. `rustls-tls` avoids
 # native OpenSSL; `blocking` matches the crate's synchronous transport trait.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "blocking"] }

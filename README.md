@@ -19,6 +19,7 @@ architecture.
 | `tenferro-gated-delta` | Gated DeltaNet crate for Jeff (host reference + fused recurrent kernel + tenferro chunked scan + full layer + plans/workspaces + `GatedDelta` extension op) |
 | `safetensors-io` | Shared dependency-light safetensors reader for the checkpoint loaders |
 | `tenferro-ext` | Self-hosted tenferro extension ops (`erf`, exact GELU) used by Laya |
+| `cpu-kernels` | Host CPU kernels: BLAS-class `matrixmultiply` GEMM parallelized with `rayon`, shared by all engines |
 | `hf-fetch` | Hugging Face Hub checkpoint fetcher (Julia-compatible cache and env; `hf-fetch` CLI) |
 | `jev-client` | Independent TypeSafe System One API client |
 | `reference-data` | Reference fixture format and loader (test support) |

@@ -215,6 +215,14 @@ version = "0.1.0"
 source = "git+https://github.com/tensor4all/computegraph-rs.git?rev=691def2d82fd4367b397d61209449f68e82050b7#691def2d82fd4367b397d61209449f68e82050b7"
 
 [[package]]
+name = "cpu-kernels"
+version = "0.1.0"
+dependencies = [
+ "matrixmultiply",
+ "rayon",
+]
+
+[[package]]
 name = "cpufeatures"
 version = "0.3.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1057,7 +1065,9 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 name = "jeff-infer"
 version = "0.1.0"
 dependencies = [
+ "cpu-kernels",
  "decision-core",
+ "hf-fetch",
  "safetensors-io",
  "serde_json",
  "tenferro-ad",
@@ -1093,6 +1103,7 @@ dependencies = [
 name = "laya-infer"
 version = "0.1.0"
 dependencies = [
+ "cpu-kernels",
  "decision-core",
  "hf-fetch",
  "regex",
@@ -1171,6 +1182,16 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
 dependencies = [
  "regex-automata",
+]
+
+[[package]]
+name = "matrixmultiply"
+version = "0.3.11"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3f607c237553f086e7043417a51df26b2eb899d3caff94e6a67592ff992fedc7"
+dependencies = [
+ "autocfg",
+ "rawpointer",
 ]
 
 [[package]]
@@ -1531,6 +1552,12 @@ checksum = "498cd0dc59d73224351ee52a95fee0f1a617a2eae0e7d9d720cc622c73a54186"
 dependencies = [
  "bitflags",
 ]
+
+[[package]]
+name = "rawpointer"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "60a357793950651c4ed0f3f52338f53b2f809f32d83a07f72909fa13e4c6c1e3"
 
 [[package]]
 name = "rayon"
@@ -2062,6 +2089,7 @@ dependencies = [
 name = "tenferro-gated-delta"
 version = "0.1.0"
 dependencies = [
+ "cpu-kernels",
  "decision-core",
  "tenferro-ad",
  "tenferro-cpu",

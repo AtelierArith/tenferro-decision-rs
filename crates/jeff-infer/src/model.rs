@@ -162,17 +162,7 @@ fn linear_host(
     x: &[f32],
     length: usize,
 ) -> Vec<f32> {
-    let mut y = vec![0.0f32; out_dim * length];
-    for o in 0..out_dim {
-        for t in 0..length {
-            let mut acc = 0.0f32;
-            for i in 0..in_dim {
-                acc += weight[i * out_dim + o] * x[i * length + t];
-            }
-            y[o * length + t] = acc;
-        }
-    }
-    y
+    cpu_kernels::matmul_row_major(weight, in_dim, out_dim, x, length)
 }
 
 fn rms_centered_rows(

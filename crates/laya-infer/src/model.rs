@@ -423,22 +423,29 @@ fn linear_host(
     l: usize,
     b: usize,
 ) -> Vec<f32> {
-    let mut y = vec![0.0f32; out_dim * l * b];
-    for bi in 0..b {
-        for li in 0..l {
-            let x_offset = in_dim * (li + l * bi);
-            let y_offset = out_dim * (li + l * bi);
-            for o in 0..out_dim {
-                let mut acc = match &linear.bias {
-                    Some(bias) => bias[o],
-                    None => 0.0,
-                };
-                for i in 0..in_dim {
-                    acc += linear.weight[i + in_dim * o] * x[x_offset + i];
-                }
-                y[y_offset + o] = acc;
-            }
+    let rows = l * b;
+    let mut y = vec![0.0f32; out_dim * rows];
+    if let Some(bias) = &linear.bias {
+        for row in 0..rows {
+            y[row * out_dim..(row + 1) * out_dim].copy_from_slice(bias);
         }
+        cpu_kernels::input_mul_weight_transpose_add_into(
+            x,
+            rows,
+            in_dim,
+            &linear.weight,
+            out_dim,
+            &mut y,
+        );
+    } else {
+        cpu_kernels::input_mul_weight_transpose_into(
+            x,
+            rows,
+            in_dim,
+            &linear.weight,
+            out_dim,
+            &mut y,
+        );
     }
     y
 }

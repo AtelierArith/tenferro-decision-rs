@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 decision-core.workspace = true
+cpu-kernels.workspace = true
 tenferro-ad.workspace = true
 tenferro-runtime.workspace = true
 tenferro-linalg = { workspace = true, features = ["autodiff"] }

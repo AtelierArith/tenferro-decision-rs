@@ -156,6 +156,12 @@ bundled webpki roots).
   matches the independent PyTorch logits to below `1e-4` (observed worst
   `5.4e-7`) and `forward_tenferro` to below `1e-3` (observed worst `3.0e-7`).
   The tests skip when the fixture submodule is absent.
+- Production parity: `hf-fetch jeff` resolved `mstrasser/Jeff-Qwen3.5-0.8B`
+  (commit `0f212b3e…`, ~1.7 GB, 0.8B hybrid Qwen3.5); with the reference from
+  `tools/gen_jeff_real_reference.jl`, `forward_reference` matches the Julia
+  `NativeBackend` logits to `1.8e-5` (scale ~10). `tests/real_checkpoint.rs` is
+  `#[ignore]`d (it runs the full 0.8B forward):
+  `cargo test --release -p jeff-infer --test real_checkpoint -- --ignored`.
 - Remaining: natural-language tokenizer.
 
 ### Phase 6 — `tenferro-gated-delta`
@@ -203,7 +209,7 @@ bundled webpki roots).
 
 | Area | Blocker |
 |---|---|
-| Laya numerical parity (Phase 2) | Tokenizer and forward (encoder + decision head) match `extern/Laya.jl` on the production `convaiinnovations/laya` checkpoint (logits `1.7e-6`) and on the seeded tiny fixture (`~2e-9`). Full `system_one`/`predict` answer parity (prompt rendering + calibration) is not yet cross-checked. Jeff production weights (`mstrasser/Jeff-Qwen3.5-0.8B`) are not fetched/validated yet. |
+| Laya numerical parity (Phase 2) | Tokenizer and forward (encoder + decision head) match `extern/Laya.jl` on the production `convaiinnovations/laya` checkpoint (logits `1.7e-6`); Jeff's forward matches `extern/JeffClient.jl` on `mstrasser/Jeff-Qwen3.5-0.8B` (`1.8e-5`). Full `system_one`/`predict` answer parity (prompt rendering + calibration) is not yet cross-checked. |
 | Phase 4 / 7 CUDA | No CUDA hardware here; code can be written but not validated. |
 | Phase 8 FP16/BF16 | Deferred by decision: tenferro's public dtype set lacks `F16`/`BF16` at the pinned revision. |
 | Phase 10 Apple GPU | tenferro's WebGPU surface is effectively `dot_general` (F32/C32) plus transpose; most primitives are missing. |
@@ -211,8 +217,8 @@ bundled webpki roots).
 ## Verification snapshot
 
 - `cargo test --workspace`: decision-core 20, reference-data 4, tenferro-infer 13,
-  tenferro-ext 2, hf-fetch 9, laya-infer 46, jeff-infer 33,
+  tenferro-ext 2, cpu-kernels 5, hf-fetch 9, laya-infer 46, jeff-infer 33,
   tenferro-gated-delta 19, jev-client 49 (58 with `--features http`),
-  bench-suite 1 (196 total). `real_checkpoint.rs` adds ~70 s when the
-  production Laya snapshot is cached, and skips otherwise.
+  bench-suite 1 (201 total). Laya's `real_checkpoint.rs` adds ~45 s when the
+  production snapshot is cached (skips otherwise); Jeff's is `#[ignore]`d.
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean.

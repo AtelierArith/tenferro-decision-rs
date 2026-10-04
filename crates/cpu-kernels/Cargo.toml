@@ -1,0 +1,13 @@
+[package]
+name = "cpu-kernels"
+description = "Host CPU kernels (BLAS-class matmul, SIMD helpers) shared by the engines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+
+[dependencies]
+matrixmultiply.workspace = true
+rayon.workspace = true

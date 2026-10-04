@@ -10,6 +10,7 @@ authors.workspace = true
 
 [dependencies]
 decision-core.workspace = true
+cpu-kernels.workspace = true
 serde_json.workspace = true
 safetensors-io.workspace = true
 tenferro-ad.workspace = true
@@ -19,3 +20,4 @@ tenferro-gated-delta = { path = "../tenferro-gated-delta" }
 
 [dev-dependencies]
 tenferro-cpu.workspace = true
+hf-fetch.workspace = true
