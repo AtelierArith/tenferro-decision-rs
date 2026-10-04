@@ -20,10 +20,11 @@ x86_64, rustc 1.99.0, Julia 1.13.1.
 
 Thread configuration:
 
-- Julia: OpenBLAS 0.3.30 with **8 BLAS threads** (the default, = physical
-  cores); `Threads.nthreads() = 1` (started without `-t`). JeffClient's
-  `initialize_cpu!` explicitly sets the same 8 threads when
-  `Threads.nthreads() == 1`.
+- Julia is run with `-t 8`. **Laya** uses the default **8 BLAS threads** (its
+  work is a few big `transpose(W) * X` GEMMs, so it lives in OpenBLAS).
+  **Jeff** is run with `OPENBLAS_NUM_THREADS=1` (task-parallel fused kernels;
+  BLAS=8 is 4–7× *slower* for this hybrid model). Julia `initialize_cpu!` sets
+  BLAS=8 when `Threads.nthreads() == 1`, which is the default.
 - Rust: `rayon` parallelizes the GEMM kernels; the default pool uses all 16
   logical CPUs. The tables below use the matched **`RAYON_NUM_THREADS=8`**;
   using 16 threads changes the results by only a few percent (the work is
@@ -32,65 +33,62 @@ Thread configuration:
 The best Julia configuration differs by model, so each table uses its fastest
 (and also reports the alternative):
 
-- **Laya** is fastest with the default **BLAS=8, Julia threads=1**: its `Linear`
+- **Laya** is fastest with the default **BLAS=8** (Julia threads=1): its `Linear`
   layers are a single `transpose(W) * X` GEMM, so the work lives in BLAS.
-  Running `-t 8` with `OPENBLAS_NUM_THREADS=1` makes it *slower* (L8 287 ms vs
-  94 ms) because `Threads.@threads` only covers LayerNorm / GeLU-gate /
-  attention, not the projections.
 - **Jeff** is fastest with **`-t 8`, BLAS=1**: its `parallel_projections`,
   `parallel_full_heads`, and `recurrent_delta` fused kernels parallelize the
-  work with Julia tasks. `initialize_cpu!` sets BLAS=8 when `nthreads == 1`
-  (the default), which is 4–7× *slower* for this hybrid model.
+  work with Julia tasks. BLAS=8 (the default) is 4–7× *slower* for this hybrid
+  model.
 
 ## Best vs best
 
 Fastest configuration per side (Julia's best per model as above; Rust = the
 better of the host and cached-tenferro paths), 8 threads, production
-checkpoints.
+checkpoints. Re-measured 2026-10-04 with the host GEMM on
+**Accelerate** (`cpu-kernels` uses `cblas_sgemm` on macOS above a threshold),
+which is why the host path is much faster than earlier tables.
 
-| model | shape | Julia best | Rust best | Rust / Julia |
-|---|---|---:|---:|---:|
-| Laya | L8 B1 | 94.0 ms (BLAS=8) | 160 ms (tenferro cached) | 1.70× |
-| Laya | L64 B1 | 339.1 ms | 638 ms (host+GEMM+rayon) | 1.88× |
-| Laya | L8 B8 | 309.3 ms | 511 ms (host+GEMM+rayon) | 1.65× |
-| Laya | model load | 1535 ms | 6591 ms | 4.29× |
-| Jeff | L8 | 128.5 ms (`-t 8`) | 177 ms (host+GEMM+rayon) | 1.38× |
-| Jeff | L16 | 119.8 ms | 208 ms | 1.74× |
-| Jeff | L64 | 198.9 ms | 568 ms | 2.86× |
-| Jeff | model load | 5442 ms | 4330 ms | **0.80×** |
+| model | shape | Julia best | Rust host | Rust tenferro (HR) | host / Julia | tenferro / Julia |
+|---|---|---:|---:|---:|---:|---:|
+| Laya | L8 B1 | 88.7 ms (BLAS=8) | 105.8 ms | 175.6 ms (cached) | 1.19× | 1.98× |
+| Laya | L64 B1 | 213.0 ms | 428.3 ms | — | 2.01× | — |
+| Laya | L8 B8 | 211.9 ms | 279.6 ms | — | 1.32× | — |
+| Laya | model load | 1516 ms | 6463 ms | — | 4.26× | — |
+| Jeff | L8 | 137.5 ms (`-t 8`) | 163.5 ms | 287.4 ms | 1.19× | 2.09× |
+| Jeff | L16 | 143.3 ms | 201.7 ms | 351.0 ms | 1.41× | 2.45× |
+| Jeff | L64 | 238.3 ms | 568.8 ms | 598.9 ms | 2.39× | 2.51× |
+| Jeff | model load | 5495 ms | 4369 ms | — | **0.79×** | — |
 
-- Laya's Rust best is the cached tenferro path at L8B1; at L64/L8B8 the tenferro
-  cache was not measured, so the host path is listed.
-- Jeff's Rust best is the host path. The tensor-native cached tenferro path is
-  now **342 ms** at L8 (down from 1693 ms; see the Jeff section) — ~1.9× the host
-  path, backend-portable but still slower on CPU.
-- Rust loads Jeff faster than Julia and Laya slower. Host numbers vary ~±10%
-  with machine load.
+- Rust host is now within ~1.2× (L8) of Julia's best and ~2.0–2.4× behind at
+  longer lengths. The tenferro (host-recurrent DeltaNet) path is ~2.1× at L8 and
+  roughly host-parity at L64 for Jeff; Laya's cached tenferro path is ~2.0×.
+- The gap grows with length: the DeltaNet recurrent scan and the elementwise /
+  normalization work dominate at L64.
+- Rust loads Jeff faster than Julia and Laya slower. Host numbers vary ~±20%
+  run-to-run with machine load/thermals.
 
 ## Laya
 
 Checkpoint: `convaiinnovations/laya@main` (commit
 `7b928d828b7b0e022f929d9bd2e44165aa270148`, ~843 MB), hidden 1024, 28 layers.
 
-| shape | Julia CPU | Rust host (naive) | Rust host (+GEMM) | Rust host (+GEMM+rayon 8) | Rust tenferro |
-|---|---|---|---|---|---|
-| L8 B1 | 94.0 ms | 2692 ms (~29×) | 214.1 ms (~2.3×) | 215.7 ms (~2.3×) | 563 ms (~6×) |
-| L64 B1 | 339.1 ms | 21443 ms (~63×) | 852.8 ms (~2.5×) | 638.3 ms (~1.9×) | — |
-| L8 B8 | 309.3 ms | 21363 ms (~69×) | 704.7 ms (~2.3×) | 511.2 ms (~1.7×) | — |
-| model load | 1535 ms | 6566 ms | 6620 ms | 6637 ms | — |
+| shape | Julia CPU (BLAS=8) | Rust host (Accelerate) | Rust tenferro (cached) |
+|---|---|---|---|
+| L8 B1 | 88.7 ms | 105.8 ms (1.19×) | 175.6 ms (1.98×) |
+| L64 B1 | 213.0 ms | 428.3 ms (2.01×) | — |
+| L8 B8 | 211.9 ms | 279.6 ms (1.32×) | — |
+| model load | 1516 ms | 6463 ms | — |
 
-- The `+GEMM` column routes every host projection through `cpu-kernels`
-  (`matrixmultiply::sgemm`): a **12–30×** speedup over the naive loops.
-- `+GEMM+rayon 8` also parallelizes each GEMM across output rows (`rayon`,
-  pinned to 8 threads); the smallest shape is already dominated by streaming the
-  weights, so it barely moves.
-- Rust is now ~1.7–2.3× behind Julia's multithreaded BLAS.
-- Julia `-t 8` with `OPENBLAS_NUM_THREADS=1` is slower (287 / 635 / 637 ms), so
-  the default BLAS=8 configuration is Julia's best for Laya.
-- `forward_tenferro` rebuilds every weight tensor per call (563 ms in the table
-  above); with a reused `TensorCache` it drops to **160 ms**, faster than the
-  host+GEMM path. `LayaEngine` runs this cached tenferro path by default
-  (`23_TENFERRO_NATIVE.md`).
+- The host path routes every projection through `cpu-kernels`, which on macOS
+  uses **Accelerate `cblas_sgemm`** for large GEMMs (and `matrixmultiply`
+  otherwise). This is the current host, replacing the earlier
+  `matrixmultiply`-only numbers — L8 B1 dropped from 216 ms to 106 ms and
+  L64 B1 from 638 ms to 428 ms.
+- Rust is now ~1.2–2.0× behind Julia's multithreaded BLAS.
+- `forward_tenferro` rebuilds every weight tensor per call; with a reused
+  `TensorCache` it is **175.6 ms** at L8B1. `LayaEngine` runs this cached
+  tenferro path by default (`23_TENFERRO_NATIVE.md`), though the Accelerate host
+  path is now faster at L8B1.
 
 Closing this gap is tracked in
 [issue #2](https://github.com/AtelierArith/tenferro-decision-rs/issues/2).
@@ -101,29 +99,26 @@ Checkpoint: `mstrasser/Jeff-Qwen3.5-0.8B@0f212b3e72acb4dde3f7da61e925d6ab7f81999
 (~1.7 GB), hidden 1024, 24 layers (18 Gated DeltaNet + 6 full), vocab 248320.
 Warmup 1, 3 iterations, median.
 
-| shape | Julia (BLAS=8, default) | Julia (-t 8, BLAS=1) | Rust host (naive) | Rust host (+GEMM) | Rust host (+GEMM+rayon 8) | Rust tenferro |
-|---|---|---|---|---|---|---|
-| L8 | 842 ms | **128.5 ms** | 8657 ms (~10×) | 463 ms (3.6×) | 261 ms (2.0×) | 6662 ms |
-| L16 | 893 ms | **119.8 ms** | 18405 ms (~21×) | 678 ms (5.7×) | 421 ms (3.5×) | — |
-| L64 | 716 ms | **198.9 ms** | 75564 ms (~105×) | 2037 ms (~10×) | 1437 ms (7.2×) | — |
-| model load | 11756 ms | 5442 ms | 4297 ms | 4507 ms | 4542 ms | — |
+| shape | Julia (-t 8) | Rust host (Accelerate) | Rust tenferro `HostRecurrent` | Rust tenferro `TensorNative` |
+|---|---|---|---|---|
+| L8 | 137.5 ms | 163.5 ms (1.19×) | 287.4 ms (2.09×) | 361 ms (2.62×) |
+| L16 | 143.3 ms | 201.7 ms (1.41×) | 351.0 ms (2.45×) | 407 ms (2.84×) |
+| L64 | 238.3 ms | 568.8 ms (2.39×) | 598.9 ms (2.51×) | 676 ms (2.84×) |
+| model load | 5495 ms | 4369 ms | — | — |
 
 - Julia's fastest configuration is `-t 8` (task-parallel, BLAS=1); the default
-  BLAS=8 is 4–7× slower for this hybrid model. The ratios above are relative to
-  that best configuration.
-- Rust's `+GEMM+rayon` is 18–37× faster than the naive loops; against Julia's
-  best it is 2.0× (L8) / 3.5× (L16) / 7.2× (L64) slower.
-- The gap grows with length: the Gated DeltaNet recurrent scan and the remaining
-  single-threaded elementwise/normalization work dominate at L64.
-- Rust model loading is ~1.2–2.6× faster than Julia (4297–4542 ms vs
-  5442–11756 ms).
-- `forward_tenferro` is rebuilt from tenferro ops (`tensor_layer` for the
-  fallback kernel; the `GatedDelta` extension op for the default) with a reused
-  `TensorCache`. At L8 the cached path was 342 ms with the tensor-native chunked
-  DeltaNet; routing the DeltaNet through the fused host recurrent kernel
-  (`DeltaKernel::HostRecurrent`, the default) cuts it further — measured
-  292 ms vs 344 ms (tensor-native) at L8 and 629 ms vs 894 ms at L64 in
-  `bench_tenferro_kernels` (best-of-10; the host oracle was 169 ms / 739 ms). The
-  tenferro path is now faster than the host at L64. `JeffEngine` defaults to
-  the host backend and offers the tenferro one (`JeffBackend::Tenferro`) for
-  portability.
+  BLAS=8 is 4–7× slower for this hybrid model. Julia `-t 8` numbers are the
+  min of 15 iterations.
+- The Rust host now uses Accelerate for its GEMMs; against Julia's best it is
+  ~1.2× (L8) / 1.4× (L16) / 2.4× (L64).
+- The tenferro path runs the fused host recurrent DeltaNet via the `GatedDelta`
+  extension op (`DeltaKernel::HostRecurrent`, the default); it is ~2.1–2.5×
+  Julia, and roughly host-parity at L64. `TensorNative` (tensor-only, for
+  portability) is ~2.6–2.8×. See `22_CPU_KERNEL_OPTIMIZATION.md` for the
+  remaining tenferro-internal gap ([#1995](https://github.com/tensor4all/tenferro-rs/issues/1995)).
+- The gap grows with length: the Gated DeltaNet recurrent scan and the
+  elementwise/normalization work dominate at L64.
+- Rust model loading is ~1.3× faster than Julia for Jeff.
+- `forward_tenferro` is rebuilt from tenferro ops with a reused `TensorCache`.
+  `JeffEngine` defaults to the host backend and offers the tenferro one
+  (`JeffBackend::Tenferro`) for portability.
