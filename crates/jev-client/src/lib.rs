@@ -29,9 +29,13 @@
 //!
 //! # Transport
 //!
-//! The concrete reqwest/rustls transport is a follow-up: see
-//! `// TODO(http-transport)` in [`transport`]. Tests and callers inject a
-//! [`transport::Transport`]; the default is a stub that always errors.
+//! The concrete reqwest/rustls transport is behind the non-default `http`
+//! cargo feature. With the feature enabled,
+//! [`ClientBuilder::build`](ClientBuilder::build) uses [`ReqwestTransport`] by
+//! default; without it, the default is [`UnsupportedTransport`], so tests stay
+//! hermetic and dependency-light. Tests and callers may always inject a
+//! [`transport::Transport`] with
+//! [`ClientBuilder::transport`](ClientBuilder::transport).
 //!
 //! # Example
 //!
@@ -65,6 +69,8 @@
 mod client;
 mod credentials;
 mod errors;
+#[cfg(feature = "http")]
+mod http_transport;
 mod limits;
 mod logging;
 mod models;
@@ -79,6 +85,8 @@ pub use credentials::{
     EnvCredential, Secret, StaticCredential, DEFAULT_ENV_VAR, MAX_CREDENTIAL_BYTES,
 };
 pub use errors::{ApiErrorKind, JevError, Result};
+#[cfg(feature = "http")]
+pub use http_transport::ReqwestTransport;
 pub use limits::{ResourceLimits, RetryPolicy, TimeoutPolicy};
 pub use logging::{Event, EventSink, NoopEventSink, Operation};
 pub use models::{ModelInfo, ModelList, ModelRef, MovingAlias, PinnedModel};

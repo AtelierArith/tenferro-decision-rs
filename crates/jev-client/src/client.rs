@@ -20,13 +20,30 @@ use crate::models::{ModelList, ModelRef};
 use crate::responses::{parse_model_list, parse_system_one_response};
 use crate::retry::{parse_retry_after, RealSleeper, Sleeper};
 use crate::serialization::serialize_request;
+#[cfg(not(feature = "http"))]
+use crate::transport::UnsupportedTransport;
 use crate::transport::{
-    endpoint_url, HttpMethod, HttpRequest, HttpResponse, Transport, TransportError,
-    UnsupportedTransport, MODELS_PATH, SYSTEM_ONE_PATH, USER_AGENT,
+    endpoint_url, HttpMethod, HttpRequest, HttpResponse, Transport, TransportError, MODELS_PATH,
+    SYSTEM_ONE_PATH, USER_AGENT,
 };
 
 const DEFAULT_MAX_INFLIGHT: usize = 8;
 const DEFAULT_RNG_SEED: u64 = 0x9e37_79b9_7f4a_7c15;
+
+/// The transport used when the caller does not inject one.
+///
+/// The concrete reqwest/rustls transport is the default only with the `http`
+/// feature; without it, a stub that always errors keeps default builds
+/// dependency-light. An explicit [`ClientBuilder::transport`] always wins.
+#[cfg(feature = "http")]
+fn default_transport() -> Arc<dyn Transport> {
+    Arc::new(crate::http_transport::ReqwestTransport::new())
+}
+
+#[cfg(not(feature = "http"))]
+fn default_transport() -> Arc<dyn Transport> {
+    Arc::new(UnsupportedTransport)
+}
 
 /// A System One request: the shared state plus the questions to answer.
 ///
@@ -378,7 +395,7 @@ impl Default for ClientBuilder {
             timeout: TimeoutPolicy::default(),
             limits: ResourceLimits::default(),
             max_inflight: DEFAULT_MAX_INFLIGHT,
-            transport: Arc::new(UnsupportedTransport),
+            transport: default_transport(),
             sleeper: Arc::new(RealSleeper),
             events: Arc::new(NoopEventSink),
             rng_seed: DEFAULT_RNG_SEED,

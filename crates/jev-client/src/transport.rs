@@ -1,7 +1,7 @@
 //! The injectable HTTP transport seam and the fixed endpoint policy.
 //!
-//! The concrete reqwest/rustls transport is a documented follow-up
-//! (`// TODO(http-transport)`); this module defines the trait and the request and
+//! The concrete reqwest/rustls transport lives in the `http`-feature-gated
+//! `crate::http_transport`; this module defines the trait and the request and
 //! response shapes so that tests can drive the client through
 //! [`testing::MockTransport`] without touching the network. Requests carry only
 //! a *path* — never a host, scheme, or full URL — so the client cannot be
@@ -180,7 +180,7 @@ pub enum TransportError {
     Io(String),
     /// The endpoint policy was violated before any network activity.
     Endpoint(String),
-    /// No transport is configured (the concrete transport is a follow-up).
+    /// No transport is configured (the `http` feature is disabled).
     Unsupported(String),
 }
 
@@ -210,18 +210,19 @@ pub trait Transport: Send + Sync {
     fn execute(&self, request: &HttpRequest) -> std::result::Result<HttpResponse, TransportError>;
 }
 
-/// The default transport when none is configured.
+/// The fallback transport when the `http` feature is disabled.
 ///
-/// The concrete reqwest/rustls transport is not part of this task
-/// (`// TODO(http-transport)`). Building a client without an explicit transport
-/// yields this stub, so production code must inject one.
+/// Without the `http` feature there is no network transport, so building a
+/// client without an explicit transport yields this stub and every call fails
+/// with [`TransportError::Unsupported`]. Production code should enable `http`
+/// or inject a [`Transport`].
 #[derive(Debug, Default)]
 pub struct UnsupportedTransport;
 
 impl Transport for UnsupportedTransport {
     fn execute(&self, _request: &HttpRequest) -> std::result::Result<HttpResponse, TransportError> {
         Err(TransportError::Unsupported(
-            "no HTTP transport is configured; the concrete reqwest/rustls transport is a follow-up"
+            "no HTTP transport is configured; enable the `http` feature or inject a Transport"
                 .into(),
         ))
     }

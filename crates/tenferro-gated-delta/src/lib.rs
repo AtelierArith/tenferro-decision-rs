@@ -1,19 +1,30 @@
-//! Chunked Gated DeltaNet building blocks for the Jeff engine.
+//! Chunked Gated DeltaNet for the Jeff engine.
 //!
-//! Design: `docs/agents/specs/docs/12_TENFERRO_GATED_DELTA.md`. This crate is
-//! Phase 6 work in progress.
+//! Design: `docs/agents/specs/docs/12_TENFERRO_GATED_DELTA.md`. The crate owns
+//! the causal depthwise convolution, the reference recurrent scan, and the
+//! tenferro-backed chunked formulation.
 //!
-//! Implemented now (host reference, no tenferro dependency yet): the chunked
-//! effective linear system from `docs/agents/specs/docs/09_JEFFCLIENT_ANALYSIS.md`
-//! §7.3,
+//! Implemented now:
 //!
-//! ```text
-//! M = I + L,   L[i, j] = beta_i * (k_i . k_j) * exp(c_i - c_j)   for i > j
-//! ```
+//! - [`ops`]: reference scalar/vector helpers
+//! - [`conv`]: causal depthwise convolution with a fused SiLU
+//! - [`reference`]: host recurrent scan (one value head)
+//! - [`chunked`]: tenferro eager chunked scan (one value head), plus the
+//!   effective-system helper below
 //!
-//! solved with a unit-diagonal forward substitution. The full layer (causal
-//! convolution, Q/K normalization, decay/beta preparation, and the
-//! tenferro-backed chunked/recurrent forms) follows in Phase 6.
+//! Still to come: the weight/projection wrapper, Q/K normalization and
+//! beta/decay preparation, prepared plans/workspaces, the extension-op wiring,
+//! and the CUDA kernels.
+
+pub mod chunked;
+pub mod config;
+pub mod conv;
+pub mod ops;
+pub mod reference;
+
+pub use config::{Algorithm, GatedDeltaConfig};
+pub use conv::causal_depthwise_silu;
+pub use reference::{delta_scan_reference, DeltaScanInputs};
 
 use decision_core::{DecisionError, Result};
 
@@ -22,10 +33,10 @@ use decision_core::{DecisionError, Result};
 /// `beta[i]` is the write strength, `keys[i]` the (already L2-normalized) key
 /// vector of row `i`, and `cum_decay[i]` the cumulative log-decay `c_i`.
 pub fn build_effective_matrix(
-    beta: &[f64],
-    keys: &[Vec<f64>],
-    cum_decay: &[f64],
-) -> Result<Vec<Vec<f64>>> {
+    beta: &[f32],
+    keys: &[Vec<f32>],
+    cum_decay: &[f32],
+) -> Result<Vec<Vec<f32>>> {
     let n = beta.len();
     if keys.len() != n || cum_decay.len() != n {
         return Err(DecisionError::invalid_field(
@@ -41,13 +52,13 @@ pub fn build_effective_matrix(
         ));
     }
 
-    let mut m = vec![vec![0.0; n]; n];
+    let mut m = vec![vec![0.0f32; n]; n];
     for (i, row) in m.iter_mut().enumerate() {
         row[i] = 1.0;
     }
     for i in 0..n {
         for j in 0..i {
-            let dot: f64 = keys[i].iter().zip(&keys[j]).map(|(a, b)| a * b).sum();
+            let dot: f32 = keys[i].iter().zip(&keys[j]).map(|(a, b)| a * b).sum();
             m[i][j] = beta[i] * dot * (cum_decay[i] - cum_decay[j]).exp();
         }
     }
@@ -58,7 +69,7 @@ pub fn build_effective_matrix(
 ///
 /// `rhs` is `n x dv`, row-major. The system matrix must have ones on the
 /// diagonal (as produced by [`build_effective_matrix`]).
-pub fn forward_substitute(m: &[Vec<f64>], rhs: &[Vec<f64>]) -> Result<Vec<Vec<f64>>> {
+pub fn forward_substitute(m: &[Vec<f32>], rhs: &[Vec<f32>]) -> Result<Vec<Vec<f32>>> {
     let n = m.len();
     if rhs.len() != n {
         return Err(DecisionError::invalid_field(
@@ -88,7 +99,7 @@ pub fn forward_substitute(m: &[Vec<f64>], rhs: &[Vec<f64>]) -> Result<Vec<Vec<f6
         }
     }
 
-    let mut out = vec![vec![0.0; dv]; n];
+    let mut out = vec![vec![0.0f32; dv]; n];
     for i in 0..n {
         for d in 0..dv {
             let mut value = rhs[i][d];
@@ -107,25 +118,23 @@ mod tests {
 
     #[test]
     fn identity_when_no_coupling() {
-        // Orthogonal keys -> zero off-diagonal coupling.
-        let beta = [1.0, 1.0];
-        let keys = vec![vec![1.0, 0.0], vec![0.0, 1.0]];
-        let cum_decay = [0.0, 0.0];
+        let beta = [1.0f32, 1.0];
+        let keys = vec![vec![1.0f32, 0.0], vec![0.0, 1.0]];
+        let cum_decay = [0.0f32, 0.0];
         let m = build_effective_matrix(&beta, &keys, &cum_decay).unwrap();
         assert_eq!(m, vec![vec![1.0, 0.0], vec![0.0, 1.0]]);
 
-        let rhs = vec![vec![2.0], vec![3.0]];
+        let rhs = vec![vec![2.0f32], vec![3.0]];
         let x = forward_substitute(&m, &rhs).unwrap();
         assert_eq!(x, rhs);
     }
 
     #[test]
     fn solves_lower_triangular_system() {
-        let m = vec![vec![1.0, 0.0], vec![0.5, 1.0]];
-        let rhs = vec![vec![1.0], vec![0.0]];
+        let m = vec![vec![1.0f32, 0.0], vec![0.5, 1.0]];
+        let rhs = vec![vec![1.0f32], vec![0.0]];
         let x = forward_substitute(&m, &rhs).unwrap();
-        // x0 = 1; x1 = 0 - 0.5 * 1 = -0.5.
-        assert_eq!(x, vec![vec![1.0], vec![-0.5]]);
+        assert_eq!(x, vec![vec![1.0f32], vec![-0.5]]);
     }
 
     #[test]

@@ -46,9 +46,15 @@ network:
 - single ordered wire-serialization path and strict response validation
 - typed `JevError` hierarchy and metadata-only `Event` sink
 
-Follow-up: the concrete TLS transport (the default `UnsupportedTransport`
-errors); HTTP-date `Retry-After`, an injectable monotonic clock, and a
-`zeroize`-backed secret are deferred.
+The concrete `reqwest` + `rustls` transport is implemented behind the
+non-default `http` feature (`ReqwestTransport`): TLS verification on, redirects
+and proxies disabled, explicit no-retry, and bounded response reads. Default
+builds stay dependency-light and use `UnsupportedTransport`; hermetic tests run
+without the feature.
+
+Still deferred: HTTP-date `Retry-After`, an injectable monotonic clock, a
+`zeroize`-backed secret, and OS-trust-store roots (the `http` feature uses
+bundled webpki roots).
 
 ## In progress (checkpoint-independent groundwork)
 
@@ -72,10 +78,19 @@ errors); HTTP-date `Retry-After`, an injectable monotonic clock, and a
 
 ### Phase 6 — `tenferro-gated-delta`
 
-- Host reference for the chunked effective system `M = I + L` and its
-  unit-diagonal forward substitution.
-- Remaining: causal convolution, Q/K normalization, decay/beta preparation,
-  chunked/recurrent tenferro forms, CUDA kernels.
+- Host reference: causal depthwise convolution + SiLU, `ops` helpers, and the
+  recurrent Gated DeltaNet scan (`reference`) for one value head.
+- Tenferro-backed chunked scan (`chunked`) using eager `matmul`/`dot_general`,
+  `triangular_solve(unit_diagonal = true)`, `exp`, and the shared `rms_norm` /
+  `silu` primitives.
+- Cross-formulation parity tests: the chunked scan matches the recurrent
+  reference across chunk boundaries, single tokens, and grouped key/value
+  widths.
+- Also the chunked effective-system `M = I + L` helper with unit-diagonal
+  forward substitution.
+- Remaining: the weight/projection wrapper (qkv/z/a/b), Q/K normalization and
+  beta/decay preparation, prepared plans/workspaces, extension-op wiring, and
+  CUDA kernels.
 
 ## Blocked / needs external input
 
@@ -91,6 +106,6 @@ errors); HTTP-date `Retry-After`, an injectable monotonic clock, and a
 ## Verification snapshot
 
 - `cargo test --workspace`: decision-core 19, reference-data 4, tenferro-infer 11,
-  laya-infer 22, jeff-infer 8, tenferro-gated-delta 3, jev-client 49,
-  bench-suite 1.
+  laya-infer 22, jeff-infer 8, tenferro-gated-delta 7, jev-client 49
+  (58 with `--features http`), bench-suite 1.
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean.

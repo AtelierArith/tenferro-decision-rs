@@ -21,6 +21,9 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 thiserror = "2"
 criterion = "0.5"
+# `jev-client`'s optional concrete HTTP/TLS transport. `rustls-tls` avoids
+# native OpenSSL; `blocking` matches the crate's synchronous transport trait.
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "blocking"] }
 
 # Pinned to the surveyed tenferro-rs revision (`11_TENFERRO_API_SURVEY.md`).
 # The crates.io 0.7.1 release predates this revision and differs in the
@@ -30,3 +33,4 @@ tenferro-runtime = { git = "https://github.com/tensor4all/tenferro-rs", rev = "4
 tenferro-cpu = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb" }
 tenferro-tensor = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb" }
 tenferro-ad = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb" }
+tenferro-linalg = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb" }

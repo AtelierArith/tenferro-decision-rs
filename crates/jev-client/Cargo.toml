@@ -17,3 +17,11 @@ decision-core = { workspace = true, features = ["serde"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
+# Optional concrete HTTP/TLS transport, enabled by the `http` feature. Kept
+# non-default so default builds and tests stay hermetic and dependency-light.
+reqwest = { workspace = true, optional = true }
+
+[features]
+# Enable the concrete reqwest/rustls transport, which becomes the default
+# transport for `ClientBuilder::build` when no explicit transport is injected.
+http = ["dep:reqwest"]
