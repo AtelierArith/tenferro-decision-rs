@@ -127,11 +127,15 @@ small, so the row blocks fill the cores while Accelerate's per-call
 best-of-12): `host_opt` L8 **108** vs 153 ms, L16 **126** vs 160, L64 **250** vs
 283. So `matmul_row_major` no longer calls BLAS.
 
-Laya's kernel is `input_mul_weight_transpose` (`y = x·Wᵀ`), which blocks over
-`rows` (= batch×sequence) — only 8–64 at decode, so the rayon path cannot
-parallelize and **Accelerate still wins there**. `cpu-kernels` therefore keeps
-the Accelerate `cblas_sgemm` path for that kernel only (and drops it for
-`matmul_row_major`).
+Laya's kernel is `input_mul_weight_transpose` (`y = x·Wᵀ`). It originally
+blocked over `rows` (= batch×sequence) — only 8–64 at decode — so the rayon path
+could not parallelize and Accelerate won. It now **blocks over the large
+`out_dim` axis instead** (each rayon task writes a disjoint column block of `y`
+via strided `sgemm`), so it parallelizes at every shape. Laya L8B1: **106 → 93
+ms** (1.19× → 1.05× of Julia); L64/L8B8 are within noise. This also makes the
+`tenferro-ext::gemm::GemmOp` extension fast. With both kernels off BLAS,
+`cpu-kernels` **drops the `cblas-sys`/Accelerate dependency entirely and is
+portable**.
 
 Whole-model effect (production Jeff, `RAYON_NUM_THREADS=8`, best-of-15):
 
@@ -142,8 +146,25 @@ Whole-model effect (production Jeff, `RAYON_NUM_THREADS=8`, best-of-15):
 | 64 | 379.6 ms | **248.7 ms** | **1.04×** | 238.3 ms |
 
 `host_opt` is now **faster than Julia at L8/L16** and within ~4% at L64. The
-remaining L64 gap is the Accelerate/BLAS-class GEMM work (which Julia matches)
-plus the last bit of scan/elementwise overhead.
+remaining L64 gap is the last bit of scan/elementwise/MLP-silu overhead.
+
+### Feeding the findings back to the tenferro-first path
+
+The DeltaNet improvements live in shared crates, so they reach the tenferro
+`GatedDelta` extension op (`DeltaKernel::HostRecurrent`) automatically: the
+fused `tenferro-gated-delta::recurrent` kernel (`pulp` SIMD scan, transposed
+state, parallel conv) and `cpu-kernels` projections are exactly what the
+extension op executes. Measured `bench_tenferro_kernels`, `RAYON_NUM_THREADS=8`,
+best-of-12: `HostRecurrent` **265 / 304 / 416 ms** at L8/L16/L64 (was ~293 / 351
+/ 599 before the kernel work).
+
+The **general** GEMMs (MLP, full attention) in the tenferro forward still go
+through `linear` → `dot_general` → faer. Routing them through the self-hosted
+`GemmOp` was prototyped (wrap `linear` in a transpose pair, since the op
+contracts the first axis) and is a **net loss** here: the eager extension-op
+dispatch plus the two transposes cost more than the kernel gain — measured
+`HostRecurrent` L8 **345 vs 257 ms**, L64 **534 vs 409 ms**. So the tenferro
+forward keeps faer for those; `GemmOp` stays available but unwired.
 
 ## A. GEMM (BLAS-class) candidates
 

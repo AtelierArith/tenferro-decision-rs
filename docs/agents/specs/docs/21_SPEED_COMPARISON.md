@@ -50,18 +50,18 @@ which is why the host path is much faster than earlier tables.
 
 | model | shape | Julia best | Rust host_opt | Rust tenferro (HR) | host_opt / Julia | tenferro / Julia |
 |---|---|---:|---:|---:|---:|---:|
-| Laya | L8 B1 | 88.7 ms (BLAS=8) | 105.8 ms | 175.6 ms (cached) | 1.19× | 1.98× |
-| Laya | L64 B1 | 213.0 ms | 428.3 ms | — | 2.01× | — |
-| Laya | L8 B8 | 211.9 ms | 279.6 ms | — | 1.32× | — |
+| Laya | L8 B1 | 88.7 ms (BLAS=8) | 93.3 ms | 158.8 ms (cached) | 1.05× | 1.79× |
+| Laya | L64 B1 | 213.0 ms | 434.2 ms | — | 2.04× | — |
+| Laya | L8 B8 | 211.9 ms | 284.0 ms | — | 1.34× | — |
 | Laya | model load | 1516 ms | 6463 ms | — | 4.26× | — |
 | Jeff | L8 | 137.5 ms (`-t 8`) | 106.8 ms | 257.4 ms | **0.78×** | 1.87× |
 | Jeff | L16 | 143.3 ms | 124.3 ms | 293.8 ms | **0.87×** | 2.05× |
 | Jeff | L64 | 238.3 ms | 248.7 ms | 408.7 ms | 1.04× | 1.72× |
 | Jeff | model load | 5495 ms | 4369 ms | — | **0.79×** | — |
 
-- Laya's Rust best is the cached tenferro path at L8B1 and the Accelerate host
-  elsewhere; the Laya host was not further optimized (its `x·Wᵀ` GEMM blocks over
-  `rows`, which is tiny at decode, so it still uses Accelerate).
+- Laya's Rust best is the host path at L8B1 (row-blocked `matrixmultiply`, now
+  blocking over `out_dim` so decode parallelizes) and the cached tenferro path is
+  close; L64/L8B8 still favor Julia's multithreaded BLAS.
 - Jeff's Rust best is `host_opt`. It is **faster than Julia at L8/L16** (0.78× /
   0.87×) and within ~4% at L64. The wins are the `pulp` runtime-dispatched SIMD
   DeltaNet scan and the row-blocked `matrixmultiply` projections for Jeff's
@@ -75,23 +75,23 @@ which is why the host path is much faster than earlier tables.
 Checkpoint: `convaiinnovations/laya@main` (commit
 `7b928d828b7b0e022f929d9bd2e44165aa270148`, ~843 MB), hidden 1024, 28 layers.
 
-| shape | Julia CPU (BLAS=8) | Rust host (Accelerate) | Rust tenferro (cached) |
+| shape | Julia CPU (BLAS=8) | Rust host | Rust tenferro (cached) |
 |---|---|---|---|
-| L8 B1 | 88.7 ms | 105.8 ms (1.19×) | 175.6 ms (1.98×) |
-| L64 B1 | 213.0 ms | 428.3 ms (2.01×) | — |
-| L8 B8 | 211.9 ms | 279.6 ms (1.32×) | — |
+| L8 B1 | 88.7 ms | 93.3 ms (1.05×) | 158.8 ms (1.79×) |
+| L64 B1 | 213.0 ms | 434.2 ms (2.04×) | — |
+| L8 B8 | 211.9 ms | 284.0 ms (1.34×) | — |
 | model load | 1516 ms | 6463 ms | — |
 
-- The host path routes every projection through `cpu-kernels`, which on macOS
-  uses **Accelerate `cblas_sgemm`** for large GEMMs (and `matrixmultiply`
-  otherwise). This is the current host, replacing the earlier
-  `matrixmultiply`-only numbers — L8 B1 dropped from 216 ms to 106 ms and
-  L64 B1 from 638 ms to 428 ms.
-- Rust is now ~1.2–2.0× behind Julia's multithreaded BLAS.
+- The host path routes every projection through `cpu-kernels`, now a portable
+  rayon **row-blocked `matrixmultiply`** for both kernels (the Accelerate
+  `cblas_sgemm` path was dropped; see `22_CPU_KERNEL_OPTIMIZATION.md`). Laya's
+  `x·Wᵀ` kernel now blocks over `out_dim`, so its decode case improved further:
+  L8 B1 **106 → 93 ms** (1.19× → 1.05× of Julia).
+- Rust is ~1.05–2.0× behind Julia's multithreaded BLAS; L64 B1 (prefill-ish) is
+  the remaining gap.
 - `forward_tenferro` rebuilds every weight tensor per call; with a reused
-  `TensorCache` it is **175.6 ms** at L8B1. `LayaEngine` runs this cached
-  tenferro path by default (`23_TENFERRO_NATIVE.md`), though the Accelerate host
-  path is now faster at L8B1.
+  `TensorCache` it is **158.8 ms** at L8B1. `LayaEngine` runs this cached
+  tenferro path by default (`23_TENFERRO_NATIVE.md`).
 
 Closing this gap is tracked in
 [issue #2](https://github.com/AtelierArith/tenferro-decision-rs/issues/2).

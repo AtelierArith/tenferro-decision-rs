@@ -19,52 +19,6 @@ fn parallel_row_block(rows: usize) -> usize {
     rows.div_ceil(threads * 4).max(8)
 }
 
-/// Above this many multiply-adds, route the Laya `x·Wᵀ` GEMM through Accelerate
-/// on macOS. That kernel blocks over `rows` (= batch×sequence), which is tiny at
-/// decode, so the rayon row-block path cannot parallelize; Accelerate's internal
-/// threading wins there. The Jeff `Wᵀ·x` kernel blocks over `out_dim` (large) and
-/// is faster on the rayon path, so it does not use BLAS.
-#[cfg(target_os = "macos")]
-const BLAS_THRESHOLD: usize = 1 << 18;
-
-/// `y = x Wᵀ` (`beta = 1` accumulates) through Accelerate's `cblas_sgemm`.
-///
-/// # Safety
-/// `x`, `weight`, and `y` must have the lengths implied by the shape arguments
-/// and must not overlap.
-#[cfg(target_os = "macos")]
-fn blas_input_mul_weight_transpose(
-    x: &[f32],
-    rows: usize,
-    in_dim: usize,
-    weight: &[f32],
-    out_dim: usize,
-    y: &mut [f32],
-    beta: f32,
-) {
-    use cblas_sys::{CBLAS_LAYOUT, CBLAS_TRANSPOSE, cblas_sgemm};
-    // SAFETY: callers pass slices whose lengths match the shape arguments and
-    // that do not overlap.
-    unsafe {
-        cblas_sgemm(
-            CBLAS_LAYOUT::CblasColMajor,
-            CBLAS_TRANSPOSE::CblasTrans,
-            CBLAS_TRANSPOSE::CblasNoTrans,
-            out_dim as i32,
-            rows as i32,
-            in_dim as i32,
-            1.0,
-            weight.as_ptr(),
-            in_dim as i32,
-            x.as_ptr(),
-            in_dim as i32,
-            beta,
-            y.as_mut_ptr(),
-            out_dim as i32,
-        );
-    }
-}
-
 /// `y += weightᵀ · x`, with row-major `(in, out)` `weight`, row-major
 /// `(in, length)` `x`, and row-major `(out, length)` `y`.
 ///
@@ -188,38 +142,45 @@ pub fn input_mul_weight_transpose_add_into(
     // y ← x · weightᵀ + y. `weightᵀ` is `(in_dim, out_dim)` with row stride 1
     // (the `in_dim` axis of the row-major `(out_dim, in_dim)` storage).
     let work = rows.saturating_mul(in_dim).saturating_mul(out_dim);
-    #[cfg(target_os = "macos")]
-    if work >= BLAS_THRESHOLD {
-        blas_input_mul_weight_transpose(x, rows, in_dim, weight, out_dim, y, 1.0);
-        return;
-    }
-    if work >= PARALLEL_THRESHOLD && rows > 1 {
-        let block = parallel_row_block(rows);
-        y.par_chunks_mut(block * out_dim)
-            .enumerate()
-            .for_each(|(index, y_block)| {
-                let block_rows = y_block.len() / out_dim;
-                // SAFETY: each task owns a disjoint, contiguous block of `y`
-                // rows and reads only `x`/`weight`.
-                unsafe {
-                    matrixmultiply::sgemm(
-                        block_rows,
-                        in_dim,
-                        out_dim,
-                        1.0,
-                        x.as_ptr().add(index * block * in_dim),
-                        in_dim as isize,
-                        1,
-                        weight.as_ptr(),
-                        1,
-                        in_dim as isize,
-                        1.0,
-                        y_block.as_mut_ptr(),
-                        out_dim as isize,
-                        1,
-                    );
-                }
-            });
+    if work >= PARALLEL_THRESHOLD && out_dim > 1 {
+        // Block over the large `out_dim` axis (columns of `y`) so the rayon
+        // tasks parallelize even when `rows` (= batch×sequence, or sequence
+        // length) is tiny at decode. Each task writes a disjoint column block.
+        let threads = rayon::current_num_threads().max(1);
+        let block = out_dim.div_ceil(threads * 4).max(8).min(out_dim);
+        let nblocks = out_dim.div_ceil(block);
+        let x_addr = x.as_ptr() as usize;
+        let w_addr = weight.as_ptr() as usize;
+        let y_addr = y.as_mut_ptr() as usize;
+        (0..nblocks).into_par_iter().for_each(|bi| {
+            let o0 = bi * block;
+            let n = (out_dim - o0).min(block);
+            // SAFETY: each task writes the disjoint column range `[o0, o0+n)` of
+            // every `y` row and reads only `x`/`weight`; the raw addresses just
+            // recapture the slices that `rayon` cannot borrow for a strided
+            // output.
+            unsafe {
+                let x_ptr = x_addr as *const f32;
+                let w_ptr = (w_addr as *const f32).add(o0 * in_dim);
+                let y_ptr = (y_addr as *mut f32).add(o0);
+                matrixmultiply::sgemm(
+                    rows,
+                    in_dim,
+                    n,
+                    1.0,
+                    x_ptr,
+                    in_dim as isize,
+                    1,
+                    w_ptr,
+                    1,
+                    in_dim as isize,
+                    1.0,
+                    y_ptr,
+                    out_dim as isize,
+                    1,
+                );
+            }
+        });
     } else {
         unsafe {
             matrixmultiply::sgemm(
