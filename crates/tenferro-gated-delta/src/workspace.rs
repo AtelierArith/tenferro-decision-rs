@@ -2,11 +2,26 @@
 //!
 //! Design: `docs/agents/specs/docs/12_TENFERRO_GATED_DELTA.md` §9 and §11. A
 //! workspace is owned by an inference context (not global), so concurrent
-//! requests use separate workspaces. Buffers grow to the largest sequence length
-//! seen and are then reused; the fused kernel writes the final result into
-//! [`GatedDeltaWorkspace::output`] and returns a borrow of it.
+//! requests use separate workspaces. The layer-level buffers are shared, while
+//! each value head owns a [`HeadScratch`] so the heads can run in parallel.
+//! Buffers grow to the largest sequence length seen and are then reused.
 
 use crate::config::GatedDeltaConfig;
+
+/// Per-value-head scratch for the recurrent scan.
+#[derive(Clone, Debug, Default)]
+pub(crate) struct HeadScratch {
+    pub(crate) q: Vec<f32>,
+    pub(crate) k: Vec<f32>,
+    pub(crate) v: Vec<f32>,
+    pub(crate) z: Vec<f32>,
+    pub(crate) state: Vec<f32>,
+    pub(crate) prediction: Vec<f32>,
+    pub(crate) correction: Vec<f32>,
+    pub(crate) result: Vec<f32>,
+    pub(crate) output: Vec<f32>,
+    pub(crate) scratch: Vec<f32>,
+}
 
 /// Scratch buffers sized for a `(hidden, length)` layer invocation.
 #[derive(Clone, Debug, Default)]
@@ -19,17 +34,9 @@ pub struct GatedDeltaWorkspace {
     pub(crate) b_proj: Vec<f32>,
     pub(crate) beta: Vec<f32>,
     pub(crate) decay: Vec<f32>,
-    pub(crate) q: Vec<f32>,
-    pub(crate) k: Vec<f32>,
-    pub(crate) v: Vec<f32>,
-    pub(crate) z: Vec<f32>,
-    pub(crate) state: Vec<f32>,
-    pub(crate) prediction: Vec<f32>,
-    pub(crate) correction: Vec<f32>,
-    pub(crate) result: Vec<f32>,
     pub(crate) out: Vec<f32>,
     pub(crate) output: Vec<f32>,
-    pub(crate) scratch: Vec<f32>,
+    pub(crate) heads: Vec<HeadScratch>,
 }
 
 impl GatedDeltaWorkspace {
@@ -45,7 +52,7 @@ impl GatedDeltaWorkspace {
 
     /// The total bytes retained by the workspace buffers.
     pub fn retained_bytes(&self) -> usize {
-        let f32_buffers = [
+        let layer: usize = [
             &self.masked,
             &self.qkv_proj,
             &self.mixed,
@@ -54,18 +61,29 @@ impl GatedDeltaWorkspace {
             &self.b_proj,
             &self.beta,
             &self.decay,
-            &self.q,
-            &self.k,
-            &self.v,
-            &self.z,
-            &self.state,
-            &self.prediction,
-            &self.correction,
-            &self.result,
             &self.out,
             &self.output,
-            &self.scratch,
-        ];
-        f32_buffers.iter().map(|buffer| buffer.len() * 4).sum()
+        ]
+        .iter()
+        .map(|buffer| buffer.len() * 4)
+        .sum();
+        let heads: usize = self
+            .heads
+            .iter()
+            .map(|head| {
+                head.q.len()
+                    + head.k.len()
+                    + head.v.len()
+                    + head.z.len()
+                    + head.state.len()
+                    + head.prediction.len()
+                    + head.correction.len()
+                    + head.result.len()
+                    + head.output.len()
+                    + head.scratch.len()
+            })
+            .sum::<usize>()
+            * 4;
+        layer + heads
     }
 }

@@ -2091,6 +2091,7 @@ version = "0.1.0"
 dependencies = [
  "cpu-kernels",
  "decision-core",
+ "rayon",
  "tenferro-ad",
  "tenferro-cpu",
  "tenferro-infer",

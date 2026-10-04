@@ -5,14 +5,19 @@
 //! normalization, the gates, the recurrent scan, the output RMSNorm/gate, and
 //! the output projection all run in host loops over one set of reusable
 //! workspace buffers — no tenferro round-trips and no per-head intermediate
-//! `Vec` allocations. It is numerically equivalent to
-//! [`crate::delta_layer_reference`] and is cross-checked against it.
+//! `Vec` allocations. The value heads share the layer projections but scan
+//! independently, so the per-head work runs in parallel with `rayon`.
+//!
+//! It is numerically equivalent to [`crate::delta_layer_reference`] and is
+//! cross-checked against it.
+
+use rayon::prelude::*;
 
 use crate::config::GatedDeltaConfig;
 use crate::conv::causal_depthwise_silu_into;
 use crate::layer::{linear_into, mask_rows_into, GatedDeltaWeights};
 use crate::ops::{l2_normalize, rms_noncentered_in_place, sigmoid, silu, softplus};
-use crate::workspace::GatedDeltaWorkspace;
+use crate::workspace::{GatedDeltaWorkspace, HeadScratch};
 
 /// Run the fused recurrent layer, returning a borrow of the workspace's output
 /// buffer (`(hidden, length)` row-major).
@@ -95,91 +100,29 @@ pub fn delta_layer_recurrent<'a>(
         }
     }
 
-    ws.q.resize(kd * length, 0.0);
-    ws.k.resize(kd * length, 0.0);
-    ws.v.resize(vd * length, 0.0);
-    ws.z.resize(vd * length, 0.0);
-    ws.scratch.resize(kd.max(vd), 0.0);
-    ws.out.resize(value_width * length, 0.0);
-
+    // The value heads are independent: run them in parallel, each writing its
+    // own `HeadScratch`.
+    ws.heads.resize_with(cfg.value_heads, HeadScratch::default);
     let inv_scale = 1.0 / (kd as f32).sqrt();
-    for head in 0..cfg.value_heads {
-        let key_head = cfg.key_head_for(head);
-        let q_offset = key_head * kd;
-        let k_offset = key_width + key_head * kd;
-        let v_offset = 2 * key_width + head * vd;
-        let z_offset = head * vd;
+    {
+        let mixed = &ws.mixed;
+        let z_proj = &ws.z_proj;
+        let beta = &ws.beta;
+        let decay = &ws.decay;
+        ws.heads.par_iter_mut().enumerate().for_each(|(head, s)| {
+            scan_head(
+                cfg, weights, mixed, z_proj, beta, decay, length, head, inv_scale, s,
+            );
+        });
+    }
 
-        for row in 0..kd {
-            for t in 0..length {
-                ws.q[row * length + t] = ws.mixed[(q_offset + row) * length + t];
-                ws.k[row * length + t] = ws.mixed[(k_offset + row) * length + t];
-            }
-        }
-        for row in 0..vd {
-            for t in 0..length {
-                ws.v[row * length + t] = ws.mixed[(v_offset + row) * length + t];
-                ws.z[row * length + t] = ws.z_proj[(z_offset + row) * length + t];
-            }
-        }
-
-        // L2-normalize Q and K per position; Q is additionally scaled by
-        // `1 / sqrt(key_dim)` (see the layer reference for the orientation note).
-        for t in 0..length {
-            for d in 0..kd {
-                ws.scratch[d] = ws.q[d * length + t];
-            }
-            l2_normalize(&mut ws.scratch[..kd], 1e-6);
-            for d in 0..kd {
-                ws.q[d * length + t] = ws.scratch[d] * inv_scale;
-            }
-            for d in 0..kd {
-                ws.scratch[d] = ws.k[d * length + t];
-            }
-            l2_normalize(&mut ws.scratch[..kd], 1e-6);
-            for d in 0..kd {
-                ws.k[d * length + t] = ws.scratch[d];
-            }
-        }
-
-        ws.state.resize(vd * kd, 0.0);
-        ws.prediction.resize(vd, 0.0);
-        ws.correction.resize(vd, 0.0);
-        ws.result.resize(vd, 0.0);
-        ws.state.iter_mut().for_each(|value| *value = 0.0);
-
-        for t in 0..length {
-            let factor = ws.decay[head * length + t].exp();
-            let beta = ws.beta[head * length + t];
-
-            for v in 0..vd {
-                let mut acc = 0.0f32;
-                for d in 0..kd {
-                    acc += ws.state[v * kd + d] * ws.k[d * length + t];
-                }
-                ws.prediction[v] = acc;
-            }
-            for v in 0..vd {
-                ws.correction[v] = beta * (ws.v[v * length + t] - factor * ws.prediction[v]);
-            }
-            for v in 0..vd {
-                for d in 0..kd {
-                    ws.state[v * kd + d] =
-                        factor * ws.state[v * kd + d] + ws.correction[v] * ws.k[d * length + t];
-                }
-            }
-            for v in 0..vd {
-                let mut acc = 0.0f32;
-                for d in 0..kd {
-                    acc += ws.state[v * kd + d] * ws.q[d * length + t];
-                }
-                ws.result[v] = acc;
-            }
-
-            rms_noncentered_in_place(&mut ws.result, &weights.norm, cfg.eps);
-            for v in 0..vd {
-                ws.out[(head * vd + v) * length + t] = ws.result[v] * silu(ws.z[v * length + t]);
-            }
+    ws.out.resize(value_width * length, 0.0);
+    {
+        let heads = &ws.heads;
+        let out = &mut ws.out;
+        for (head, scratch) in heads.iter().enumerate() {
+            let start = head * vd * length;
+            out[start..start + vd * length].copy_from_slice(&scratch.output);
         }
     }
 
@@ -193,4 +136,107 @@ pub fn delta_layer_recurrent<'a>(
         &mut ws.output,
     );
     Ok(&ws.output)
+}
+
+/// Extract, normalize, and scan one value head into `s.output`.
+#[allow(clippy::too_many_arguments)]
+fn scan_head(
+    cfg: &GatedDeltaConfig,
+    weights: &GatedDeltaWeights,
+    mixed: &[f32],
+    z_proj: &[f32],
+    beta: &[f32],
+    decay: &[f32],
+    length: usize,
+    head: usize,
+    inv_scale: f32,
+    s: &mut HeadScratch,
+) {
+    let kd = cfg.key_dim;
+    let vd = cfg.value_dim;
+    let key_width = kd * cfg.key_heads;
+    let key_head = cfg.key_head_for(head);
+    let q_offset = key_head * kd;
+    let k_offset = key_width + key_head * kd;
+    let v_offset = 2 * key_width + head * vd;
+    let z_offset = head * vd;
+
+    s.q.resize(kd * length, 0.0);
+    s.k.resize(kd * length, 0.0);
+    s.v.resize(vd * length, 0.0);
+    s.z.resize(vd * length, 0.0);
+    s.scratch.resize(kd.max(vd), 0.0);
+    s.output.resize(vd * length, 0.0);
+
+    for row in 0..kd {
+        for t in 0..length {
+            s.q[row * length + t] = mixed[(q_offset + row) * length + t];
+            s.k[row * length + t] = mixed[(k_offset + row) * length + t];
+        }
+    }
+    for row in 0..vd {
+        for t in 0..length {
+            s.v[row * length + t] = mixed[(v_offset + row) * length + t];
+            s.z[row * length + t] = z_proj[(z_offset + row) * length + t];
+        }
+    }
+
+    // L2-normalize Q and K per position; Q is additionally scaled by
+    // `1 / sqrt(key_dim)` (see the layer reference for the orientation note).
+    for t in 0..length {
+        for d in 0..kd {
+            s.scratch[d] = s.q[d * length + t];
+        }
+        l2_normalize(&mut s.scratch[..kd], 1e-6);
+        for d in 0..kd {
+            s.q[d * length + t] = s.scratch[d] * inv_scale;
+        }
+        for d in 0..kd {
+            s.scratch[d] = s.k[d * length + t];
+        }
+        l2_normalize(&mut s.scratch[..kd], 1e-6);
+        for d in 0..kd {
+            s.k[d * length + t] = s.scratch[d];
+        }
+    }
+
+    s.state.resize(vd * kd, 0.0);
+    s.prediction.resize(vd, 0.0);
+    s.correction.resize(vd, 0.0);
+    s.result.resize(vd, 0.0);
+    s.state.iter_mut().for_each(|value| *value = 0.0);
+
+    for t in 0..length {
+        let factor = decay[head * length + t].exp();
+        let write = beta[head * length + t];
+
+        for v in 0..vd {
+            let mut acc = 0.0f32;
+            for d in 0..kd {
+                acc += s.state[v * kd + d] * s.k[d * length + t];
+            }
+            s.prediction[v] = acc;
+        }
+        for v in 0..vd {
+            s.correction[v] = write * (s.v[v * length + t] - factor * s.prediction[v]);
+        }
+        for v in 0..vd {
+            for d in 0..kd {
+                s.state[v * kd + d] =
+                    factor * s.state[v * kd + d] + s.correction[v] * s.k[d * length + t];
+            }
+        }
+        for v in 0..vd {
+            let mut acc = 0.0f32;
+            for d in 0..kd {
+                acc += s.state[v * kd + d] * s.q[d * length + t];
+            }
+            s.result[v] = acc;
+        }
+
+        rms_noncentered_in_place(&mut s.result, &weights.norm, cfg.eps);
+        for v in 0..vd {
+            s.output[v * length + t] = s.result[v] * silu(s.z[v * length + t]);
+        }
+    }
 }
