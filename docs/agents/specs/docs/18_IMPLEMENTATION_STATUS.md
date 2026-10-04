@@ -66,8 +66,18 @@ bundled webpki roots).
 - `prompt`: Python-compatible JSON (`py_float` / `py_json_content`), state and
   option rendering, and `build_prefix` / `build_sequence` over a `Tokenizer`
   trait, ported from `Laya.jl` `prompt.jl`.
+- `model`: the ModernBERT encoder + decision head — embedding + `embed_norm`,
+  per-layer `attn_norm`, fused-QKV split, non-traditional RoPE with per-kind
+  base, full/sliding masks with padded-query handling, GeGLU MLP, `final_norm`;
+  the typed head (no RoPE, ReLU MLP), marker gather/clamp, scorer softmax,
+  top-1/top-2/entropy pooling, and the action head. Both a host
+  `forward_encoder_reference` / `forward_reference` and a tenferro
+  `forward_encoder_tenferro` / `forward_tenferro` are provided, with synthetic
+  parity tests. The forward uses the tanh GELU on both sides so they can be
+  compared; an `exact_gelu` / `erf` port of `mlx_erf` is included for the
+  eventual exact path.
 - Remaining: concrete tokenizer (byte-level / Metaspace BPE), safetensors
-  loading, ModernBERT + decision-head forward, `DecisionEngine` wiring.
+  loading, `DecisionEngine` wiring, plans/workspaces.
 
 ### Phase 5 — `jeff-infer`
 
@@ -78,11 +88,17 @@ bundled webpki roots).
   mask, output projection) or Gated DeltaNet (`tenferro-gated-delta`), the
   SiLU-gated MLP, the final last-position RMSNorm, and the readout. Both a host
   `forward_reference` and a tenferro `forward_tenferro` are provided.
-- Parity tests: the tenferro forward matches the host reference for a mixed
-  stack (DeltaNet + full attention) and for single-kind stacks, including mask
-  holes.
-- Remaining: safetensors checkpoint loading, tokenizer, prepared-token
-  `DecisionEngine` wiring, plans/workspaces.
+- `checkpoint`: a self-contained safetensors reader (no added dependency;
+  `F32`/`F64`/`F16`/`BF16`) and a strict loader that maps `language_model.*`
+  tensors plus `readout.safetensors` into `JeffWeights` — interleaved per-head
+  `[query, gate]` split of the fused `q_proj`, consecutive GQA expansion,
+  `a_decay = -exp(A_log)`, and the `(channels, 1, taps)` convolution layout.
+- Real-fixture parity: against the `extern/JeffClient.jl` synthetic Qwen3.5
+  fixture (lengths 1/3/63/64/65, batch 2, left padding), `forward_reference`
+  matches the independent PyTorch logits to below `1e-4` (observed ~`5e-7`) and
+  `forward_tenferro` to below `1e-3`. The tests skip when the fixture submodule
+  is absent.
+- Remaining: tokenizer, prepared-token `DecisionEngine` wiring, plans/workspaces.
 
 ### Phase 6 — `tenferro-gated-delta`
 
@@ -92,12 +108,18 @@ bundled webpki roots).
   `triangular_solve(unit_diagonal = true)`, `exp`, and the shared `rms_norm` /
   `silu` primitives.
 - Full layer wrapper (`layer`): `qkv`/`z`/`a`/`b`/`out_proj` projections
-  (tenferro-backed), causal convolution, Q/K L2 normalization with `sqrt(key_dim)`
-  Q scaling, `beta`/`decay` from `sigmoid`/`softplus`, the scan, and the output
-  projection — with `GatedDeltaWeights` layout validation.
+  (tenferro-backed), causal convolution, Q/K L2 normalization with
+  `1 / sqrt(key_dim)` Q scaling, `beta`/`decay` from `sigmoid`/`softplus`, the
+  scan, and the output projection — with `GatedDeltaWeights` layout validation.
 - Cross-formulation parity tests: the chunked scan and the full tenferro layer
   match the recurrent host reference, across chunk boundaries, single tokens,
-  grouped key/value widths, and mask holes.
+  grouped key/value widths, mask holes, and strongly negative decay.
+- Fixed against the Qwen3.5 fixture: the chunked state update computed the
+  ending-key decay as `exp(sum).ln()`, which underflows to `-inf` once a
+  64-token chunk's decay sum is very negative; it now uses the host cumulative
+  values directly (`regression test with strong decay across a chunk
+  boundary`). The Q scaling was also corrected from `sqrt(key_dim)` to
+  `1 / sqrt(key_dim)` (the sign shows through the output-RMSNorm `eps`).
 - Also the chunked effective-system `M = I + L` helper with unit-diagonal
   forward substitution.
 - Remaining: prepared plans/workspaces, extension-op wiring, fused CPU
@@ -107,7 +129,7 @@ bundled webpki roots).
 
 | Area | Blocker |
 |---|---|
-| Laya/Jeff numerical parity (Phases 2, 5) | No real checkpoints available in this environment; validate against `extern/Laya.jl` / `extern/JeffClient.jl` once checkpoints/fixtures exist. |
+| Laya numerical parity (Phase 2) | No Laya checkpoint/fixture in this environment; validate against `extern/Laya.jl` once tokenizer/weights assets exist. (Jeff now has real-fixture parity in `native_fixture.rs`.) |
 | Exact GELU (Laya parity) | tenferro has no `erf`; needs a `tenferro-infer` extension op porting `mlx_erf`. |
 | Phase 4 / 7 CUDA | No CUDA hardware here; code can be written but not validated. |
 | Phase 8 FP16/BF16 | Deferred by decision: tenferro's public dtype set lacks `F16`/`BF16` at the pinned revision. |
@@ -116,7 +138,7 @@ bundled webpki roots).
 
 ## Verification snapshot
 
-- `cargo test --workspace`: decision-core 20, reference-data 4, tenferro-infer 14,
-  laya-infer 22, jeff-infer 16, tenferro-gated-delta 9, jev-client 49
+- `cargo test --workspace`: decision-core 20, reference-data 4, tenferro-infer 13,
+  laya-infer 27, jeff-infer 24, tenferro-gated-delta 10, jev-client 49
   (58 with `--features http`), bench-suite 1.
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean.

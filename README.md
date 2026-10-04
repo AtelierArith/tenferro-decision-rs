@@ -14,9 +14,9 @@ architecture.
 |---|---|
 | `decision-core` | Backend-independent questions/answers, `Content`, and the `DecisionEngine` seam |
 | `tenferro-infer` | Shared inference primitives (norm, activations, softmax, RoPE, attention) |
-| `laya-infer` | Laya engine (config + calibration done; forward pending) |
-| `jeff-infer` | Jeff engine (config + readout + Qwen3.5 layer stack; checkpoint loading pending) |
-| `tenferro-gated-delta` | Gated DeltaNet crate for Jeff (host reference started) |
+| `laya-infer` | Laya engine (config, calibration, prompt, ModernBERT + decision-head forward; tokenizer/checkpoint loading pending) |
+| `jeff-infer` | Jeff engine (config, readout, Qwen3.5 layer stack, safetensors checkpoint loading, real-fixture parity) |
+| `tenferro-gated-delta` | Gated DeltaNet crate for Jeff (host reference + tenferro chunked scan + full layer) |
 | `jev-client` | Independent TypeSafe System One API client |
 | `reference-data` | Reference fixture format and loader (test support) |
 | `bench-suite` | Benchmark harness skeleton and metadata capture |
@@ -27,9 +27,12 @@ architecture.
 
 Phase 0 (workspace), Phase 1 (`tenferro-infer` primitives), and Phase 9
 (`jev-client`) are implemented and tested. The checkpoint-independent parts of
-Phases 2/5/6 (config, calibration, readout, Delta system reference) are in
-place; the forward passes, tokenizers, and checkpoint loading need real
-checkpoints to validate. See
+Phases 2/5/6 are in place, and both forward passes now run: `jeff-infer` has
+safetensors checkpoint loading and matches the `extern/JeffClient.jl` synthetic
+Qwen3.5 fixture against its independent PyTorch reference logits, while
+`laya-infer` has the ModernBERT + decision-head forward with synthetic parity
+tests. Tokenizer assets, `DecisionEngine` wiring, and plans/workspaces remain.
+See
 [`docs/agents/specs/docs/18_IMPLEMENTATION_STATUS.md`](docs/agents/specs/docs/18_IMPLEMENTATION_STATUS.md)
 for the live status and blockers (CUDA hardware, tenferro `erf`/F16/BF16,
 WebGPU coverage).
