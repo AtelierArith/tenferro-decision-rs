@@ -61,6 +61,7 @@ typed-decision-rs/
 - `docs/15_TENFERRO_INFER_DESIGN.md` — design of the shared `tenferro-infer` primitive crate (norm, activations, softmax, RoPE, attention)
 - `docs/16_DECISION_CORE_DESIGN.md` — design of the backend-independent `decision-core` crate and its `DecisionEngine` trait
 - `docs/17_JEV_CLIENT_DESIGN.md` — design of the independent `jev-client` TypeSafe API client (transport, credentials, limits, validation)
+- `docs/18_IMPLEMENTATION_STATUS.md` — live status of the Rust implementation against the roadmap (completed phases, blockers)
 
 ## Recommended first milestone
 
