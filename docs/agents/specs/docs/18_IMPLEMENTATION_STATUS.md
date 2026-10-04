@@ -57,8 +57,11 @@ errors); HTTP-date `Retry-After`, an injectable monotonic clock, and a
 - `config`: `EncoderConfig` / `AgentConfig` parsing and validation.
 - `calibration`: temperature buckets, clamping, entropy confidence, and
   choice/score/noul answer construction plus the action probability.
-- Remaining: tokenizer, prompt/`py_json` serialization, safetensors loading,
-  ModernBERT + decision-head forward, `DecisionEngine` wiring.
+- `prompt`: Python-compatible JSON (`py_float` / `py_json_content`), state and
+  option rendering, and `build_prefix` / `build_sequence` over a `Tokenizer`
+  trait, ported from `Laya.jl` `prompt.jl`.
+- Remaining: concrete tokenizer (byte-level / Metaspace BPE), safetensors
+  loading, ModernBERT + decision-head forward, `DecisionEngine` wiring.
 
 ### Phase 5 — `jeff-infer`
 
@@ -88,6 +91,6 @@ errors); HTTP-date `Retry-After`, an injectable monotonic clock, and a
 ## Verification snapshot
 
 - `cargo test --workspace`: decision-core 19, reference-data 4, tenferro-infer 11,
-  laya-infer 14, jeff-infer 8, tenferro-gated-delta 3, jev-client 49,
+  laya-infer 22, jeff-infer 8, tenferro-gated-delta 3, jev-client 49,
   bench-suite 1.
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean.
