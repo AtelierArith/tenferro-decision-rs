@@ -178,7 +178,10 @@ behind the eager session, so the forward stays tenferro-first:
   input layout transposed every weight per call (3–11× slower than the kernel);
   the row-major input layout removes it. Layer effect (`bench_delta_paths`,
   L8/16/64): extension op 1.0–1.13× the bare kernel and ~1.8× faster than the
-  tensor-native chunked layer.
+  tensor-native chunked layer. The op also reuses its `GatedDeltaWorkspace`
+  across calls through the runtime's `ExtensionCacheStore`
+  (`ExtensionCacheKey`, keyed by length), so the scratch is not reallocated per
+  call.
 - `tenferro-ext::gemm::GemmOp` — a dense `y = weightᵀ x` projection backed by
   `cpu-kernels` (Accelerate). Correct and zero-copy, but **not** wired in: for
   our tall-skinny decode shapes faer (tenferro's default) is already faster
@@ -211,7 +214,8 @@ The L8 gap is not the eager wrapper (~1.1×), not the GEMM provider
 the DeltaNet kernel (fixed). It is the aggregate of the many small eager ops,
 faer's per-call `spindle` scope/barrier fan-out for `m = length = 8` GEMMs, and
 the memory traffic of the intermediates — all tenferro-internal. Capturing more
-requires changes inside tenferro-rs (out of scope) or a different formulation.
+requires changes inside tenferro-rs (out of scope); the profile is filed
+upstream as [#1995](https://github.com/tensor4all/tenferro-rs/issues/1995).
 
 Whole-model effect (`bench_tenferro_kernels`, production Jeff checkpoint,
 `RAYON_NUM_THREADS=8`, release, best-of-10):

@@ -45,6 +45,7 @@ against revision `471c4278` (workspace version `0.7.1`).
 |---|---|---|
 | [#1990](https://github.com/tensor4all/tenferro-rs/issues/1990) | CPU fused elementwise region is ~3.7× slower than eager per-op kernels for a long elementwise chain | medium |
 | [#1992](https://github.com/tensor4all/tenferro-rs/issues/1992) | CPU eager `dot_general`: GEMM analysis recomputed per call (no plan cache) and the BLAS provider cannot execute linalg | medium |
+| [#1995](https://github.com/tensor4all/tenferro-rs/issues/1995) | CPU eager decode forward: small-`m` GEMMs (faer) and internal layout copies (`structural::typed_copy_into_uninit`) dominate; GEMM providers are shape-dependent | medium |
 
 MWE and benchmark for #1990:
 

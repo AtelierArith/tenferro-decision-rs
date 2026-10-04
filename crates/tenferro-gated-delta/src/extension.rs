@@ -30,7 +30,7 @@ use tenferro_cpu::CpuBackend;
 use tenferro_runtime::extension::{
     ExtensionOp, ExtensionShapeContext, SymDim, define_extension_runtime,
 };
-use tenferro_runtime::{ErrorPhase, ExtensionModule};
+use tenferro_runtime::{ErrorPhase, ExtensionCacheKey, ExtensionModule};
 use tenferro_tensor::{BackendSession, DType, Tensor, TensorBackend, TensorRead};
 
 use crate::config::{Algorithm, GatedDeltaConfig};
@@ -157,7 +157,7 @@ fn tensor_error(field: &'static str, message: impl Into<String>) -> tenferro_ten
 fn execute_gated_delta_in_session(
     op: &GatedDeltaOp,
     _session: &mut dyn BackendSession,
-    _caches: &mut tenferro_runtime::ExtensionCacheStore,
+    caches: &mut tenferro_runtime::ExtensionCacheStore,
     inputs: &[TensorRead<'_>],
 ) -> tenferro_tensor::Result<Vec<Tensor>> {
     if inputs.len() != GATED_DELTA_INPUT_COUNT {
@@ -209,13 +209,21 @@ fn execute_gated_delta_in_session(
         .validate(&config)
         .map_err(|error| tensor_error("weights", error.to_string()))?;
 
-    let mut workspace = GatedDeltaWorkspace::new();
+    // Reuse the fused kernel's scratch across calls through the runtime's
+    // extension cache (keyed by length; buffers resize to the config anyway).
+    let cache_key = ExtensionCacheKey::new(GATED_DELTA_FAMILY_ID, "workspaces", length as u64);
+    if caches.get::<GatedDeltaWorkspace>(&cache_key).is_none() {
+        caches.put(cache_key, GatedDeltaWorkspace::new(), 0);
+    }
+    let workspace = caches
+        .get_mut::<GatedDeltaWorkspace>(&cache_key)
+        .expect("gated-delta workspace just inserted");
     let output = delta_layer_recurrent_slices(
         &config,
         &weight_slices,
         slice(0, "x")?,
         slice(1, "mask")?,
-        &mut workspace,
+        workspace,
     )
     .map_err(|error| tensor_error("weights", error.to_string()))?;
 
