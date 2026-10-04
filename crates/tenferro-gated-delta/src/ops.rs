@@ -35,3 +35,13 @@ pub fn rms_noncentered(values: &[f32], weight: &[f32], eps: f32) -> Vec<f32> {
         .map(|(x, w)| x * inv * w)
         .collect()
 }
+
+/// In-place non-centered RMSNorm: `values[i] = values[i] * rsqrt(mean+eps) * w[i]`.
+pub fn rms_noncentered_in_place(values: &mut [f32], weight: &[f32], eps: f32) {
+    let d = values.len() as f32;
+    let mean_sq: f32 = values.iter().map(|v| v * v).sum::<f32>() / d;
+    let inv = 1.0 / (mean_sq + eps).sqrt();
+    for (value, w) in values.iter_mut().zip(weight) {
+        *value = *value * inv * w;
+    }
+}

@@ -7,6 +7,8 @@ use decision_core::{DecisionError, Result};
 pub enum Algorithm {
     /// Host recurrent reference (no tenferro ops).
     Reference,
+    /// Fused host recurrent kernel with a reusable workspace.
+    Recurrent,
     /// Tenferro-backed chunked formulation.
     Chunked,
 }

@@ -149,8 +149,24 @@ bundled webpki roots).
   `1 / sqrt(key_dim)` (the sign shows through the output-RMSNorm `eps`).
 - Also the chunked effective-system `M = I + L` helper with unit-diagonal
   forward substitution.
-- Remaining: prepared plans/workspaces, extension-op wiring, fused CPU
-  convolution/normalization, and CUDA kernels.
+- Fused host recurrent kernel (`recurrent`): projections, causal convolution,
+  Q/K normalization, gates, the recurrent scan, output RMSNorm/gate, and output
+  projection in one host pass over reusable [`GatedDeltaWorkspace`] buffers —
+  no tenferro round-trips and no per-head intermediate allocations.
+- Prepared plans/workspaces (`plan`, `workspace`): `AlgorithmChoice`
+  (`Auto`/`Reference`/`Recurrent`/`Chunked`), deterministic `resolve_algorithm`
+  from config + `BackendCaps` (never input-dependent), `GatedDeltaPlan`, and
+  `GatedDeltaWorkspace`. The `gated_delta` direct entry dispatches on the plan.
+- `GatedDelta` extension op (`extension`): `ExtensionOp` +
+  `define_extension_runtime!` (CPU session route), descriptor fields for the
+  layer config, `x`/`mask`/nine weight tensors as inputs, and an
+  `EagerSessionGatedDeltaExt` eager helper. The op converts column-major tensor
+  inputs to the row-major host layout and runs the fused recurrent kernel.
+- Cross-checks: the fused recurrent kernel matches the reference to <1e-6; the
+  direct entry matches for every algorithm; the extension op matches the
+  reference through the eager session.
+- Remaining: CUDA kernels (`cuda` feature; no hardware here to validate) and
+  wiring `jeff-infer`'s forward onto the plan/extension path.
 
 ## Blocked / needs external input
 
@@ -164,6 +180,6 @@ bundled webpki roots).
 ## Verification snapshot
 
 - `cargo test --workspace`: decision-core 20, reference-data 4, tenferro-infer 13,
-  tenferro-ext 2, laya-infer 44, jeff-infer 31, tenferro-gated-delta 10,
+  tenferro-ext 2, laya-infer 44, jeff-infer 31, tenferro-gated-delta 19,
   jev-client 49 (58 with `--features http`), bench-suite 1.
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean.

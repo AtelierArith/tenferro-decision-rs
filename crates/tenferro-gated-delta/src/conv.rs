@@ -14,6 +14,21 @@ pub fn causal_depthwise_silu(
     taps: usize,
 ) -> Vec<f32> {
     let mut output = vec![0.0f32; channels * length];
+    causal_depthwise_silu_into(input, channels, length, weight, taps, &mut output);
+    output
+}
+
+/// The fused kernel behind [`causal_depthwise_silu`], writing into `output`.
+///
+/// `output` must have `channels * length` elements.
+pub fn causal_depthwise_silu_into(
+    input: &[f32],
+    channels: usize,
+    length: usize,
+    weight: &[f32],
+    taps: usize,
+    output: &mut [f32],
+) {
     for channel in 0..channels {
         let row = channel * length;
         for t in 0..length {
@@ -27,5 +42,4 @@ pub fn causal_depthwise_silu(
             output[row + t] = silu(acc);
         }
     }
-    output
 }

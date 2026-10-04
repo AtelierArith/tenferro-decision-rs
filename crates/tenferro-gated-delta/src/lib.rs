@@ -1,34 +1,84 @@
 //! Chunked Gated DeltaNet for the Jeff engine.
 //!
 //! Design: `docs/agents/specs/docs/12_TENFERRO_GATED_DELTA.md`. The crate owns
-//! the causal depthwise convolution, the reference recurrent scan, and the
-//! tenferro-backed chunked formulation.
+//! the causal depthwise convolution, the reference recurrent scan, the fused
+//! host recurrent kernel, and the tenferro-backed chunked formulation.
 //!
 //! Implemented now:
 //!
 //! - [`ops`]: reference scalar/vector helpers
 //! - [`conv`]: causal depthwise convolution with a fused SiLU
 //! - [`reference`]: host recurrent scan (one value head)
-//! - [`chunked`]: tenferro eager chunked scan (one value head), plus the
-//!   effective-system helper below
+//! - [`recurrent`]: fused host recurrent layer over a reusable workspace
+//! - [`chunked`]: tenferro eager chunked scan (one value head)
+//! - [`layer`]: full projection/normalization/scan/output wrapper
+//! - [`plan`]: deterministic algorithm selection and prepared plans
+//! - [`workspace`]: reusable execution buffers
+//! - [`extension`]: the `GatedDelta` tenferro extension op
+//! - [`gated_delta`]: the direct entry point dispatching on a plan
 //!
-//! Still to come: the weight/projection wrapper, Q/K normalization and
-//! beta/decay preparation, prepared plans/workspaces, the extension-op wiring,
-//! and the CUDA kernels.
+//! Still to come: CUDA kernels (`cuda` feature; no hardware here to validate).
 
 pub mod chunked;
 pub mod config;
 pub mod conv;
+pub mod extension;
 pub mod layer;
 pub mod ops;
+pub mod plan;
+pub mod recurrent;
 pub mod reference;
+pub mod workspace;
 
 pub use config::{Algorithm, GatedDeltaConfig};
-pub use conv::causal_depthwise_silu;
+pub use conv::{causal_depthwise_silu, causal_depthwise_silu_into};
+pub use extension::{EagerSessionGatedDeltaExt, GatedDeltaOp, GATED_DELTA_FAMILY_ID};
 pub use layer::{delta_layer_reference, delta_layer_tenferro, GatedDeltaWeights};
+pub use plan::{resolve_algorithm, AlgorithmChoice, BackendCaps, GatedDeltaPlan};
+pub use recurrent::delta_layer_recurrent;
 pub use reference::{delta_scan_reference, DeltaScanInputs};
+pub use workspace::GatedDeltaWorkspace;
 
 use decision_core::{DecisionError, Result};
+use tenferro_ad::EagerSession;
+
+/// Direct entry point: run the formulation frozen in `plan`.
+///
+/// `Chunked` uses the eager `session` (tenferro-backed projections and scan);
+/// `Reference` and `Recurrent` are host-only and ignore the session. The
+/// recurrent path writes through `ws` and returns an owned copy.
+pub fn gated_delta(
+    session: &mut EagerSession<'_>,
+    cfg: &GatedDeltaConfig,
+    weights: &GatedDeltaWeights,
+    x: &[f32],
+    mask: &[f32],
+    plan: &GatedDeltaPlan,
+    ws: &mut GatedDeltaWorkspace,
+) -> tenferro_ad::Result<Vec<f32>> {
+    match plan.algorithm() {
+        Algorithm::Reference => {
+            delta_layer_reference(cfg, weights, x, mask).map_err(layer::invalid_weights)
+        }
+        Algorithm::Recurrent => delta_layer_recurrent(cfg, weights, x, mask, ws)
+            .map(|output| output.to_vec())
+            .map_err(layer::invalid_weights),
+        Algorithm::Chunked => delta_layer_tenferro(session, cfg, weights, x, mask),
+    }
+}
+
+/// Eager convenience wrapper over [`gated_delta`] without an explicit plan.
+pub fn gated_delta_eager(
+    session: &mut EagerSession<'_>,
+    cfg: &GatedDeltaConfig,
+    weights: &GatedDeltaWeights,
+    x: &[f32],
+    mask: &[f32],
+    ws: &mut GatedDeltaWorkspace,
+) -> tenferro_ad::Result<Vec<f32>> {
+    let plan = GatedDeltaPlan::from_config(cfg, mask.len());
+    gated_delta(session, cfg, weights, x, mask, &plan, ws)
+}
 
 /// Build the `n x n` row-major effective matrix `M = I + L`.
 ///

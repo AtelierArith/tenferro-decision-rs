@@ -1,9 +1,16 @@
 # tenferro-gated-delta Design
 
-**Status:** design proposal (extends the normative package)  
+**Status:** implemented (CPU); CUDA pending hardware  
 **Date:** 2026-10-04  
 **Depends on:** `01_DESIGN.md` §4, `02_SPECIFICATION.md` §5, `04_MODEL_MAPPING.md` §2,
 `09_JEFFCLIENT_ANALYSIS.md` §7, `11_TENFERRO_API_SURVEY.md`
+
+> **Implementation status.** The host recurrent reference, the tenferro chunked
+> formulation, the fused host recurrent kernel, prepared plans/workspaces
+> (§9, §11), the direct `gated_delta` entry (§12), and the `GatedDelta`
+> extension op (§12) are implemented and cross-checked in
+> `crates/tenferro-gated-delta` (see `18_IMPLEMENTATION_STATUS.md`). CUDA (§10)
+> remains unimplemented: no CUDA hardware is available here to validate it.
 
 `tenferro-gated-delta` is the crate that extends tenferro-rs with the
 Qwen3.5 Gated DeltaNet execution needed by `jeff-infer`. It owns the causal

@@ -16,7 +16,7 @@ architecture.
 | `tenferro-infer` | Shared inference primitives (norm, activations, softmax, RoPE, attention) |
 | `laya-infer` | Laya engine (config, calibration, prompt, tokenizer, checkpoint loading, ModernBERT + decision-head forward, `DecisionEngine`) |
 | `jeff-infer` | Jeff engine (config, readout, Qwen3.5 layer stack, checkpoint loading, prepared-token `DecisionEngine`, real-fixture parity) |
-| `tenferro-gated-delta` | Gated DeltaNet crate for Jeff (host reference + tenferro chunked scan + full layer) |
+| `tenferro-gated-delta` | Gated DeltaNet crate for Jeff (host reference + fused recurrent kernel + tenferro chunked scan + full layer + plans/workspaces + `GatedDelta` extension op) |
 | `safetensors-io` | Shared dependency-light safetensors reader for the checkpoint loaders |
 | `tenferro-ext` | Self-hosted tenferro extension ops (`erf`, exact GELU) used by Laya |
 | `jev-client` | Independent TypeSafe System One API client |

@@ -80,6 +80,20 @@ fn linear_host(
     length: usize,
 ) -> Vec<f32> {
     let mut y = vec![0.0f32; out_dim * length];
+    linear_into(weight, in_dim, out_dim, x, length, &mut y);
+    y
+}
+
+/// Row-major `(in, out)` weight applied to `(in, length)` input, into `y`
+/// (`out * length` elements). `y[o, t] = sum_i weight[i, o] * x[i, t]`.
+pub(crate) fn linear_into(
+    weight: &[f32],
+    in_dim: usize,
+    out_dim: usize,
+    x: &[f32],
+    length: usize,
+    y: &mut [f32],
+) {
     for o in 0..out_dim {
         for t in 0..length {
             let mut acc = 0.0f32;
@@ -89,17 +103,28 @@ fn linear_host(
             y[o * length + t] = acc;
         }
     }
-    y
 }
 
 fn mask_rows(x: &[f32], hidden: usize, length: usize, mask: &[f32]) -> Vec<f32> {
     let mut masked = x.to_vec();
+    mask_rows_into(x, hidden, length, mask, &mut masked);
+    masked
+}
+
+/// Multiply each column `t` of the row-major `(hidden, length)` input by
+/// `mask[t]`, writing into `masked`.
+pub(crate) fn mask_rows_into(
+    x: &[f32],
+    hidden: usize,
+    length: usize,
+    mask: &[f32],
+    masked: &mut [f32],
+) {
     for i in 0..hidden {
         for t in 0..length {
-            masked[i * length + t] *= mask[t];
+            masked[i * length + t] = x[i * length + t] * mask[t];
         }
     }
-    masked
 }
 
 struct OwnedInputs {
@@ -251,7 +276,7 @@ pub fn delta_layer_reference(
     ))
 }
 
-fn invalid_weights(error: DecisionError) -> tenferro_ad::Error {
+pub(crate) fn invalid_weights(error: DecisionError) -> tenferro_ad::Error {
     tenferro_ad::Error::TensorRuntime(tenferro_tensor::Error::invalid_argument(
         "tenferro-gated-delta",
         "weights",
