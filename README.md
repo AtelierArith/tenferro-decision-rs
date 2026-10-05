@@ -48,6 +48,134 @@ See
 for the live status and blockers (CUDA hardware, tenferro `erf`/F16/BF16,
 WebGPU coverage).
 
+## Usage
+
+Fetch a checkpoint with the `hf-fetch` CLI; it prints the local snapshot
+directory that the engines load from:
+
+```sh
+cargo run -p hf-fetch -- laya   # -> ~/.cache/huggingface/.../snapshots/<sha>
+cargo run -p hf-fetch -- jeff
+```
+
+Both engines implement `decision_core::DecisionEngine` and answer a
+`QuestionSet` against a `State`. The snippets below are also runnable examples:
+
+```sh
+cargo run --release -p laya-infer --example laya_system_one -- <CHECKPOINT_DIR> [TEXT]
+cargo run --release -p jeff-infer --example jeff_system_one -- <CHECKPOINT_DIR> [--tenferro]
+```
+
+### Laya — natural language
+
+Laya is text/JSON only; `LayaEngine::load` reads the encoder/agent configs,
+`model.safetensors`, the `tokenizer/` assets, and the calibration in one call.
+
+```rust
+use decision_core::{
+    ChoiceQuestion, Content, DecisionEngine, NoulCriteria, NoulQuestion, Question, QuestionSet,
+    ScoreQuestion, State,
+};
+use laya_infer::agent::LayaEngine;
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Directory printed by `hf-fetch laya`.
+    let mut engine = LayaEngine::load("/path/to/laya/snapshot")?;
+
+    let mut questions = QuestionSet::new();
+    questions.push(
+        "next_action",
+        Question::Choice(ChoiceQuestion::new(
+            Content::string("What should the character do next?"),
+            vec![
+                ("greet".into(), Content::string("greet the visitor")),
+                ("wait".into(), Content::string("keep waiting")),
+                ("leave".into(), Content::string("walk away")),
+            ],
+        )?),
+    )?;
+    questions.push(
+        "risk",
+        Question::Score(ScoreQuestion::new(
+            Content::string("How risky is this plan?"),
+            vec!["low".into(), "medium".into(), "high".into()],
+        )?),
+    )?;
+    questions.push(
+        "agrees",
+        Question::Noul(NoulQuestion::new(
+            Content::string("Does the character agree?"),
+            NoulCriteria {
+                truthy: Some(Content::string("yes")),
+                falsy: Some(Content::string("no")),
+            },
+        )?),
+    )?;
+
+    let state = State::Text("A traveler knocks on the door.".to_string());
+    let answers = engine.system_one(&state, &questions)?;
+    for ((id, _), answer) in questions.questions().iter().zip(&answers) {
+        println!("{id}: {answer:?}");
+    }
+    Ok(())
+}
+```
+
+`State::Json(Content::object([...]))` works the same way. Use
+`engine.decide(&state, &questions)?` instead of `system_one` when you also want
+each answer's action probability (the action-head output) next to the typed
+answer.
+
+### Jeff — prepared tokens
+
+Jeff's `DecisionEngine` currently accepts `PreparedState` only: one token row per
+question, `row i` answering question `i`, with leading padding trimmed by the
+engine. The natural-language tokenizer is not wired yet.
+
+```rust
+use decision_core::{
+    ChoiceQuestion, Content, DecisionEngine, PreparedState, Question, QuestionSet, State,
+};
+use jeff_infer::checkpoint::load_checkpoint;
+use jeff_infer::engine::{JeffBackend, JeffEngine};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    // Directory printed by `hf-fetch jeff`.
+    let checkpoint = load_checkpoint("/path/to/jeff/snapshot")?;
+    let mut engine = JeffEngine::new(checkpoint.config, checkpoint.decision, checkpoint.weights)?;
+
+    // One prepared row per question; `row 0` answers `questions[0]`.
+    let state = State::Prepared(PreparedState {
+        input_ids: vec![vec![1, 2, 3, 4]],
+        attention_mask: vec![vec![true; 4]],
+    });
+
+    let mut questions = QuestionSet::new();
+    questions.push(
+        "next_action",
+        Question::Choice(ChoiceQuestion::new(
+            Content::string("Pick the next action."),
+            vec![
+                ("a".into(), Content::string("first")),
+                ("b".into(), Content::string("second")),
+                ("c".into(), Content::string("third")),
+            ],
+        )?),
+    )?;
+
+    for answer in engine.system_one(&state, &questions)? {
+        println!("{answer:?}");
+    }
+    Ok(())
+}
+```
+
+`JeffEngine::new` defaults to `JeffBackend::Auto` (the optimized host forward);
+`JeffEngine::with_backend(config, decision, weights, JeffBackend::Tenferro)`
+selects the tenferro-native forward for backend portability, and
+`engine.logits(&prepared)?` exposes the raw per-row readout logits behind the
+typed answers.
+
 ## Building and testing
 
 ```sh
