@@ -189,11 +189,12 @@ CPU comparison against the Julia reference implementations
   sustained load, so absolute milliseconds drift between sessions; ratios are
   more stable than the times.
 - Same prepared inputs on both sides; model loading is measured separately.
-- Julia **Jeff** runs on Apple **Accelerate** already (`QwenDecisionCore` pulls
-  `AppleAccelerate` in as a hard dependency; `cpu_settings().accelerate == true`)
-  with the chunked DeltaNet (`delta_chunk_size = 64`). Julia **Laya**'s default
-  `CPUBackend` is OpenBLAS; the number below is its explicit `AccelerateBackend`
-  fast path (`tools/bench_laya_real_accelerate.jl`).
+- Both Julia numbers below use Apple **Accelerate** BLAS on this Apple-silicon
+  host. **Jeff** gets it automatically: `QwenDecisionCore` pulls
+  `AppleAccelerate` in as a hard dependency, so `cpu_settings().accelerate ==
+  true` and the forward uses the chunked DeltaNet (`delta_chunk_size = 64`).
+  **Laya**'s default `CPUBackend` is OpenBLAS, so its number is the explicit
+  `AccelerateBackend` fast path (`tools/bench_laya_real_accelerate.jl`).
 
 ### Jeff
 
@@ -201,7 +202,7 @@ Checkpoint `mstrasser/Jeff-Qwen3.5-0.8B`. Rust "oracle" is the correctness
 reference (`forward_reference`); `host_opt` is the default optimized host
 forward.
 
-| length | Julia | Rust oracle | Rust host_opt | host_opt / Julia |
+| length | Julia (Accelerate) | Rust oracle | Rust host_opt | host_opt / Julia |
 |---:|---:|---:|---:|---:|
 | L8 | 67.0 ms | 60.9 ms | 63.7 ms | 0.95× |
 | L16 | 70.2 ms | 85.9 ms | 85.9 ms | 1.22× |
@@ -211,7 +212,7 @@ Rust host vs the tenferro-native forward at L8 (the tenferro path is timed only
 at the shortest sequence; `HostRecurrent` is the default fused recurrent
 DeltaNet extension op, `TensorNative` is tensor-only):
 
-| path | ms | vs host_opt | vs Julia |
+| path | ms | vs host_opt | vs Julia (Accel.) |
 |---|---:|---:|---:|
 | Rust host_opt | 63.7 | 1.00× | 0.95× |
 | Rust tenferro `HostRecurrent` (cached) | 93.0 | 1.46× | 1.39× |
@@ -230,7 +231,7 @@ Checkpoint `convaiinnovations/laya` (`1c5edc17`).
 
 Rust host vs the tenferro-native forward at L8 B1:
 
-| path | ms | vs host | vs Julia |
+| path | ms | vs host | vs Julia (Accel.) |
 |---|---:|---:|---:|
 | Rust host | 44.1 | 1.00× | 0.85× |
 | Rust tenferro (cached) | 61.0 | 1.38× | 1.18× |
