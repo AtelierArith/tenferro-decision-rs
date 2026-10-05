@@ -480,7 +480,163 @@ pub fn geglu_into(u: &[f32], intermediate: usize, cols: usize, out: &mut [f32]) 
     }
 }
 
-/// Fused Laya attention block: split a fused `(3*d, length, batch)` projection
+/// Fused Jeff full attention over the `(length, width)` `q`/`k`/`v`/`gate`
+/// projections (`width = heads * head_dim`, column-major), returning the
+/// merged `(length, width)` activation ready for the output projection.
+///
+/// Per head: centered RMSNorm over `head_dim` (`scale = 1 + weight`), partial
+/// RoPE on the first `rotary_dim` channels (pairs `(i, i + rotary_dim/2)`,
+/// angle `t * theta^(-2i/rotary_dim)`), causal + active-key masked attention,
+/// then a sigmoid query gate. Mirrors `full_attention_host`; `out` is written in
+/// the contract-last `(length, width)` column-major layout.
+#[allow(clippy::too_many_arguments)]
+pub fn jeff_full_attention_into(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    gate: &[f32],
+    q_norm: &[f32],
+    k_norm: &[f32],
+    mask: &[f32],
+    length: usize,
+    heads: usize,
+    head_dim: usize,
+    rotary_dim: usize,
+    theta: f32,
+    eps: f32,
+    out: &mut [f32],
+) {
+    let width = heads * head_dim;
+    debug_assert_eq!(q.len(), length * width);
+    debug_assert_eq!(k.len(), length * width);
+    debug_assert_eq!(v.len(), length * width);
+    debug_assert_eq!(gate.len(), length * width);
+    debug_assert_eq!(q_norm.len(), head_dim);
+    debug_assert_eq!(k_norm.len(), head_dim);
+    debug_assert_eq!(mask.len(), length);
+    debug_assert_eq!(out.len(), length * width);
+    if length == 0 || width == 0 || head_dim == 0 {
+        return;
+    }
+    let attn_scale = 1.0 / (head_dim as f32).sqrt();
+    let half = rotary_dim / 2;
+    let q_addr = q.as_ptr() as usize;
+    let k_addr = k.as_ptr() as usize;
+    let v_addr = v.as_ptr() as usize;
+    let gate_addr = gate.as_ptr() as usize;
+    let out_addr = out.as_mut_ptr() as usize;
+    (0..heads).into_par_iter().for_each(|head| {
+        // SAFETY: each task owns the feature band `[head*head_dim,
+        // (head+1)*head_dim)` of `out` for every length, so writes are disjoint;
+        // q/k/v/gate/mask are only read.
+        let feat = head * head_dim;
+        unsafe {
+            let q = q_addr as *const f32;
+            let k = k_addr as *const f32;
+            let v = v_addr as *const f32;
+            let gate = gate_addr as *const f32;
+            let out = out_addr as *mut f32;
+            let mut qh = vec![0.0f32; length * head_dim];
+            let mut kh = vec![0.0f32; length * head_dim];
+            let mut vh = vec![0.0f32; length * head_dim];
+            for t in 0..length {
+                let src = t + length * feat;
+                let dst = t * head_dim;
+                for i in 0..head_dim {
+                    qh[dst + i] = *q.add(src + length * i);
+                    kh[dst + i] = *k.add(src + length * i);
+                    vh[dst + i] = *v.add(src + length * i);
+                }
+            }
+            let norm = |data: &mut [f32], weight: &[f32]| {
+                for t in 0..length {
+                    let row = t * head_dim;
+                    let mut mean_sq = 0.0f32;
+                    for i in 0..head_dim {
+                        mean_sq += data[row + i] * data[row + i];
+                    }
+                    mean_sq /= head_dim as f32;
+                    let scale = 1.0 / (mean_sq + eps).sqrt();
+                    for i in 0..head_dim {
+                        data[row + i] *= scale * (1.0 + weight[i]);
+                    }
+                }
+            };
+            norm(&mut qh, q_norm);
+            norm(&mut kh, k_norm);
+            if half > 0 {
+                for t in 0..length {
+                    let row = t * head_dim;
+                    for i in 0..half {
+                        let angle =
+                            (t as f32) * theta.powf(-2.0 * (i as f32) / (rotary_dim as f32));
+                        let (c, s) = (angle.cos(), angle.sin());
+                        let a = qh[row + i];
+                        let b = qh[row + i + half];
+                        qh[row + i] = a * c - b * s;
+                        qh[row + i + half] = a * s + b * c;
+                        let a = kh[row + i];
+                        let b = kh[row + i + half];
+                        kh[row + i] = a * c - b * s;
+                        kh[row + i + half] = a * s + b * c;
+                    }
+                }
+            }
+            let mut probs = vec![0.0f32; length];
+            let mut oh = vec![0.0f32; head_dim];
+            for query in 0..length {
+                let qo = query * head_dim;
+                let mut max = f32::NEG_INFINITY;
+                for (key, prob) in probs.iter_mut().enumerate() {
+                    if key > query || *mask.as_ptr().add(key) == 0.0 {
+                        *prob = f32::NEG_INFINITY;
+                        continue;
+                    }
+                    let ko = key * head_dim;
+                    let mut acc = 0.0f32;
+                    for i in 0..head_dim {
+                        acc += qh[qo + i] * kh[ko + i];
+                    }
+                    let score = acc * attn_scale;
+                    *prob = score;
+                    if score > max {
+                        max = score;
+                    }
+                }
+                let mut sum = 0.0f32;
+                for value in probs.iter_mut() {
+                    *value = if value.is_finite() {
+                        (*value - max).exp()
+                    } else {
+                        0.0
+                    };
+                    sum += *value;
+                }
+                for slot in oh.iter_mut() {
+                    *slot = 0.0;
+                }
+                if sum > 0.0 {
+                    for (key, &raw) in probs.iter().enumerate() {
+                        let p = raw / sum;
+                        if p == 0.0 {
+                            continue;
+                        }
+                        let vo = key * head_dim;
+                        for i in 0..head_dim {
+                            oh[i] += vh[vo + i] * p;
+                        }
+                    }
+                }
+                for (i, &value) in oh.iter().enumerate() {
+                    let g = *gate.add(query + length * (feat + i));
+                    let sigmoid = 1.0 / (1.0 + (-g).exp());
+                    *out.add(query + length * (feat + i)) = value * sigmoid;
+                }
+            }
+        }
+    });
+}
+
 /// into `q`/`k`/`v`, apply ModernBERT RoPE to `q`/`k`, and run masked scaled
 /// dot-product attention, returning `(d, length, batch)`.
 ///

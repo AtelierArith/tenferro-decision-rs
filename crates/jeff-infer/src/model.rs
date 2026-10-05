@@ -22,7 +22,7 @@
 
 use decision_core::{DecisionError, Result};
 use tenferro_ad::{EagerSession, EagerTensor};
-use tenferro_ext::EagerSessionLinearExt;
+use tenferro_ext::{EagerSessionJeffAttentionExt, EagerSessionLinearExt};
 use tenferro_gated_delta::{
     EagerSessionGatedDeltaExt, GatedDeltaConfig, GatedDeltaOp, GatedDeltaWeights,
     GatedDeltaWorkspace, delta_layer_recurrent, delta_layer_tenferro_native,
@@ -519,61 +519,76 @@ fn full_attention_tenferro(
     let q_norm = session.reshape(&q_norm, vec![hd])?;
     let k_norm = session.reshape(&k_norm, vec![hd])?;
 
-    // `(length, width)` -> `(length, hd, heads)` -> `(heads, length, hd)`.
-    let project_heads = |session: &mut EagerSession<'_>,
-                         weight: &EagerTensor|
-     -> tenferro_ad::Result<EagerTensor> {
-        let projected = linear_tenferro(session, x, weight)?; // (length, width)
-        let shaped = session.reshape(&projected, vec![length, hd, heads])?;
-        session.transpose(&shaped, &[2, 0, 1]) // (heads, length, hd)
-    };
+    // Linear projections via the `linear` extension op.
+    let q = linear_tenferro(session, x, &q_w)?; // (length, width)
+    let k = linear_tenferro(session, x, &k_w)?;
+    let v = linear_tenferro(session, x, &v_w)?;
+    let gate = linear_tenferro(session, x, &gate_w)?;
 
-    let q = project_heads(session, &q_w)?;
-    let k = project_heads(session, &k_w)?;
-    let v = project_heads(session, &v_w)?;
-    let gate = linear_tenferro(session, x, &gate_w)?; // (length, width)
-
-    let q = norm::rms_norm(session, &q, &q_norm, true, cfg.eps as f64)?;
-    let k = norm::rms_norm(session, &k, &k_norm, true, cfg.eps as f64)?;
-    let q = rope::rope_qwen_partial(session, &q, w.rope_theta as f64, w.rotary_dim)?;
-    let k = rope::rope_qwen_partial(session, &k, w.rope_theta as f64, w.rotary_dim)?;
-
-    let q = session.reshape(&q, vec![1, heads, length, hd])?;
-    let k = session.reshape(&k, vec![1, heads, length, hd])?;
-    let v = session.reshape(&v, vec![1, heads, length, hd])?;
-
-    // Causal mask: keep key s for query t iff s <= t and the key is active.
-    let mut keep = vec![false; length * length];
-    for t in 0..length {
-        for s in 0..length {
-            keep[t * length + s] = s <= t && mask[s] != 0.0;
-        }
-    }
-    let mask_t = {
-        let mut col = vec![false; length * length];
-        for r in 0..length {
-            for c in 0..length {
-                col[r + c * length] = keep[r * length + c];
+    let merged = if x.dtype() == tenferro_tensor::DType::F32 {
+        // Fused RMSNorm ×2 + partial RoPE ×2 + causal masked attention + gate.
+        let active = session.constant_from(tenferro_ad::Tensor::from_vec_col_major(
+            vec![length],
+            mask.to_vec(),
+        )?)?;
+        session.jeff_full_attention(
+            &q,
+            &k,
+            &v,
+            &gate,
+            &q_norm,
+            &k_norm,
+            &active,
+            heads,
+            hd,
+            w.rotary_dim,
+            w.rope_theta as f64,
+            cfg.eps as f64,
+        )?
+    } else {
+        // Non-f32 fallback: the eager op sequence.
+        let to_heads = |session: &mut EagerSession<'_>, t: &EagerTensor| {
+            let shaped = session.reshape(t, vec![length, hd, heads])?;
+            session.transpose(&shaped, &[2, 0, 1])
+        };
+        let q = to_heads(session, &q)?;
+        let q = norm::rms_norm(session, &q, &q_norm, true, cfg.eps as f64)?;
+        let k = to_heads(session, &k)?;
+        let k = norm::rms_norm(session, &k, &k_norm, true, cfg.eps as f64)?;
+        let v = to_heads(session, &v)?;
+        let q = rope::rope_qwen_partial(session, &q, w.rope_theta as f64, w.rotary_dim)?;
+        let k = rope::rope_qwen_partial(session, &k, w.rope_theta as f64, w.rotary_dim)?;
+        let q = session.reshape(&q, vec![1, heads, length, hd])?;
+        let k = session.reshape(&k, vec![1, heads, length, hd])?;
+        let v = session.reshape(&v, vec![1, heads, length, hd])?;
+        let mut keep = vec![false; length * length];
+        for t in 0..length {
+            for s in 0..length {
+                keep[t * length + s] = s <= t && mask[s] != 0.0;
             }
         }
-        session.constant_from(tenferro_ad::Tensor::from_vec_col_major(
-            vec![length, length],
-            col,
-        )?)?
+        let mask_t = {
+            let mut col = vec![false; length * length];
+            for r in 0..length {
+                for c in 0..length {
+                    col[r + c * length] = keep[r * length + c];
+                }
+            }
+            session.constant_from(tenferro_ad::Tensor::from_vec_col_major(
+                vec![length, length],
+                col,
+            )?)?
+        };
+        let attended =
+            tenferro_infer::attention::attention(session, &q, &k, &v, Some(&mask_t), None)?;
+        let attended = session.reshape(&attended, vec![heads, length, hd])?;
+        let gate = to_heads(session, &gate)?;
+        let gate = activation::sigmoid(session, &gate)?;
+        let gated = session.mul(&attended, &gate)?;
+        let merged = session.transpose(&gated, &[1, 2, 0])?;
+        session.reshape(&merged, vec![length, width])?
     };
 
-    let attended = tenferro_infer::attention::attention(session, &q, &k, &v, Some(&mask_t), None)?; // (1,heads,length,hd)
-    let attended = session.reshape(&attended, vec![heads, length, hd])?;
-
-    // gate: (length, width) -> (length, hd, heads) -> (heads, length, hd)
-    let gate = session.reshape(&gate, vec![length, hd, heads])?;
-    let gate = session.transpose(&gate, &[2, 0, 1])?;
-    let gate = activation::sigmoid(session, &gate)?;
-    let gated = session.mul(&attended, &gate)?; // (heads, length, hd)
-
-    // Merge heads: (heads, length, hd) -> (length, hd, heads) -> (length, width).
-    let merged = session.transpose(&gated, &[1, 2, 0])?;
-    let merged = session.reshape(&merged, vec![length, width])?;
     let out = linear_tenferro(session, &merged, &o_w)?; // (length, hidden)
     Ok(out)
 }
