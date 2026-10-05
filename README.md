@@ -200,48 +200,35 @@ M2 Max (12 cores, macOS 26, Julia 1.13.1, rustc 1.98.1, release build):
 
 ### Jeff
 
-Checkpoint `mstrasser/Jeff-Qwen3.5-0.8B`. Rust "oracle" is the correctness
-reference (`forward_reference`); `host_opt` is the default optimized host
-forward.
+Checkpoint `mstrasser/Jeff-Qwen3.5-0.8B`. `Rust (opt)` is `host_opt`, the
+default optimized host forward; `Rust (tenferro-rs)` is the cached
+tenferro-native forward (`--example bench_jeff_tenferro_gap`, all shapes):
 
-| length | Julia (OpenBLAS) | Julia (Accelerate) | Rust oracle | Rust host_opt | host_opt / Julia (best) |
-|---:|---:|---:|---:|---:|---:|
-| L8 | 68.9 ms | 114.7 ms | 67.0 ms | 70.6 ms | 1.02× |
-| L16 | 90.9 ms | 112.1 ms | 90.8 ms | 90.2 ms | 0.99× |
-| L64 | 216.6 ms | 134.9 ms | 266.5 ms | 208.6 ms | 1.55× |
+| length | Julia (OpenBLAS) | Julia (Accelerate) | Rust (opt) | Rust (tenferro-rs) |
+|---:|---:|---:|---:|---:|
+| L8 | 68.9 ms | 114.7 ms | 70.6 ms | 78.2 ms |
+| L16 | 90.9 ms | 112.1 ms | 90.2 ms | 98.1 ms |
+| L64 | 216.6 ms | 134.9 ms | 208.6 ms | 212.0 ms |
 
-Rust host vs the tenferro-native forward (`HostRecurrent` is the default fused
-recurrent DeltaNet extension op, `TensorNative` is tensor-only). The tenferro
-path is measured at every shape by
-`cargo run --release -p jeff-infer --example bench_jeff_tenferro_gap`:
-
-| path | ms | vs host_opt |
-|---|---:|---:|
-| Rust host_opt | 70.6 (L8) | 1.00× |
-| Rust tenferro `HostRecurrent` (cached) | 78.2 (L8) / 98.1 (L16) / 212.0 (L64) | 1.12× / 1.06× / 1.02× |
-| Rust tenferro `TensorNative` (cached) | 126.5 | 1.79× |
-| Rust tenferro `HostRecurrent` (fresh cache) | 553.1 | 7.83× |
+Tuning variants: the tensor-only `TensorNative` DeltaNet is 126.5 ms at L8
+(1.79× `host_opt`); `forward_tenferro` without the tensor cache rebuilds every
+weight per call (553 ms at L8, ~7.8×).
 
 ### Laya
 
-Checkpoint `convaiinnovations/laya` (`1c5edc17`).
+Checkpoint `convaiinnovations/laya` (`1c5edc17`). `Rust (opt)` is the optimized
+host forward (`forward_reference`); `Rust (tenferro-rs)` is the cached
+tenferro-native forward (`--example bench_laya_tenferro_gap`, all shapes):
 
-| shape | Julia (OpenBLAS) | Julia (Accelerate) | Rust host | host / Julia (best) |
+| shape | Julia (OpenBLAS) | Julia (Accelerate) | Rust (opt) | Rust (tenferro-rs) |
 |---|---:|---:|---:|---:|
-| L8 B1 | 90.7 ms | 88.4 ms | 45.2 ms | 0.51× |
-| L16 B1 | 120 ms | 91.5 ms | 67.6 ms | 0.74× |
-| L64 B1 | 286.3 ms | 88.5 ms | 249.3 ms | 2.82× |
-| L8 B8 | 250.8 ms | 85.9 ms | 173.2 ms | 2.02× |
+| L8 B1 | 90.7 ms | 88.4 ms | 45.2 ms | 49.8 ms |
+| L16 B1 | 120 ms | 91.5 ms | 67.6 ms | 69.6 ms |
+| L64 B1 | 286.3 ms | 88.5 ms | 249.3 ms | 169.0 ms |
+| L8 B8 | 250.8 ms | 85.9 ms | 173.2 ms | 158.3 ms |
 
-Rust host vs the tenferro-native forward (the tenferro path is measured at
-every shape by
-`cargo run --release -p laya-infer --example bench_laya_tenferro_gap`):
-
-| path | ms | vs host | vs Julia (Accel.) |
-|---|---:|---:|---:|
-| Rust host | 45.2 (L8 B1) | 1.00× | 0.51× |
-| Rust tenferro (cached) | 49.8 (L8 B1) / 69.6 (L16 B1) / 169.0 (L64) / 158.3 (L8 B8) | 1.08× / 1.03× / 0.68× / 0.93× | 0.56× |
-| Rust tenferro (fresh cache) | 272.9 | 6.04× | 3.09× |
+`forward_tenferro` without the tensor cache rebuilds every weight per call
+(272.9 ms at L8 B1, ~6×).
 
 ### Model load
 

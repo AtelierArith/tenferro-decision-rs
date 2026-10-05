@@ -146,18 +146,18 @@ Laya by default.
 
 ### Jeff
 
-| length | Julia (OpenBLAS) | Julia (Accelerate) | Rust oracle | Rust host_opt | Rust tenferro |
-|---:|---:|---:|---:|---:|---:|
-| L8 | 68.9 | 114.7 | 67.0 | 70.6 | 78.2 |
-| L16 | 90.9 | 112.1 | 90.8 | 90.2 | 98.1 |
-| L64 | 216.6 | 134.9 | 266.5 | 208.6 | 212.0 |
+| length | Julia (OpenBLAS) | Julia (Accelerate) | Rust (opt) | Rust (tenferro-rs) |
+|---:|---:|---:|---:|---:|
+| L8 | 68.9 | 114.7 | 70.6 | 78.2 |
+| L16 | 90.9 | 112.1 | 90.2 | 98.1 |
+| L64 | 216.6 | 134.9 | 208.6 | 212.0 |
 
 tenferro / host_opt: 1.12× (L8), 1.06× (L16), 1.02× (L64). Julia's best is
 OpenBLAS for L8/L16 and Accelerate for L64.
 
 ### Laya
 
-| shape | Julia (OpenBLAS) | Julia (Accelerate) | Rust host | Rust tenferro |
+| shape | Julia (OpenBLAS) | Julia (Accelerate) | Rust (opt) | Rust (tenferro-rs) |
 |---|---:|---:|---:|---:|
 | L8 B1 | 90.7 | 88.4 | 45.2 | 49.8 |
 | L16 B1 | 120 | 91.5 | 67.6 | 69.6 |
