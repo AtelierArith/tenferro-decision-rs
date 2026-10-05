@@ -34,6 +34,7 @@ use decision_core::{DecisionError, Result};
 use tenferro_ad::{DotGeneralConfig, EagerSession, EagerTensor, GatherConfig, SliceConfig, Tensor};
 use tenferro_ext::{
     EagerSessionErfExt, EagerSessionGemmBiasExt, EagerSessionGemmExt, EagerSessionLayerNormExt,
+    EagerSessionRopeExt,
 };
 use tenferro_infer::{attention, norm, rope};
 
@@ -1178,10 +1179,19 @@ fn attention_block_tenferro(
     let k = to_heads(session, &k)?;
     let v = to_heads(session, &v)?;
     let (q, k) = match rope_base {
-        Some(base) => (
-            rope::rope_modernbert(session, &q, base)?,
-            rope::rope_modernbert(session, &k, base)?,
-        ),
+        Some(base) => {
+            if q.dtype() == tenferro_tensor::DType::F32 {
+                (
+                    session.rope_modernbert(&q, base)?,
+                    session.rope_modernbert(&k, base)?,
+                )
+            } else {
+                (
+                    rope::rope_modernbert(session, &q, base)?,
+                    rope::rope_modernbert(session, &k, base)?,
+                )
+            }
+        }
         None => (q, k),
     };
     let mask = tensor_bool(session, vec![length, length, batch], keep)?;

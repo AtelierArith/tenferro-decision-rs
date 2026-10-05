@@ -17,11 +17,13 @@ mod gemm;
 mod gemm_bias;
 mod layernorm;
 mod linear;
+mod rope;
 
 pub use gemm::{EagerSessionGemmExt, GEMM_FAMILY_ID, GemmOp};
 pub use gemm_bias::{EagerSessionGemmBiasExt, GEMM_BIAS_FAMILY_ID, GemmBiasOp};
 pub use layernorm::{EagerSessionLayerNormExt, LAYER_NORM_FF_FAMILY_ID, LayerNormFeatureFirstOp};
 pub use linear::{EagerSessionLinearExt, LINEAR_FAMILY_ID, LinearOp};
+pub use rope::{EagerSessionRopeExt, ROPE_FAMILY_ID, RopeOp};
 
 use std::any::Any;
 use std::hash::Hasher;

@@ -237,6 +237,72 @@ pub fn input_mul_weight_transpose_bias_into(
     input_mul_weight_transpose_add_into(x, rows, in_dim, weight, out_dim, y);
 }
 
+/// ModernBERT RoPE over `(batch, heads, length, head_dim)` (`head_dim` is the
+/// last axis; `length` is the second-to-last). Rotary pairs are `(i, i +
+/// head_dim/2)` and position `l` uses angle `l * base^(-2i/head_dim)`, matching
+/// `tenferro_infer::rope::rope_modernbert`.
+///
+/// Fuses the slice/broadcast/mul/sub/add/concatenate sequence into one pass
+/// with an internally built `(length, head_dim/2)` table (built once, shared
+/// across heads and batch).
+#[allow(clippy::too_many_arguments)]
+pub fn rope_modernbert_into(
+    x: &[f32],
+    base: f32,
+    batch: usize,
+    heads: usize,
+    length: usize,
+    head_dim: usize,
+    out: &mut [f32],
+) {
+    let total = batch * heads * length * head_dim;
+    debug_assert_eq!(x.len(), total);
+    debug_assert_eq!(out.len(), total);
+    if total == 0 || head_dim == 0 || head_dim % 2 != 0 {
+        out.copy_from_slice(&x[..total]);
+        return;
+    }
+    let half = head_dim / 2;
+    let mut cos = vec![0.0f32; length * half];
+    let mut sin = vec![0.0f32; length * half];
+    for l in 0..length {
+        for i in 0..half {
+            let theta = (l as f32) * base.powf(-2.0 * (i as f32) / (head_dim as f32));
+            cos[l * half + i] = theta.cos();
+            sin[l * half + i] = theta.sin();
+        }
+    }
+    let s_h = batch;
+    let s_l = batch * heads;
+    let s_i = batch * heads * length;
+    let in_addr = x.as_ptr() as usize;
+    let out_addr = out.as_mut_ptr() as usize;
+    (0..batch).into_par_iter().for_each(|b| {
+        // SAFETY: each task owns batch `b`; `(b, h, l, i)` is unique per task
+        // (`batch` is the fastest axis), so writes are disjoint and `x` is only
+        // read. `cos`/`sin` are shared read-only tables.
+        unsafe {
+            let x = in_addr as *const f32;
+            let out = out_addr as *mut f32;
+            for h in 0..heads {
+                for l in 0..length {
+                    let row = b + h * s_h + l * s_l;
+                    let table = l * half;
+                    for i in 0..half {
+                        let first = row + i * s_i;
+                        let second = row + (i + half) * s_i;
+                        let a = *x.add(first);
+                        let b_val = *x.add(second);
+                        let c = cos[table + i];
+                        let s = sin[table + i];
+                        *out.add(first) = a * c - b_val * s;
+                        *out.add(second) = a * s + b_val * c;
+                    }
+                }
+            }
+        }
+    });
+}
 /// `y = x · weight` for **column-major** `x (length, in_dim)` and
 /// `y (length, out_dim)`, with `weight` stored **row-major `(in_dim, out_dim)`**
 /// (the natural safetensors `Vec<f32>`).
