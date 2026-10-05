@@ -480,7 +480,75 @@ pub fn geglu_into(u: &[f32], intermediate: usize, cols: usize, out: &mut [f32]) 
     }
 }
 
-/// Fused Jeff full attention over the `(length, width)` `q`/`k`/`v`/`gate`
+/// Feature-last RMSNorm over a column-major `(rows, width)` activation: for
+/// each row `r`, scale by `1 / sqrt(mean(x²) + eps)` and by
+/// `centered ? 1 + weight[d] : weight[d]`. Mirrors `jeff_infer`'s
+/// `norm::rms_norm` on a `(length, hidden)` activation (the norm axis is the
+/// last one, with stride `rows`).
+pub fn rms_norm_last_into(
+    x: &[f32],
+    rows: usize,
+    width: usize,
+    weight: &[f32],
+    centered: bool,
+    eps: f32,
+    out: &mut [f32],
+) {
+    debug_assert_eq!(x.len(), rows * width);
+    debug_assert_eq!(out.len(), rows * width);
+    debug_assert_eq!(weight.len(), width);
+    if rows == 0 || width == 0 {
+        return;
+    }
+    let inv_width = 1.0 / (width as f32);
+    let x_addr = x.as_ptr() as usize;
+    let out_addr = out.as_mut_ptr() as usize;
+    (0..rows).into_par_iter().for_each(|r| {
+        // SAFETY: each task owns row `r` (indices `r + rows*d`), so writes are
+        // disjoint and `x`/`weight` are only read.
+        unsafe {
+            let x = x_addr as *const f32;
+            let out = out_addr as *mut f32;
+            let mut mean_sq = 0.0f32;
+            for d in 0..width {
+                let v = *x.add(r + rows * d);
+                mean_sq += v * v;
+            }
+            let scale = 1.0 / (mean_sq * inv_width + eps).sqrt();
+            for (d, &w) in weight.iter().enumerate() {
+                let wt = if centered { 1.0 + w } else { w };
+                *out.add(r + rows * d) = *x.add(r + rows * d) * scale * wt;
+            }
+        }
+    });
+}
+
+/// `silu(gate) * up` elementwise (`silu(x) = x / (1 + exp(-x))`).
+pub fn gated_silu_into(gate: &[f32], up: &[f32], out: &mut [f32]) {
+    debug_assert_eq!(gate.len(), up.len());
+    debug_assert_eq!(out.len(), gate.len());
+    let g_addr = gate.as_ptr() as usize;
+    let u_addr = up.as_ptr() as usize;
+    let o_addr = out.as_mut_ptr() as usize;
+    let per = 4096usize;
+    let chunks = out.len().div_ceil(per);
+    (0..chunks).into_par_iter().for_each(|c| {
+        let start = c * per;
+        let end = (start + per).min(out.len());
+        // SAFETY: each task owns the disjoint output range `[start, end)`; `gate`
+        // and `up` are only read.
+        unsafe {
+            let gate = g_addr as *const f32;
+            let up = u_addr as *const f32;
+            let out = o_addr as *mut f32;
+            for i in start..end {
+                let g = *gate.add(i);
+                *out.add(i) = (g / (1.0 + (-g).exp())) * *up.add(i);
+            }
+        }
+    });
+}
+
 /// projections (`width = heads * head_dim`, column-major), returning the
 /// merged `(length, width)` activation ready for the output projection.
 ///

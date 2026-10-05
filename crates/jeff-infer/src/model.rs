@@ -22,7 +22,10 @@
 
 use decision_core::{DecisionError, Result};
 use tenferro_ad::{EagerSession, EagerTensor};
-use tenferro_ext::{EagerSessionJeffAttentionExt, EagerSessionLinearExt};
+use tenferro_ext::{
+    EagerSessionGatedSiluExt, EagerSessionJeffAttentionExt, EagerSessionLinearExt,
+    EagerSessionRmsNormExt,
+};
 use tenferro_gated_delta::{
     EagerSessionGatedDeltaExt, GatedDeltaConfig, GatedDeltaOp, GatedDeltaWeights,
     GatedDeltaWorkspace, delta_layer_recurrent, delta_layer_tenferro_native,
@@ -191,6 +194,36 @@ fn linear_tenferro(
     weight: &EagerTensor,
 ) -> tenferro_ad::Result<EagerTensor> {
     session.linear(x, weight)
+}
+
+/// Feature-last RMSNorm on the eager session: the `cpu-kernels` extension op
+/// for `f32` rank-2 activations, else the composed `norm::rms_norm`.
+fn rms_norm_tenferro(
+    session: &mut EagerSession<'_>,
+    x: &EagerTensor,
+    weight: &EagerTensor,
+    centered: bool,
+    eps: f64,
+) -> tenferro_ad::Result<EagerTensor> {
+    if x.shape().len() == 2 && x.dtype() == tenferro_tensor::DType::F32 {
+        session.rms_norm_last(x, weight, centered, eps)
+    } else {
+        norm::rms_norm(session, x, weight, centered, eps)
+    }
+}
+
+/// `silu(gate) * up`: the `cpu-kernels` extension op for `f32`, else the
+/// composed activation.
+fn gated_silu_tenferro(
+    session: &mut EagerSession<'_>,
+    gate: &EagerTensor,
+    up: &EagerTensor,
+) -> tenferro_ad::Result<EagerTensor> {
+    if gate.dtype() == tenferro_tensor::DType::F32 {
+        session.gated_silu(gate, up)
+    } else {
+        activation::gated_silu(session, gate, up)
+    }
 }
 
 fn rms_centered_rows(
@@ -552,9 +585,9 @@ fn full_attention_tenferro(
             session.transpose(&shaped, &[2, 0, 1])
         };
         let q = to_heads(session, &q)?;
-        let q = norm::rms_norm(session, &q, &q_norm, true, cfg.eps as f64)?;
+        let q = rms_norm_tenferro(session, &q, &q_norm, true, cfg.eps as f64)?;
         let k = to_heads(session, &k)?;
-        let k = norm::rms_norm(session, &k, &k_norm, true, cfg.eps as f64)?;
+        let k = rms_norm_tenferro(session, &k, &k_norm, true, cfg.eps as f64)?;
         let v = to_heads(session, &v)?;
         let q = rope::rope_qwen_partial(session, &q, w.rope_theta as f64, w.rotary_dim)?;
         let k = rope::rope_qwen_partial(session, &k, w.rope_theta as f64, w.rotary_dim)?;
@@ -680,7 +713,7 @@ pub fn forward_tenferro_cached_kernel(
     for layer in &weights.layers {
         let input_norm = cache.col(session, vec![cfg.hidden, 1], &layer.input_norm)?;
         let input_norm = session.reshape(&input_norm, vec![cfg.hidden])?;
-        let normalized = norm::rms_norm(session, &hidden, &input_norm, true, cfg.eps as f64)?;
+        let normalized = rms_norm_tenferro(session, &hidden, &input_norm, true, cfg.eps as f64)?;
 
         let mixed = match &layer.attention {
             AttentionWeights::Full(w) => {
@@ -730,7 +763,7 @@ pub fn forward_tenferro_cached_kernel(
 
         let post_norm = cache.col(session, vec![cfg.hidden, 1], &layer.post_norm)?;
         let post_norm = session.reshape(&post_norm, vec![cfg.hidden])?;
-        let normalized2 = norm::rms_norm(session, &residual, &post_norm, true, cfg.eps as f64)?;
+        let normalized2 = rms_norm_tenferro(session, &residual, &post_norm, true, cfg.eps as f64)?;
 
         let gate_w =
             cache.col_major(session, vec![cfg.hidden, cfg.intermediate], &layer.mlp.gate)?;
@@ -739,7 +772,7 @@ pub fn forward_tenferro_cached_kernel(
             cache.col_major(session, vec![cfg.intermediate, cfg.hidden], &layer.mlp.down)?;
         let gate = linear_tenferro(session, &normalized2, &gate_w)?; // (length, intermediate)
         let up = linear_tenferro(session, &normalized2, &up_w)?;
-        let gated = activation::gated_silu(session, &gate, &up)?;
+        let gated = gated_silu_tenferro(session, &gate, &up)?;
         let mlp = linear_tenferro(session, &gated, &down_w)?; // (length, hidden)
         hidden = session.add(&residual, &mlp)?;
     }
@@ -755,7 +788,7 @@ pub fn forward_tenferro_cached_kernel(
     )?; // (1, hidden)
     let final_norm = cache.col(session, vec![cfg.hidden, 1], &weights.final_norm)?;
     let final_norm = session.reshape(&final_norm, vec![cfg.hidden])?;
-    let last_normed = norm::rms_norm(session, &last, &final_norm, true, cfg.eps as f64)?; // (1, hidden)
+    let last_normed = rms_norm_tenferro(session, &last, &final_norm, true, cfg.eps as f64)?; // (1, hidden)
 
     let readout = cache.col_major(session, vec![cfg.hidden, weights.options], &weights.readout)?;
     let logits = linear_tenferro(session, &last_normed, &readout)?; // (1, options)
@@ -824,7 +857,8 @@ mod tests {
                 let heads_first = session.transpose(&shaped, &[1, 2, 0])?; // (heads,length,hd)
                 let norm_w = host_to_tensor(session, hd, 1, &q_norm)?;
                 let norm_w = session.reshape(&norm_w, vec![hd])?;
-                let normed = norm::rms_norm(session, &heads_first, &norm_w, true, cfg.eps as f64)?;
+                let normed =
+                    rms_norm_tenferro(session, &heads_first, &norm_w, true, cfg.eps as f64)?;
                 let roped = rope::rope_qwen_partial(session, &normed, 10000.0, hd)?;
                 let host_t = session.duplicate_value(&roped)?;
                 let values = host_t.as_slice::<f32>()?;

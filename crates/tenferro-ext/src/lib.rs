@@ -13,6 +13,7 @@
 
 #![allow(clippy::approx_constant, clippy::excessive_precision)]
 
+mod gated_silu;
 mod geglu;
 mod gemm;
 mod gemm_bias;
@@ -20,7 +21,9 @@ mod jeff_attention;
 mod laya_attention;
 mod layernorm;
 mod linear;
+mod rms_norm;
 
+pub use gated_silu::{EagerSessionGatedSiluExt, GATED_SILU_FAMILY_ID, GatedSiluOp};
 pub use geglu::{EagerSessionGegluExt, GEGLU_FAMILY_ID, GegluOp};
 pub use gemm::{EagerSessionGemmExt, GEMM_FAMILY_ID, GemmOp};
 pub use gemm_bias::{EagerSessionGemmBiasExt, GEMM_BIAS_FAMILY_ID, GemmBiasOp};
@@ -32,6 +35,7 @@ pub use laya_attention::{
 };
 pub use layernorm::{EagerSessionLayerNormExt, LAYER_NORM_FF_FAMILY_ID, LayerNormFeatureFirstOp};
 pub use linear::{EagerSessionLinearExt, LINEAR_FAMILY_ID, LinearOp};
+pub use rms_norm::{EagerSessionRmsNormExt, RMS_NORM_FAMILY_ID, RmsNormLastOp};
 
 use std::any::Any;
 use std::hash::Hasher;
