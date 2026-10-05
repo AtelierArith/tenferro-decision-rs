@@ -128,6 +128,30 @@ old "textbook" column-major `(in, out)` layout made the op transpose every
 weight per call and run 3–11× slower than the bare kernel; the row-major input
 layout removes that entirely.
 
+## Host-kernel extension ops (Laya, Jeff)
+
+After caching, the remaining gap was the eager per-op overhead of the many
+small ops. The hot chains now run through self-hosted `tenferro-ext` ops backed
+by `cpu-kernels`:
+
+- **Laya** — `linear` / `gemm_bias` (feature-first `y = Wᵀx`; the `(in, L, B)`
+  → `(in, L*B)` reshape is layout-preserving, so no transposes), a fused
+  feature-first LayerNorm (replaces transpose → norm → transpose), GeGLU
+  (`gelu(value)·gate`), and one fused **split + RoPE + masked attention**
+  block. The block runs entirely in the host-friendly feature-first
+  `(d, L, B)` layout (per-head `head_dim` contiguous), so the head transposes
+  are never materialized.
+- **Jeff** — `linear` (`x (length, in) · W (in, out)`), fed the raw row-major
+  `(in, out)` weight and column-major activations, the orientation
+  `matrixmultiply` vectorizes (`rsa = 1`, `csb = 1`). Caching linear weights
+  with `TensorCache::col_major` over the raw buffer gives the op that storage.
+
+With a reused `TensorCache` these put the cached tenferro forward at the Rust
+host path for Laya and ~1.1–1.2× `host_opt` for Jeff
+(`21_SPEED_COMPARISON.md`). A standalone masked-attention op and a standalone
+`split_qkv` op were tried and reverted: at the small decode shapes their
+extension-op fixed cost cancelled the saved eager ops.
+
 ## Next
 
 - Apply the same prepared-tensor approach to any remaining per-call host work
