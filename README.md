@@ -18,7 +18,7 @@ architecture.
 | `jeff-infer` | Jeff engine (config, readout, Qwen3.5 layer stack, checkpoint loading, prepared-token `DecisionEngine`, real-fixture parity) |
 | `tenferro-gated-delta` | Gated DeltaNet crate for Jeff (host reference + fused recurrent kernel + tenferro chunked scan + full layer + plans/workspaces + `GatedDelta` extension op) |
 | `safetensors-io` | Shared dependency-light safetensors reader for the checkpoint loaders |
-| `tenferro-ext` | Self-hosted tenferro extension ops on `cpu-kernels` (exact GELU/`erf`, `linear`/`gemm_bias`, feature-first LayerNorm, GeGLU, and the fused Laya split + RoPE + attention block) |
+| `tenferro-ext` | Self-hosted tenferro extension ops on `cpu-kernels`: exact GELU/`erf`, `linear`/`gemm_bias`, feature-first LayerNorm, GeGLU, gated SiLU, feature-last RMSNorm, and the fused Laya `split + RoPE + attention` and Jeff full-attention blocks |
 | `cpu-kernels` | Host CPU kernels: BLAS-class `matrixmultiply` GEMM parallelized with `rayon`, shared by all engines |
 | `hf-fetch` | Hugging Face Hub checkpoint fetcher (Julia-compatible cache and env; `hf-fetch` CLI) |
 | `jev-client` | Independent TypeSafe System One API client |
@@ -206,9 +206,9 @@ forward.
 
 | length | Julia (OpenBLAS) | Julia (Accelerate) | Rust oracle | Rust host_opt | host_opt / Julia (best) |
 |---:|---:|---:|---:|---:|---:|
-| L8 | 68.0 ms | 119.6 ms | 65.4 ms | 69.7 ms | 1.02× |
-| L16 | 90.0 ms | 111.9 ms | 91.6 ms | 90.4 ms | 1.00× |
-| L64 | 214.8 ms | 135.0 ms | 267.1 ms | 210.2 ms | 1.56× |
+| L8 | 68.9 ms | 114.7 ms | 67.0 ms | 70.6 ms | 1.02× |
+| L16 | 90.9 ms | 112.1 ms | 90.8 ms | 90.2 ms | 0.99× |
+| L64 | 216.6 ms | 134.9 ms | 266.5 ms | 208.6 ms | 1.55× |
 
 Rust host vs the tenferro-native forward (`HostRecurrent` is the default fused
 recurrent DeltaNet extension op, `TensorNative` is tensor-only). The tenferro
@@ -217,10 +217,10 @@ path is measured at every shape by
 
 | path | ms | vs host_opt |
 |---|---:|---:|
-| Rust host_opt | 69.7 (L8) | 1.00× |
-| Rust tenferro `HostRecurrent` (cached) | 83.5 (L8) / 105.5 (L16) / 232.8 (L64) | 1.20× / 1.17× / 1.11× |
-| Rust tenferro `TensorNative` (cached) | 131.7 | 1.89× |
-| Rust tenferro `HostRecurrent` (fresh cache) | 537.2 | 7.71× |
+| Rust host_opt | 70.6 (L8) | 1.00× |
+| Rust tenferro `HostRecurrent` (cached) | 78.2 (L8) / 98.1 (L16) / 212.0 (L64) | 1.12× / 1.06× / 1.02× |
+| Rust tenferro `TensorNative` (cached) | 126.5 | 1.79× |
+| Rust tenferro `HostRecurrent` (fresh cache) | 553.1 | 7.83× |
 
 ### Laya
 
@@ -228,10 +228,10 @@ Checkpoint `convaiinnovations/laya` (`1c5edc17`).
 
 | shape | Julia (OpenBLAS) | Julia (Accelerate) | Rust host | host / Julia (best) |
 |---|---:|---:|---:|---:|
-| L8 B1 | 81.4 ms | 88.3 ms | 49.1 ms | 0.60× |
-| L16 B1 | 115 ms | 90.5 ms | 67.6 ms | 0.75× |
-| L64 B1 | 292.5 ms | 88.5 ms | 249.7 ms | 2.82× |
-| L8 B8 | 244.0 ms | 86.0 ms | 169.8 ms | 1.97× |
+| L8 B1 | 90.7 ms | 88.4 ms | 45.2 ms | 0.51× |
+| L16 B1 | 120 ms | 91.5 ms | 67.6 ms | 0.74× |
+| L64 B1 | 286.3 ms | 88.5 ms | 249.3 ms | 2.82× |
+| L8 B8 | 250.8 ms | 85.9 ms | 173.2 ms | 2.02× |
 
 Rust host vs the tenferro-native forward (the tenferro path is measured at
 every shape by
@@ -239,37 +239,39 @@ every shape by
 
 | path | ms | vs host | vs Julia (Accel.) |
 |---|---:|---:|---:|
-| Rust host | 49.1 (L8 B1) | 1.00× | 0.56× |
-| Rust tenferro (cached) | 49.4 (L8 B1) / 63.9 (L16 B1) / 168.2 (L64) / 153.8 (L8 B8) | 1.01× / 0.95× / 0.67× / 0.91× | 0.56× |
-| Rust tenferro (fresh cache) | 281.4 | 5.73× | 3.19× |
+| Rust host | 45.2 (L8 B1) | 1.00× | 0.51× |
+| Rust tenferro (cached) | 49.8 (L8 B1) / 69.6 (L16 B1) / 169.0 (L64) / 158.3 (L8 B8) | 1.08× / 1.03× / 0.68× / 0.93× | 0.56× |
+| Rust tenferro (fresh cache) | 272.9 | 6.04× | 3.09× |
 
 ### Model load
 
 | model | Julia | Rust |
 |---|---:|---:|
-| Jeff | 2833 ms | 3015 ms |
-| Laya | 484 ms | 1494 ms |
+| Jeff | 2836 ms | 3268 ms |
+| Laya | 490 ms | 1522 ms |
 
 ### Reading these numbers
 
 - On this Apple-silicon host Julia's best BLAS depends on the shape: OpenBLAS
   (`BLAS=1`, Julia-parallel projections) wins the decode rows (Jeff L8/L16,
   Laya L8–L16), while Accelerate (AMX) dominates longer shapes (Jeff L64
-  **214.8 → 135.0 ms**, Laya L64 **292.5 → 88.5 ms**).
+  **216.6 → 134.9 ms**, Laya L64 **286.3 → 88.5 ms**).
 - **Correction:** a stale `QwenDecisionCore` revision forced `AppleAccelerate`
   on Apple Silicon even in the default env, so the earlier Jeff "OpenBLAS" rows
   were Accelerate/`BLAS=8` and inflated Julia. With the current
-  `QwenDecisionCore` main the default Jeff env is OpenBLAS + `BLAS=1`; Jeff L8
-  Julia drops **114.6 → 68.0 ms**, i.e. ~parity with Rust `host_opt` (1.02×).
+  `QwenDecisionCore` main the default Jeff env is OpenBLAS + `BLAS=1`; the Jeff
+  L8 Accelerate row (114.7 ms) is ~1.7× the OpenBLAS row (68.9 ms), and Julia is
+  at parity with Rust `host_opt` there (1.02×).
 - At decode Rust is competitive with or ahead of Julia (Jeff L8/L16 ≈ 1.0×,
-  Laya L8 B1 `host_opt` 0.60× the best Julia); at L64 Julia's Accelerate GEMMs
-  pull ahead (Laya 2.82×, Jeff 1.56×).
+  Laya L8 B1 `host_opt` 0.51× the best Julia); at L64 Julia's Accelerate GEMMs
+  pull ahead (Laya 2.82×, Jeff 1.55×).
 - The **tenferro-native forward now reaches the Rust host path**, via
   self-hosted `cpu-kernels` extension ops (Laya: `linear`/`gemm_bias`,
-  feature-first LayerNorm, GeGLU, and the fused split + RoPE + attention
-  block; Jeff: `linear`). Cached tenferro is **0.67–1.01× the Rust host** for
-  Laya and **1.11–1.20× `host_opt`** for Jeff; without the tensor cache it
-  rebuilds every weight per call and is ~3.2× (Laya) / 7.7× (Jeff) slower.
+  feature-first LayerNorm, GeGLU, and the fused split + RoPE + attention block;
+  Jeff: `linear`, full attention, feature-last RMSNorm, gated SiLU). Cached
+  tenferro is **0.68–1.08× the Rust host** for Laya and **1.02–1.12×
+  `host_opt`** for Jeff; without the tensor cache it rebuilds every weight per
+  call and is ~3.1× (Laya) / 7.8× (Jeff) slower.
 - These are Apple-silicon numbers. The x86_64 picture (Julia's default BLAS
   there is OpenBLAS) is in
   [`docs/agents/specs/docs/21_SPEED_COMPARISON.md`](docs/agents/specs/docs/21_SPEED_COMPARISON.md).

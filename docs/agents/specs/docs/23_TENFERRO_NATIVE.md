@@ -143,8 +143,10 @@ by `cpu-kernels`:
   are never materialized.
 - **Jeff** — `linear` (`x (length, in) · W (in, out)`), fed the raw row-major
   `(in, out)` weight and column-major activations, the orientation
-  `matrixmultiply` vectorizes (`rsa = 1`, `csb = 1`). Caching linear weights
-  with `TensorCache::col_major` over the raw buffer gives the op that storage.
+  `matrixmultiply` vectorizes (`rsa = 1`, `csb = 1`); the full-attention block
+  (centered RMSNorm ×2 + partial RoPE ×2 + causal masked attention + sigmoid
+  gate); the feature-last RMSNorm; and gated SiLU. Caching linear weights with
+  `TensorCache::col_major` over the raw buffer gives the op that storage.
 
 With a reused `TensorCache` these put the cached tenferro forward at the Rust
 host path for Laya and ~1.1–1.2× `host_opt` for Jeff
