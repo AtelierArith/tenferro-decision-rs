@@ -217,6 +217,26 @@ pub fn input_mul_weight_transpose_into(
     input_mul_weight_transpose_add_into(x, rows, in_dim, weight, out_dim, y);
 }
 
+/// `y = x · weightᵀ + bias`, with the `(out_dim,)` `bias` broadcast over the
+/// `rows` axis. Row-major `(rows, in_dim)` `x`, row-major `(out_dim, in_dim)`
+/// `weight`, row-major `(rows, out_dim)` `y`; see
+/// [`input_mul_weight_transpose_add_into`].
+pub fn input_mul_weight_transpose_bias_into(
+    x: &[f32],
+    rows: usize,
+    in_dim: usize,
+    weight: &[f32],
+    out_dim: usize,
+    bias: &[f32],
+    y: &mut [f32],
+) {
+    debug_assert_eq!(bias.len(), out_dim);
+    for row in 0..rows {
+        y[row * out_dim..(row + 1) * out_dim].copy_from_slice(bias);
+    }
+    input_mul_weight_transpose_add_into(x, rows, in_dim, weight, out_dim, y);
+}
+
 /// Allocating `y = x · weightᵀ`; see [`input_mul_weight_transpose_add_into`].
 pub fn input_mul_weight_transpose(
     x: &[f32],
@@ -228,6 +248,62 @@ pub fn input_mul_weight_transpose(
     let mut y = vec![0.0f32; rows * out_dim];
     input_mul_weight_transpose_into(x, rows, in_dim, weight, out_dim, &mut y);
     y
+}
+
+/// Feature-first LayerNorm: normalize each column of the column-major
+/// `(d, cols)` activation over the `d` axis, then scale by `weight` and add the
+/// optional `bias`.
+///
+/// `x`, `y` are column-major `(d, cols)`, so column `c` is the contiguous slice
+/// `c*d .. (c+1)*d`. `weight` (and `bias`) have length `d`. This fuses the
+/// transpose→norm→transpose sequence the eager path otherwise runs for a
+/// feature-first activation into one pass, matching `layer_norm_host`.
+pub fn layer_norm_feature_first_into(
+    x: &[f32],
+    d: usize,
+    cols: usize,
+    weight: &[f32],
+    bias: Option<&[f32]>,
+    eps: f32,
+    y: &mut [f32],
+) {
+    debug_assert_eq!(x.len(), d * cols);
+    debug_assert_eq!(y.len(), d * cols);
+    debug_assert_eq!(weight.len(), d);
+    if d == 0 || cols == 0 {
+        return;
+    }
+    let denom = d as f32;
+    let normalize = |out: &mut [f32], input: &[f32]| {
+        let mut mean = 0.0f32;
+        for value in input {
+            mean += *value;
+        }
+        mean /= denom;
+        let mut var = 0.0f32;
+        for value in input {
+            let centered = *value - mean;
+            var += centered * centered;
+        }
+        var /= denom;
+        let inv = 1.0 / (var + eps).sqrt();
+        for i in 0..d {
+            let mut value = (input[i] - mean) * inv * weight[i];
+            if let Some(bias) = bias {
+                value += bias[i];
+            }
+            out[i] = value;
+        }
+    };
+    if cols > 1 && d.saturating_mul(cols) >= PARALLEL_THRESHOLD {
+        y.par_chunks_mut(d)
+            .zip(x.par_chunks(d))
+            .for_each(|(out, input)| normalize(out, input));
+    } else {
+        for c in 0..cols {
+            normalize(&mut y[c * d..(c + 1) * d], &x[c * d..(c + 1) * d]);
+        }
+    }
 }
 
 #[cfg(test)]

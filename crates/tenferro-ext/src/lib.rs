@@ -14,8 +14,12 @@
 #![allow(clippy::approx_constant, clippy::excessive_precision)]
 
 mod gemm;
+mod gemm_bias;
+mod layernorm;
 
 pub use gemm::{EagerSessionGemmExt, GEMM_FAMILY_ID, GemmOp};
+pub use gemm_bias::{EagerSessionGemmBiasExt, GEMM_BIAS_FAMILY_ID, GemmBiasOp};
+pub use layernorm::{EagerSessionLayerNormExt, LAYER_NORM_FF_FAMILY_ID, LayerNormFeatureFirstOp};
 
 use std::any::Any;
 use std::hash::Hasher;

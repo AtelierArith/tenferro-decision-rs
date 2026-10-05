@@ -32,7 +32,9 @@
 
 use decision_core::{DecisionError, Result};
 use tenferro_ad::{DotGeneralConfig, EagerSession, EagerTensor, GatherConfig, SliceConfig, Tensor};
-use tenferro_ext::EagerSessionErfExt;
+use tenferro_ext::{
+    EagerSessionErfExt, EagerSessionGemmBiasExt, EagerSessionGemmExt, EagerSessionLayerNormExt,
+};
 use tenferro_infer::{attention, norm, rope};
 
 use crate::config::{AgentConfig, EncoderConfig, LayerKind};
@@ -1047,6 +1049,19 @@ fn layer_norm_feature_first(
     width: usize,
     eps: f64,
 ) -> tenferro_ad::Result<EagerTensor> {
+    // Feature-first LayerNorm is one fused `cpu-kernels` pass; the eager
+    // `norm::layer_norm` would transpose→normalize→transpose plus a handful of
+    // elementwise/reduction ops per norm.
+    if x.dtype() == tenferro_tensor::DType::F32 {
+        let weight = cache.col_major(session, vec![width], &ln.weight)?;
+        let bias = match &ln.bias {
+            Some(bias) => Some(cache.col_major(session, vec![width], bias)?),
+            None => None,
+        };
+        return session.layer_norm_feature_first(x, &weight, bias.as_ref(), eps as f32);
+    }
+
+    // Non-f32 fallback (the extension op is f32-only).
     let rank = x.shape().len();
     let mut perm: Vec<usize> = (1..rank).collect();
     perm.push(0);
@@ -1071,6 +1086,33 @@ fn linear_feature_first(
     out_dim: usize,
 ) -> tenferro_ad::Result<EagerTensor> {
     let in_dim = x.shape()[0];
+    // Feature-first `(in, L, B)` linear is exactly a dense `y = Wᵀ x` over the
+    // trailing axes folded into one "length" axis, and the column-major layouts
+    // of `(in, L, B)` and `(in, L*B)` coincide, so the reshape below is free.
+    // Route it through the `cpu-kernels`-backed `gemm` extension op so the eager
+    // forward reaches the same host GEMM as `forward_reference` (the eager
+    // `dot_general` uses faer and pays per-call analysis/allocation instead).
+    if x.dtype() == tenferro_tensor::DType::F32 {
+        let weight = cache.col_major(session, vec![in_dim, out_dim], &linear.weight)?;
+        let trailing = x.shape()[1..].to_vec();
+        let rest: usize = trailing.iter().product();
+        let x2 = session.reshape(x, vec![in_dim, rest])?;
+        // Fold the `(out,)` bias into the GEMM so it is one op instead of a
+        // reshape + broadcast + add over the full activation.
+        let y2 = match &linear.bias {
+            Some(bias) => {
+                let bias = cache.col_major(session, vec![out_dim], bias)?;
+                session.gemm_bias(&x2, &weight, &bias)?
+            }
+            None => session.gemm(&x2, &weight)?,
+        }; // (out_dim, rest)
+        let mut out_shape = vec![out_dim];
+        out_shape.extend_from_slice(&trailing);
+        return session.reshape(&y2, out_shape);
+    }
+
+    // Non-f32 fallback (the extension op is f32-only): the original
+    // dot_general + move-the-contracted-axis-first formulation.
     let weight = cache.col_major(session, vec![in_dim, out_dim], &linear.weight)?;
     let contracted = session.dot_general(
         x,
