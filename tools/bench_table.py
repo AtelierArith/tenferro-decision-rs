@@ -24,6 +24,8 @@ def main() -> None:
     julia_jeff = load("julia_jeff.json")
     rust_laya = load("rust_laya.json")
     julia_laya = load("julia_laya.json")
+    julia_jeff_acc_path = os.path.join(out, "julia_jeff_accelerate.json")
+    julia_jeff_acc = load("julia_jeff_accelerate.json") if os.path.exists(julia_jeff_acc_path) else None
     julia_laya_acc_path = os.path.join(out, "julia_laya_accelerate.json")
     julia_laya_acc = load("julia_laya_accelerate.json") if os.path.exists(julia_laya_acc_path) else None
 
@@ -61,18 +63,35 @@ def main() -> None:
     # ---- Jeff: forward latency ----
     print("### Jeff — forward (ms, median)")
     print()
-    print("| length | Julia | Rust oracle | Rust host_opt | host_opt / Julia |")
-    print("|---|---:|---:|---:|---:|")
-    for length in (8, 16, 64):
-        j = by_shape(julia_jeff, length, 1)
-        r = by_shape(rust_jeff, length, 1)
-        jm = j["ms_median"] if j else None
-        om = r["ms_median"] if r else None
-        hm = r["host_opt"]["ms_median"] if r and "host_opt" in r else None
-        print(
-            f"| {label(length, 1)} | {ms(jm)} | {ms(om)} | {ms(hm)} | "
-            f"{ratio(hm, jm)} |"
-        )
+    if julia_jeff_acc is not None:
+        print("| length | Julia (OpenBLAS) | Julia (Accelerate) | Rust oracle | Rust host_opt | host_opt / Julia (best) |")
+        print("|---|---:|---:|---:|---:|---:|")
+        for length in (8, 16, 64):
+            j = by_shape(julia_jeff, length, 1)
+            a = by_shape(julia_jeff_acc, length, 1)
+            r = by_shape(rust_jeff, length, 1)
+            jm = j["ms_median"] if j else None
+            am = a["ms_median"] if a else None
+            om = r["ms_median"] if r else None
+            hm = r["host_opt"]["ms_median"] if r and "host_opt" in r else None
+            best = min(m for m in (jm, am) if m is not None) if (jm or am) else None
+            print(
+                f"| {label(length, 1)} | {ms(jm)} | {ms(am)} | {ms(om)} | {ms(hm)} | "
+                f"{ratio(hm, best)} |"
+            )
+    else:
+        print("| length | Julia | Rust oracle | Rust host_opt | host_opt / Julia |")
+        print("|---|---:|---:|---:|---:|")
+        for length in (8, 16, 64):
+            j = by_shape(julia_jeff, length, 1)
+            r = by_shape(rust_jeff, length, 1)
+            jm = j["ms_median"] if j else None
+            om = r["ms_median"] if r else None
+            hm = r["host_opt"]["ms_median"] if r and "host_opt" in r else None
+            print(
+                f"| {label(length, 1)} | {ms(jm)} | {ms(om)} | {ms(hm)} | "
+                f"{ratio(hm, jm)} |"
+            )
     print()
 
     # ---- Jeff: tenferro vs host ----
@@ -80,6 +99,10 @@ def main() -> None:
     host8_ms = host8["host_opt"]["ms_median"] if host8 and "host_opt" in host8 else None
     j8 = by_shape(julia_jeff, 8, 1)
     j8_ms = j8["ms_median"] if j8 else None
+    if julia_jeff_acc is not None:
+        a8 = by_shape(julia_jeff_acc, 8, 1)
+        if a8 is not None:
+            j8_ms = min(v for v in (j8_ms, a8["ms_median"]) if v is not None)
     jeff_tenferro = [
         ("Rust host_opt (L8)", host8_ms),
         ("Rust tenferro `HostRecurrent` (cached)", rust_jeff.get("tenferro_cached_forward_8", {}).get("ms_median")),

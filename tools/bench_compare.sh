@@ -14,7 +14,8 @@
 # Usage:
 #
 #   tools/bench_compare.sh --jeff <JEFF_CKPT_DIR> --laya <LAYA_CKPT_DIR> \
-#       [--threads N] [--warmup W] [--iters I] [--no-build] [--json DIR]
+#       [--threads N] [--warmup W] [--iters I] [--no-build] [--json DIR] \
+#       [--acc-env DIR]
 #
 #   JEFF_CKPT_DIR  mstrasser/Jeff-Qwen3.5-0.8B snapshot (decision_config.json +
 #                  readout.safetensors + model.safetensors)
@@ -26,13 +27,16 @@
 #
 # --json DIR keeps the raw JSON from every run in DIR instead of a temp dir.
 #
-# --acc-env DIR adds the Apple-silicon Julia Laya run with BLAS forwarded to
-#   Accelerate (Laya's fastest CPU config). DIR must be a Julia project that
-#   has both `Laya` and `AppleAccelerate`; create one with:
+# --acc-env DIR adds the Apple-silicon Julia runs for both models with BLAS
+#   forwarded to Accelerate (Julia's fastest CPU path). DIR must be a Julia
+#   project that has `JeffClient`, `Laya`, and `AppleAccelerate`; create one
+#   with:
 #
 #     ENV=$(mktemp -d)
-#     julia --project="$ENV" -e 'using Pkg; Pkg.develop(path="extern/Laya.jl");
-#         Pkg.add("AppleAccelerate")'
+#     julia --project="$ENV" -e 'using Pkg;
+#         Pkg.develop(path="extern/JeffClient.jl");
+#         Pkg.develop(path="extern/Laya.jl");
+#         Pkg.add(["AppleAccelerate", "JSON"])'
 #     tools/bench_compare.sh ... --acc-env "$ENV"
 #
 #   On non-arm64 macOS the flag is ignored with a warning.
@@ -52,7 +56,7 @@ LAYA=""
 ACC_ENV=""
 
 usage() {
-    sed -n '2,38p' "$ROOT/tools/bench_compare.sh" | sed 's/^# \{0,1\}//'
+    sed -n '2,41p' "$ROOT/tools/bench_compare.sh" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -103,7 +107,8 @@ run julia "-t$THREADS" --project=extern/JeffClient.jl \
 run julia "-t$THREADS" --project=extern/Laya.jl \
     tools/bench_laya_real.jl "$LAYA" "$WARMUP" "$ITERS" > "$OUT/julia_laya.json"
 
-# Optional Apple-silicon Laya run with Accelerate BLAS (Laya's fastest CPU path).
+# Optional Apple-silicon runs with Accelerate BLAS (Julia's fastest CPU path).
+# The same environment provides AppleAccelerate for both models.
 if [ -n "$ACC_ENV" ]; then
     if [ "$(uname -m)" != "arm64" ]; then
         echo "warning: --acc-env is Apple-silicon only; skipping" >&2
@@ -111,6 +116,9 @@ if [ -n "$ACC_ENV" ]; then
         echo "error: no such --acc-env directory: $ACC_ENV" >&2
         exit 2
     else
+        run julia "-t$THREADS" --project="$ACC_ENV" \
+            tools/bench_jeff_real_accelerate.jl "$JEFF" "$WARMUP" "$ITERS" \
+            > "$OUT/julia_jeff_accelerate.json"
         run julia "-t$THREADS" --project="$ACC_ENV" \
             tools/bench_laya_real_accelerate.jl "$LAYA" "$WARMUP" "$ITERS" \
             > "$OUT/julia_laya_accelerate.json"

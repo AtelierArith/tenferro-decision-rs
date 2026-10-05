@@ -184,17 +184,18 @@ CPU comparison against the Julia reference implementations
 (10 cores, macOS 26, Julia 1.13.1, rustc 1.99.0, release build):
 
 - 8 threads on both sides: Julia `-t 8`, Rust `RAYON_NUM_THREADS=8`.
-- Median of 10 iterations after 3 warm-ups, taken as the best of two rounds run
-  in opposite order from a cooled machine. The fanless M4 Air throttles under
-  sustained load, so absolute milliseconds drift between sessions; ratios are
-  more stable than the times.
+- Median of 10 iterations after 3 warm-ups, from one cooled run per
+  configuration. The fanless M4 Air throttles under sustained load, so absolute
+  milliseconds drift between sessions; ratios are more stable than the times.
 - Same prepared inputs on both sides; model loading is measured separately.
-- Both Julia numbers below use Apple **Accelerate** BLAS on this Apple-silicon
-  host. **Jeff** gets it automatically: `QwenDecisionCore` pulls
-  `AppleAccelerate` in as a hard dependency, so `cpu_settings().accelerate ==
-  true` and the forward uses the chunked DeltaNet (`delta_chunk_size = 64`).
-  **Laya**'s default `CPUBackend` is OpenBLAS, so its number is the explicit
-  `AccelerateBackend` fast path (`tools/bench_laya_real_accelerate.jl`).
+- Two Julia configurations are shown. **OpenBLAS** is the default portable
+  policy (BLAS=1, Julia-parallel projections; `blas_threads=1`). **Accelerate**
+  is the opt-in fast path: `using AppleAccelerate` forwards BLAS to Accelerate
+  and `QwenDecisionCore`'s extension switches to the chunked DeltaNet
+  (`delta_chunk_size = 64`, `blas_threads=8`). `AppleAccelerate` is a weak
+  dependency, so it must be added to the environment
+  (`tools/bench_jeff_real_accelerate.jl` / `tools/bench_laya_real_accelerate.jl`
+  and `bench_compare.sh --acc-env`).
 
 ### Jeff
 
@@ -202,11 +203,11 @@ Checkpoint `mstrasser/Jeff-Qwen3.5-0.8B`. Rust "oracle" is the correctness
 reference (`forward_reference`); `host_opt` is the default optimized host
 forward.
 
-| length | Julia (Accelerate) | Rust oracle | Rust host_opt | host_opt / Julia |
-|---:|---:|---:|---:|---:|
-| L8 | 67.0 ms | 60.9 ms | 63.7 ms | 0.95× |
-| L16 | 70.2 ms | 85.9 ms | 85.9 ms | 1.22× |
-| L64 | 126.2 ms | 282.5 ms | 227.6 ms | 1.80× |
+| length | Julia (OpenBLAS) | Julia (Accelerate) | Rust oracle | Rust host_opt | host_opt / Julia (best) |
+|---:|---:|---:|---:|---:|---:|
+| L8 | 72.2 ms | 67.7 ms | 64.0 ms | 63.7 ms | 0.94× |
+| L16 | 96.0 ms | 74.4 ms | 86.1 ms | 85.6 ms | 1.15× |
+| L64 | 231.5 ms | 127.7 ms | 280.9 ms | 222.9 ms | 1.75× |
 
 Rust host vs the tenferro-native forward at L8 (the tenferro path is timed only
 at the shortest sequence; `HostRecurrent` is the default fused recurrent
@@ -214,52 +215,51 @@ DeltaNet extension op, `TensorNative` is tensor-only):
 
 | path | ms | vs host_opt | vs Julia (Accel.) |
 |---|---:|---:|---:|
-| Rust host_opt | 63.7 | 1.00× | 0.95× |
-| Rust tenferro `HostRecurrent` (cached) | 93.0 | 1.46× | 1.39× |
-| Rust tenferro `TensorNative` (cached) | 120.3 | 1.89× | 1.80× |
-| Rust tenferro `HostRecurrent` (fresh cache) | 1568.8 | 24.6× | 23.4× |
+| Rust host_opt | 63.7 | 1.00× | 0.94× |
+| Rust tenferro `HostRecurrent` (cached) | 96.1 | 1.51× | 1.42× |
+| Rust tenferro `TensorNative` (cached) | 131.8 | 2.07× | 1.95× |
+| Rust tenferro `HostRecurrent` (fresh cache) | 1611.4 | 25.3× | 23.8× |
 
 ### Laya
 
 Checkpoint `convaiinnovations/laya` (`1c5edc17`).
 
-| shape | Julia (Accelerate) | Rust host | host / Julia |
-|---|---:|---:|---:|
-| L8 B1 | 51.9 ms | 44.1 ms | 0.85× |
-| L64 B1 | 83.0 ms | 213.5 ms | 2.57× |
-| L8 B8 | 80.9 ms | 165.1 ms | 2.04× |
+| shape | Julia (OpenBLAS) | Julia (Accelerate) | Rust host | host / Julia (best) |
+|---|---:|---:|---:|---:|
+| L8 B1 | 71.0 ms | 53.5 ms | 48.0 ms | 0.90× |
+| L64 B1 | 228.2 ms | 83.8 ms | 218.3 ms | 2.61× |
+| L8 B8 | 228.5 ms | 82.1 ms | 174.2 ms | 2.12× |
 
 Rust host vs the tenferro-native forward at L8 B1:
 
 | path | ms | vs host | vs Julia (Accel.) |
 |---|---:|---:|---:|
-| Rust host | 44.1 | 1.00× | 0.85× |
-| Rust tenferro (cached) | 61.0 | 1.38× | 1.18× |
-| Rust tenferro (fresh cache) | 249.8 | 5.66× | 4.81× |
+| Rust host | 48.0 | 1.00× | 0.90× |
+| Rust tenferro (cached) | 62.1 | 1.29× | 1.16× |
+| Rust tenferro (fresh cache) | 260.1 | 5.42× | 4.86× |
 
 ### Model load
 
 | model | Julia | Rust |
 |---|---:|---:|
-| Jeff | 2364 ms | 2619 ms |
-| Laya | 407 ms | 1224 ms |
+| Jeff | 2562 ms | 2498 ms |
+| Laya | 427 ms | 1414 ms |
 
 ### Reading these numbers
 
-- On this Apple-silicon host, Julia's Accelerate-backed GEMMs (AMX) dominate
-  **Laya**: at L64 B1, 83 ms against Rust's 213 ms. Rust's row-blocked
-  `matrixmultiply` wins only the tiny L8 B1 decode (44 vs 52 ms).
-- **Jeff is close at short lengths** (Rust `host_opt` is at parity at L8,
-  0.95×) but the gap grows to 1.80× at L64, where Julia's chunked DeltaNet and
-  Accelerate GEMMs pull ahead of Rust's recurrent scan.
-- The **tenferro-native forward is 1.4–1.9× behind the Rust host path** with a
+- On this Apple-silicon host, Julia's Accelerate-backed GEMMs (AMX) dominate at
+  longer shapes: Jeff L64 **231 → 128 ms** and Laya L64 **228 → 84 ms** versus
+  OpenBLAS. The short L8 decode is nearly identical on both BLAS backends.
+- **Rust `host_opt` wins the tiny L8 decode** for both models (0.94× Jeff, 0.90×
+  Laya) but is left behind at L16/L64, where Julia's Accelerate GEMMs and
+  chunked DeltaNet pull ahead (Jeff 1.75× at L64; Laya 2.6× at L64).
+- The **tenferro-native forward is 1.3–2.1× behind the Rust host path** with a
   reused tensor cache; without caching it rebuilds every weight tensor per call
-  and is 4.8× (Laya) / 23.4× (Jeff) slower. `HostRecurrent` is faster than
+  and is 4.9× (Laya) / 23.8× (Jeff) slower. `HostRecurrent` is faster than
   `TensorNative`, so the `GatedDelta` extension op and `JeffEngine` default to
   the host kernels (`JeffBackend::Auto`).
-- These are Apple-silicon numbers. The x86_64 picture is different (Julia's Laya
-  lead is smaller; Rust `host_opt` was at parity or ahead at L8/L16 for Jeff):
-  see
+- These are Apple-silicon numbers with an opt-in Accelerate. The x86_64 picture
+  (Julia's default BLAS there is OpenBLAS) is in
   [`docs/agents/specs/docs/21_SPEED_COMPARISON.md`](docs/agents/specs/docs/21_SPEED_COMPARISON.md).
 
 Reproduce:
@@ -268,9 +268,12 @@ Reproduce:
 tools/bench_compare.sh --jeff <JEFF_CKPT_DIR> --laya <LAYA_CKPT_DIR> \
     --threads 8 --warmup 3 --iters 10 --json /tmp/bench
 
-# Optional Apple-silicon Laya Accelerate run:
+# Add the Apple-silicon Accelerate runs (AppleAccelerate is now a weak
+# dependency, so opt in explicitly):
 ACC=$(mktemp -d)
-julia --project="$ACC" -e 'using Pkg; Pkg.develop(path="extern/Laya.jl"); Pkg.add("AppleAccelerate")'
+julia --project="$ACC" -e 'using Pkg;
+    Pkg.develop(path="extern/JeffClient.jl"); Pkg.develop(path="extern/Laya.jl");
+    Pkg.add(["AppleAccelerate", "JSON"])'
 tools/bench_compare.sh --jeff <JEFF_CKPT_DIR> --laya <LAYA_CKPT_DIR> --acc-env "$ACC"
 ```
 
