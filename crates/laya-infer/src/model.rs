@@ -33,8 +33,8 @@
 use decision_core::{DecisionError, Result};
 use tenferro_ad::{DotGeneralConfig, EagerSession, EagerTensor, GatherConfig, SliceConfig, Tensor};
 use tenferro_ext::{
-    EagerSessionErfExt, EagerSessionGemmBiasExt, EagerSessionGemmExt, EagerSessionLayerNormExt,
-    EagerSessionRopeExt,
+    EagerSessionErfExt, EagerSessionGegluExt, EagerSessionGemmBiasExt, EagerSessionGemmExt,
+    EagerSessionLayaAttentionExt, EagerSessionLayerNormExt,
 };
 use tenferro_infer::{attention, norm, rope};
 
@@ -1167,37 +1167,35 @@ fn attention_block_tenferro(
 ) -> tenferro_ad::Result<EagerTensor> {
     let hd = hidden / num_heads;
     let qkv = linear_feature_first(session, cache, x, in_proj, 3 * hidden)?; // (3d, L, B)
-    let qkv = session.reshape(&qkv, vec![hidden, 3, length, batch])?;
-    let q = slice_axis(session, &qkv, 1, 0, 1)?;
-    let k = slice_axis(session, &qkv, 1, 1, 1)?;
-    let v = slice_axis(session, &qkv, 1, 2, 1)?;
-    let to_heads = |session: &mut EagerSession<'_>, t: &EagerTensor| {
-        let shaped = session.reshape(t, vec![hd, num_heads, length, batch])?;
-        session.transpose(&shaped, &[3, 1, 2, 0])
-    };
-    let q = to_heads(session, &q)?; // (B, H, L, hd)
-    let k = to_heads(session, &k)?;
-    let v = to_heads(session, &v)?;
-    let (q, k) = match rope_base {
-        Some(base) => {
-            if q.dtype() == tenferro_tensor::DType::F32 {
-                (
-                    session.rope_modernbert(&q, base)?,
-                    session.rope_modernbert(&k, base)?,
-                )
-            } else {
-                (
-                    rope::rope_modernbert(session, &q, base)?,
-                    rope::rope_modernbert(session, &k, base)?,
-                )
-            }
-        }
-        None => (q, k),
-    };
     let mask = tensor_bool(session, vec![length, length, batch], keep)?;
-    let attended = attention::attention(session, &q, &k, &v, Some(&mask), None)?; // (B,H,L,hd)
-    let attended = session.transpose(&attended, &[3, 1, 2, 0])?; // (hd,H,L,B)
-    let attended = session.reshape(&attended, vec![hidden, length, batch])?;
+    let attended = if qkv.dtype() == tenferro_tensor::DType::F32 {
+        // Fused split + RoPE + masked attention, all in the feature-first
+        // `(d, L, B)` layout, so no transposes are materialized.
+        session.laya_attention_block(&qkv, &mask, hidden, num_heads, rope_base.unwrap_or(0.0))?
+    } else {
+        // Non-f32 fallback: the eager op sequence.
+        let qkv = session.reshape(&qkv, vec![hidden, 3, length, batch])?;
+        let q = slice_axis(session, &qkv, 1, 0, 1)?;
+        let k = slice_axis(session, &qkv, 1, 1, 1)?;
+        let v = slice_axis(session, &qkv, 1, 2, 1)?;
+        let to_heads = |session: &mut EagerSession<'_>, t: &EagerTensor| {
+            let shaped = session.reshape(t, vec![hd, num_heads, length, batch])?;
+            session.transpose(&shaped, &[3, 1, 2, 0])
+        };
+        let q = to_heads(session, &q)?;
+        let k = to_heads(session, &k)?;
+        let v = to_heads(session, &v)?;
+        let (q, k) = match rope_base {
+            Some(base) => (
+                rope::rope_modernbert(session, &q, base)?,
+                rope::rope_modernbert(session, &k, base)?,
+            ),
+            None => (q, k),
+        };
+        let attended = attention::attention(session, &q, &k, &v, Some(&mask), None)?;
+        let attended = session.transpose(&attended, &[3, 1, 2, 0])?;
+        session.reshape(&attended, vec![hidden, length, batch])?
+    };
     linear_feature_first(session, cache, &attended, out_proj, hidden)
 }
 
@@ -1254,10 +1252,15 @@ fn encoder_tensor(
 
         let hn = layer_norm_feature_first(session, cache, &z, &layer.mlp_norm, d, eps)?;
         let u = linear_feature_first(session, cache, &hn, &layer.wi, 2 * intermediate)?;
-        let value = slice_axis(session, &u, 0, 0, intermediate)?;
-        let gate = slice_axis(session, &u, 0, intermediate, intermediate)?;
-        let activated = session.gelu_erf(&value)?;
-        let g = session.mul(&activated, &gate)?;
+        let g = if u.dtype() == tenferro_tensor::DType::F32 {
+            // Fused `gelu(value) * gate` in one `cpu-kernels` pass.
+            session.geglu(&u, intermediate)?
+        } else {
+            let value = slice_axis(session, &u, 0, 0, intermediate)?;
+            let gate = slice_axis(session, &u, 0, intermediate, intermediate)?;
+            let activated = session.gelu_erf(&value)?;
+            session.mul(&activated, &gate)?
+        };
         let down = linear_feature_first(session, cache, &g, &layer.wo_mlp, d)?;
         x = session.add(&z, &down)?;
     }

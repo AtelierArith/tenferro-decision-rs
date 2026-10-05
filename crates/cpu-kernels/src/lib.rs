@@ -8,6 +8,8 @@
 //! Layouts follow the engines' convention: weights are row-major `(in, out)`
 //! and activations are row-major `(dim, length)`.
 
+#![allow(clippy::approx_constant, clippy::excessive_precision)]
+
 use rayon::prelude::*;
 
 /// Below this many multiply-adds the threading overhead is not worth it.
@@ -237,72 +239,6 @@ pub fn input_mul_weight_transpose_bias_into(
     input_mul_weight_transpose_add_into(x, rows, in_dim, weight, out_dim, y);
 }
 
-/// ModernBERT RoPE over `(batch, heads, length, head_dim)` (`head_dim` is the
-/// last axis; `length` is the second-to-last). Rotary pairs are `(i, i +
-/// head_dim/2)` and position `l` uses angle `l * base^(-2i/head_dim)`, matching
-/// `tenferro_infer::rope::rope_modernbert`.
-///
-/// Fuses the slice/broadcast/mul/sub/add/concatenate sequence into one pass
-/// with an internally built `(length, head_dim/2)` table (built once, shared
-/// across heads and batch).
-#[allow(clippy::too_many_arguments)]
-pub fn rope_modernbert_into(
-    x: &[f32],
-    base: f32,
-    batch: usize,
-    heads: usize,
-    length: usize,
-    head_dim: usize,
-    out: &mut [f32],
-) {
-    let total = batch * heads * length * head_dim;
-    debug_assert_eq!(x.len(), total);
-    debug_assert_eq!(out.len(), total);
-    if total == 0 || head_dim == 0 || head_dim % 2 != 0 {
-        out.copy_from_slice(&x[..total]);
-        return;
-    }
-    let half = head_dim / 2;
-    let mut cos = vec![0.0f32; length * half];
-    let mut sin = vec![0.0f32; length * half];
-    for l in 0..length {
-        for i in 0..half {
-            let theta = (l as f32) * base.powf(-2.0 * (i as f32) / (head_dim as f32));
-            cos[l * half + i] = theta.cos();
-            sin[l * half + i] = theta.sin();
-        }
-    }
-    let s_h = batch;
-    let s_l = batch * heads;
-    let s_i = batch * heads * length;
-    let in_addr = x.as_ptr() as usize;
-    let out_addr = out.as_mut_ptr() as usize;
-    (0..batch).into_par_iter().for_each(|b| {
-        // SAFETY: each task owns batch `b`; `(b, h, l, i)` is unique per task
-        // (`batch` is the fastest axis), so writes are disjoint and `x` is only
-        // read. `cos`/`sin` are shared read-only tables.
-        unsafe {
-            let x = in_addr as *const f32;
-            let out = out_addr as *mut f32;
-            for h in 0..heads {
-                for l in 0..length {
-                    let row = b + h * s_h + l * s_l;
-                    let table = l * half;
-                    for i in 0..half {
-                        let first = row + i * s_i;
-                        let second = row + (i + half) * s_i;
-                        let a = *x.add(first);
-                        let b_val = *x.add(second);
-                        let c = cos[table + i];
-                        let s = sin[table + i];
-                        *out.add(first) = a * c - b_val * s;
-                        *out.add(second) = a * s + b_val * c;
-                    }
-                }
-            }
-        }
-    });
-}
 /// `y = x · weight` for **column-major** `x (length, in_dim)` and
 /// `y (length, out_dim)`, with `weight` stored **row-major `(in_dim, out_dim)`**
 /// (the natural safetensors `Vec<f32>`).
@@ -456,6 +392,237 @@ pub fn layer_norm_feature_first_into(
             normalize(&mut y[c * d..(c + 1) * d], &x[c * d..(c + 1) * d]);
         }
     }
+}
+
+/// `erf` as evaluated by the MLX Metal kernel (`mathfns.jl` `mlx_erf`), `f32`.
+///
+/// Shared by the `erf` extension op and the fused GeGLU kernel so both match
+/// Laya's reference.
+pub fn erf_f32(a: f32) -> f32 {
+    let t = a.abs();
+    let s = a * a;
+    if t > 0.927_734_4 {
+        let mut r = (-1.728_534_7e-5f32).mul_add(t, 3.831_971_3e-4);
+        let u = (-3.883_964_4e-3f32).mul_add(t, 2.425_462_2e-2);
+        r = r.mul_add(s, u);
+        r = r.mul_add(t, -1.067_778_8e-1);
+        r = r.mul_add(t, -6.348_466_9e-1);
+        r = r.mul_add(t, -1.287_175_1e-1);
+        r = r.mul_add(t, -t);
+        r = -mlx_expm1f(r);
+        r.copysign(a)
+    } else {
+        let mut r = -5.967_617e-4f32;
+        r = r.mul_add(s, 4.991_194_2e-3);
+        r = r.mul_add(s, -2.676_813_5e-2);
+        r = r.mul_add(s, 1.128_199_2e-1);
+        r = r.mul_add(s, -3.761_253_4e-1);
+        r = r.mul_add(s, 1.283_791_7e-1);
+        r.mul_add(a, a)
+    }
+}
+
+/// `expm1` as evaluated by the MLX Metal kernel (`mathfns.jl` `mlx_expm1f`).
+fn mlx_expm1f(a: f32) -> f32 {
+    let mut j = 1.442695f32.mul_add(a, 12582912.0);
+    j -= 12582912.0;
+    let i = j as i32;
+    let f = j.mul_add(-0.693145_752f32, a);
+    let s = if a == 0.0 { a } else { f * f };
+    let mut r = 1.973_509_8e-4f32;
+    r = r.mul_add(f, 1.393_090_7e-3);
+    r = r.mul_add(f, 8.333_44e-3);
+    r = r.mul_add(f, 4.166_680_2e-2);
+    r = r.mul_add(f, 1.666_667_2e-1);
+    r = r.mul_add(f, 4.999_999_7e-1);
+    let u = if j == 1.0 { f + 0.5 } else { f };
+    let v = r.mul_add(s, u);
+    let half = 0.5f32;
+    let t = half * 2.0f32.powi(i);
+    let y = t - half;
+    let x = (t - y) - half;
+    r = v.mul_add(t, x) + y;
+    r += r;
+    if j == 0.0 {
+        r = v;
+    }
+    if j == 1.0 {
+        r = v + v;
+    }
+    if (a - 1.0).abs() > 88.0 {
+        let e = a.exp2();
+        r = e.mul_add(e, -1.0);
+    }
+    r
+}
+
+/// Exact (erf-based) GELU: `x * (1 + erf(x / sqrt(2))) / 2`.
+#[inline]
+pub fn gelu_erf_f32(x: f32) -> f32 {
+    0.5 * x * (1.0 + erf_f32(x * std::f32::consts::FRAC_1_SQRT_2))
+}
+
+/// GeGLU in Laya's order: `gelu(value) * gate`, for column-major
+/// `u (2*intermediate, cols)` → `out (intermediate, cols)`. The `value` half is
+/// channels `[0, intermediate)`, the `gate` half `[intermediate, 2*intermediate)`.
+pub fn geglu_into(u: &[f32], intermediate: usize, cols: usize, out: &mut [f32]) {
+    debug_assert_eq!(u.len(), 2 * intermediate * cols);
+    debug_assert_eq!(out.len(), intermediate * cols);
+    if intermediate == 0 || cols == 0 {
+        return;
+    }
+    for c in 0..cols {
+        let base = 2 * intermediate * c;
+        let out_base = intermediate * c;
+        for i in 0..intermediate {
+            out[out_base + i] = gelu_erf_f32(u[base + i]) * u[base + intermediate + i];
+        }
+    }
+}
+
+/// Fused Laya attention block: split a fused `(3*d, length, batch)` projection
+/// into `q`/`k`/`v`, apply ModernBERT RoPE to `q`/`k`, and run masked scaled
+/// dot-product attention, returning `(d, length, batch)`.
+///
+/// Everything is done per `(batch, head)` in the host-friendly feature-first
+/// layout: a head owns features `[head_dim*head, head_dim*(head+1))` with
+/// `head_dim` contiguous (the host `attention_host` layout), so no transposes
+/// are needed and the inner head_dim loop is vectorizable. `keep` is the
+/// `(length, length, batch)` causal/window mask (`query + length*(key +
+/// length*batch)`); `rope_base == 0.0` disables RoPE.
+#[allow(clippy::too_many_arguments)]
+pub fn laya_attention_block_into(
+    qkv: &[f32],
+    keep: &[bool],
+    d: usize,
+    heads: usize,
+    length: usize,
+    batch: usize,
+    rope_base: f32,
+    out: &mut [f32],
+) {
+    let n = d * length * batch;
+    debug_assert_eq!(qkv.len(), 3 * n);
+    debug_assert_eq!(out.len(), n);
+    debug_assert_eq!(keep.len(), length * length * batch);
+    if n == 0 || heads == 0 || d % heads != 0 {
+        return;
+    }
+    let hd = d / heads;
+    let half = hd / 2;
+    let scale = 1.0 / (hd as f32).sqrt();
+
+    // RoPE tables `(length, half)`, built once and shared across heads.
+    let use_rope = rope_base != 0.0;
+    let mut cos = Vec::new();
+    let mut sin = Vec::new();
+    if use_rope {
+        cos = vec![0.0f32; length * half];
+        sin = vec![0.0f32; length * half];
+        for l in 0..length {
+            for i in 0..half {
+                let theta = (l as f32) * rope_base.powf(-2.0 * (i as f32) / (hd as f32));
+                cos[l * half + i] = theta.cos();
+                sin[l * half + i] = theta.sin();
+            }
+        }
+    }
+
+    let qkv_addr = qkv.as_ptr() as usize;
+    let keep_addr = keep.as_ptr() as usize;
+    let out_addr = out.as_mut_ptr() as usize;
+    let cos_addr = cos.as_ptr() as usize;
+    let sin_addr = sin.as_ptr() as usize;
+    (0..batch * heads).into_par_iter().for_each(|bh| {
+        // SAFETY: each task owns one `(batch, head)` pair — a disjoint feature
+        // band of `out` — and only reads `qkv`/`keep`/`cos`/`sin`.
+        let b = bh / heads;
+        let head = bh % heads;
+        let feat = head * hd;
+        unsafe {
+            let qkv = qkv_addr as *const f32;
+            let keep = keep_addr as *const bool;
+            let out = out_addr as *mut f32;
+            let mut q = vec![0.0f32; length * hd];
+            let mut k = vec![0.0f32; length * hd];
+            let mut v = vec![0.0f32; length * hd];
+            // split qkv -> q/k/v head band
+            for l in 0..length {
+                let src = 3 * d * (l + length * b) + feat;
+                let dst = l * hd;
+                for i in 0..hd {
+                    q[dst + i] = *qkv.add(src + i);
+                    k[dst + i] = *qkv.add(src + d + i);
+                    v[dst + i] = *qkv.add(src + 2 * d + i);
+                }
+            }
+            if use_rope {
+                let cos = cos_addr as *const f32;
+                let sin = sin_addr as *const f32;
+                for l in 0..length {
+                    let row = l * hd;
+                    let table = l * half;
+                    for i in 0..half {
+                        let c = *cos.add(table + i);
+                        let s = *sin.add(table + i);
+                        let a = q[row + i];
+                        let bb = q[row + i + half];
+                        q[row + i] = a * c - bb * s;
+                        q[row + i + half] = a * s + bb * c;
+                        let a = k[row + i];
+                        let bb = k[row + i + half];
+                        k[row + i] = a * c - bb * s;
+                        k[row + i + half] = a * s + bb * c;
+                    }
+                }
+            }
+            // masked scaled dot-product attention for this head
+            let mut probs = vec![0.0f32; length];
+            for query in 0..length {
+                let qo = query * hd;
+                let mut max = f32::NEG_INFINITY;
+                for (key, prob) in probs.iter_mut().enumerate() {
+                    if !*keep.add(query + length * (key + length * b)) {
+                        *prob = f32::NEG_INFINITY;
+                        continue;
+                    }
+                    let ko = key * hd;
+                    let mut acc = 0.0f32;
+                    for i in 0..hd {
+                        acc += q[qo + i] * k[ko + i];
+                    }
+                    let score = acc * scale;
+                    *prob = score;
+                    if score > max {
+                        max = score;
+                    }
+                }
+                let mut sum = 0.0f32;
+                for value in probs.iter_mut() {
+                    *value = if value.is_finite() {
+                        (*value - max).exp()
+                    } else {
+                        0.0
+                    };
+                    sum += *value;
+                }
+                let o_base = feat + d * (query + length * b);
+                for i in 0..hd {
+                    *out.add(o_base + i) = 0.0;
+                }
+                for (key, &raw) in probs.iter().enumerate() {
+                    let prob = raw / sum;
+                    if prob == 0.0 {
+                        continue;
+                    }
+                    let vo = key * hd;
+                    for i in 0..hd {
+                        *out.add(o_base + i) += v[vo + i] * prob;
+                    }
+                }
+            }
+        }
+    });
 }
 
 #[cfg(test)]

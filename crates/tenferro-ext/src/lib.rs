@@ -13,17 +13,21 @@
 
 #![allow(clippy::approx_constant, clippy::excessive_precision)]
 
+mod geglu;
 mod gemm;
 mod gemm_bias;
+mod laya_attention;
 mod layernorm;
 mod linear;
-mod rope;
 
+pub use geglu::{EagerSessionGegluExt, GEGLU_FAMILY_ID, GegluOp};
 pub use gemm::{EagerSessionGemmExt, GEMM_FAMILY_ID, GemmOp};
 pub use gemm_bias::{EagerSessionGemmBiasExt, GEMM_BIAS_FAMILY_ID, GemmBiasOp};
+pub use laya_attention::{
+    EagerSessionLayaAttentionExt, LAYA_ATTENTION_BLOCK_FAMILY_ID, LayaAttentionBlockOp,
+};
 pub use layernorm::{EagerSessionLayerNormExt, LAYER_NORM_FF_FAMILY_ID, LayerNormFeatureFirstOp};
 pub use linear::{EagerSessionLinearExt, LINEAR_FAMILY_ID, LinearOp};
-pub use rope::{EagerSessionRopeExt, ROPE_FAMILY_ID, RopeOp};
 
 use std::any::Any;
 use std::hash::Hasher;
@@ -100,7 +104,12 @@ fn execute_erf_in_session(
     let output = match input.dtype() {
         DType::F32 => {
             let data = input.as_slice::<f32>()?;
-            Tensor::from_vec_col_major(shape, data.iter().map(|value| erf_f32(*value)).collect())?
+            Tensor::from_vec_col_major(
+                shape,
+                data.iter()
+                    .map(|value| cpu_kernels::erf_f32(*value))
+                    .collect(),
+            )?
         }
         DType::F64 => {
             let data = input.as_slice::<f64>()?;
@@ -209,65 +218,6 @@ fn scalar_like(
         }
     };
     session.constant_from(tensor)
-}
-
-/// `erf` as evaluated by the MLX Metal kernel (`mathfns.jl` `mlx_erf`), `f32`.
-fn erf_f32(a: f32) -> f32 {
-    let t = a.abs();
-    let s = a * a;
-    if t > 0.927_734_4 {
-        let mut r = (-1.728_534_7e-5f32).mul_add(t, 3.831_971_3e-4);
-        let u = (-3.883_964_4e-3f32).mul_add(t, 2.425_462_2e-2);
-        r = r.mul_add(s, u);
-        r = r.mul_add(t, -1.067_778_8e-1);
-        r = r.mul_add(t, -6.348_466_9e-1);
-        r = r.mul_add(t, -1.287_175_1e-1);
-        r = r.mul_add(t, -t);
-        r = -mlx_expm1f(r);
-        r.copysign(a)
-    } else {
-        let mut r = -5.967_617e-4f32;
-        r = r.mul_add(s, 4.991_194_2e-3);
-        r = r.mul_add(s, -2.676_813_5e-2);
-        r = r.mul_add(s, 1.128_199_2e-1);
-        r = r.mul_add(s, -3.761_253_4e-1);
-        r = r.mul_add(s, 1.283_791_7e-1);
-        r.mul_add(a, a)
-    }
-}
-
-/// `expm1` as evaluated by the MLX Metal kernel (`mathfns.jl` `mlx_expm1f`).
-fn mlx_expm1f(a: f32) -> f32 {
-    let mut j = 1.442695f32.mul_add(a, 12582912.0);
-    j -= 12582912.0;
-    let i = j as i32;
-    let f = j.mul_add(-0.693145_752f32, a);
-    let s = if a == 0.0 { a } else { f * f };
-    let mut r = 1.973_509_8e-4f32;
-    r = r.mul_add(f, 1.393_090_7e-3);
-    r = r.mul_add(f, 8.333_44e-3);
-    r = r.mul_add(f, 4.166_680_2e-2);
-    r = r.mul_add(f, 1.666_667_2e-1);
-    r = r.mul_add(f, 4.999_999_7e-1);
-    let u = if j == 1.0 { f + 0.5 } else { f };
-    let v = r.mul_add(s, u);
-    let half = 0.5f32;
-    let t = half * 2.0f32.powi(i);
-    let y = t - half;
-    let x = (t - y) - half;
-    r = v.mul_add(t, x) + y;
-    r += r;
-    if j == 0.0 {
-        r = v;
-    }
-    if j == 1.0 {
-        r = v + v;
-    }
-    if (a - 1.0).abs() > 88.0 {
-        let e = a.exp2();
-        r = e.mul_add(e, -1.0);
-    }
-    r
 }
 
 /// Abramowitz–Stegun 7.1.26 (`|ε| ≤ 1.5e-7`) for `f64`.
