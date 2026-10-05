@@ -129,3 +129,55 @@ Warmup 3, 15 iterations, min.
   sequences of at least 16 tokens and the oracle below that; `HostOpt` and
   `Tenferro` can be selected explicitly (`JeffBackend::{Auto, Host, HostOpt,
   Tenferro}`).
+
+## Apple silicon (M2 Max) + tenferro extension-op pass
+
+**Date:** 2026-10-05. Re-measured with `tools/bench_compare.sh` and the
+per-shape gap benches on an Apple M2 Max (12 cores, macOS 26.5, Julia 1.13.1,
+rustc 1.98.1, release), 8 threads both sides, warmup 5 / 30 iterations, median.
+
+**Julia BLAS correction.** On Apple Silicon, `QwenDecisionCore` used to
+`import AppleAccelerate` unconditionally, so `using JeffClient` forwarded BLAS
+to Accelerate even in the default env — the "OpenBLAS" Jeff row was really
+Accelerate with `BLAS=8`. Current `QwenDecisionCore` `main` makes that opt-in,
+so the default Jeff env is OpenBLAS + `BLAS=1`; run `Pkg.update` and the Jeff
+Julia L8 row drops **114.6 → 68.0 ms**. The two Julia configs only differ for
+Laya by default.
+
+### Jeff
+
+| length | Julia (OpenBLAS) | Julia (Accelerate) | Rust oracle | Rust host_opt | Rust tenferro |
+|---:|---:|---:|---:|---:|---:|
+| L8 | 68.0 | 119.6 | 65.4 | 69.7 | 83.5 |
+| L16 | 90.0 | 111.9 | 91.6 | 90.4 | 105.5 |
+| L64 | 214.8 | 135.0 | 267.1 | 210.2 | 232.8 |
+
+tenferro / host_opt: 1.20× (L8), 1.17× (L16), 1.11× (L64). Julia's best is
+OpenBLAS for L8/L16 and Accelerate for L64.
+
+### Laya
+
+| shape | Julia (OpenBLAS) | Julia (Accelerate) | Rust host | Rust tenferro |
+|---|---:|---:|---:|---:|
+| L8 B1 | 81.4 | 88.3 | 49.1 | 49.4 |
+| L16 B1 | 115 | 90.5 | 67.6 | 63.9 |
+| L64 B1 | 292.5 | 88.5 | 249.7 | 168.2 |
+| L8 B8 | 244.0 | 86.0 | 169.8 | 153.8 |
+
+tenferro / host: 1.01× (L8 B1), 0.95× (L16 B1), 0.67× (L64 B1), 0.91× (L8 B8).
+
+### tenferro-native tuning
+
+The tenferro forward now reaches the host kernels through self-hosted
+`cpu-kernels` extension ops (`tenferro-ext`): **Laya** routes `linear`/bias,
+feature-first LayerNorm, GeGLU, and the whole `split + RoPE + masked attention`
+block through one op each; **Jeff** routes `linear`. Effect on tenferro / host:
+Laya L8 B1 1.53 → 1.01×, L64 1.07 → 0.67×, L8 B8 1.52 → 0.91×; Jeff L64
+1.31 → 1.11×. A standalone masked-attention op and a standalone `split_qkv` op
+were tried and reverted (no net win at the small decode shapes the gap is in).
+
+`matrixmultiply` note: the Jeff `linear` kernel must feed a column-major `A`
+(`rsa = 1`) and a row-major `B` (`csb = 1`) — the column-major activations plus
+the raw row-major weight give exactly that. A single-threaded or row-major-`A`
+variant is 3–5× slower, which is why the host path parallelizes over output
+columns.
