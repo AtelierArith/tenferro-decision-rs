@@ -22,12 +22,13 @@
 
 use decision_core::{DecisionError, Result};
 use tenferro_ad::{EagerSession, EagerTensor};
+use tenferro_ext::EagerSessionLinearExt;
 use tenferro_gated_delta::{
     EagerSessionGatedDeltaExt, GatedDeltaConfig, GatedDeltaOp, GatedDeltaWeights,
     GatedDeltaWorkspace, delta_layer_recurrent, delta_layer_tenferro_native,
     prepare_kernel_weights, prepare_tensor_weights,
 };
-use tenferro_infer::{TensorCache, activation, embedding, linear, norm, rope};
+use tenferro_infer::{TensorCache, activation, embedding, norm, rope};
 
 /// How the tenferro forward runs a Gated DeltaNet layer.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -177,6 +178,19 @@ fn linear_host(
     length: usize,
 ) -> Vec<f32> {
     cpu_kernels::matmul_row_major(weight, in_dim, out_dim, x, length)
+}
+
+/// Dense `y = x · W` on the eager session, through the `cpu-kernels`-backed
+/// `linear` extension op. Its weight tensors are cached with
+/// [`TensorCache::col_major`] over the raw safetensors buffer, so the op reads
+/// the natural row-major `(in, out)` weight storage (the fast `matrixmultiply`
+/// orientation); see `cpu_kernels::matmul_col_major_into`.
+fn linear_tenferro(
+    session: &mut EagerSession<'_>,
+    x: &EagerTensor,
+    weight: &EagerTensor,
+) -> tenferro_ad::Result<EagerTensor> {
+    session.linear(x, weight)
 }
 
 fn rms_centered_rows(
@@ -492,11 +506,14 @@ fn full_attention_tenferro(
     let heads = cfg.heads;
     let width = hd * heads;
 
-    let q_w = cache.col(session, vec![cfg.hidden, width], &w.q)?;
-    let gate_w = cache.col(session, vec![cfg.hidden, width], &w.gate)?;
-    let k_w = cache.col(session, vec![cfg.hidden, width], &w.k)?;
-    let v_w = cache.col(session, vec![cfg.hidden, width], &w.v)?;
-    let o_w = cache.col(session, vec![width, cfg.hidden], &w.o)?;
+    // Linear weights are cached with `col_major` (raw row-major `(in, out)`
+    // storage) because the `linear` extension op reads that storage directly;
+    // see `linear_tenferro`.
+    let q_w = cache.col_major(session, vec![cfg.hidden, width], &w.q)?;
+    let gate_w = cache.col_major(session, vec![cfg.hidden, width], &w.gate)?;
+    let k_w = cache.col_major(session, vec![cfg.hidden, width], &w.k)?;
+    let v_w = cache.col_major(session, vec![cfg.hidden, width], &w.v)?;
+    let o_w = cache.col_major(session, vec![width, cfg.hidden], &w.o)?;
     let q_norm = cache.col(session, vec![hd, 1], &w.q_norm)?;
     let k_norm = cache.col(session, vec![hd, 1], &w.k_norm)?;
     let q_norm = session.reshape(&q_norm, vec![hd])?;
@@ -506,7 +523,7 @@ fn full_attention_tenferro(
     let project_heads = |session: &mut EagerSession<'_>,
                          weight: &EagerTensor|
      -> tenferro_ad::Result<EagerTensor> {
-        let projected = linear::linear(session, x, weight)?; // (length, width)
+        let projected = linear_tenferro(session, x, weight)?; // (length, width)
         let shaped = session.reshape(&projected, vec![length, hd, heads])?;
         session.transpose(&shaped, &[2, 0, 1]) // (heads, length, hd)
     };
@@ -514,7 +531,7 @@ fn full_attention_tenferro(
     let q = project_heads(session, &q_w)?;
     let k = project_heads(session, &k_w)?;
     let v = project_heads(session, &v_w)?;
-    let gate = linear::linear(session, x, &gate_w)?; // (length, width)
+    let gate = linear_tenferro(session, x, &gate_w)?; // (length, width)
 
     let q = norm::rms_norm(session, &q, &q_norm, true, cfg.eps as f64)?;
     let k = norm::rms_norm(session, &k, &k_norm, true, cfg.eps as f64)?;
@@ -557,7 +574,7 @@ fn full_attention_tenferro(
     // Merge heads: (heads, length, hd) -> (length, hd, heads) -> (length, width).
     let merged = session.transpose(&gated, &[1, 2, 0])?;
     let merged = session.reshape(&merged, vec![length, width])?;
-    let out = linear::linear(session, &merged, &o_w)?; // (length, hidden)
+    let out = linear_tenferro(session, &merged, &o_w)?; // (length, hidden)
     Ok(out)
 }
 
@@ -700,13 +717,15 @@ pub fn forward_tenferro_cached_kernel(
         let post_norm = session.reshape(&post_norm, vec![cfg.hidden])?;
         let normalized2 = norm::rms_norm(session, &residual, &post_norm, true, cfg.eps as f64)?;
 
-        let gate_w = cache.col(session, vec![cfg.hidden, cfg.intermediate], &layer.mlp.gate)?;
-        let up_w = cache.col(session, vec![cfg.hidden, cfg.intermediate], &layer.mlp.up)?;
-        let down_w = cache.col(session, vec![cfg.intermediate, cfg.hidden], &layer.mlp.down)?;
-        let gate = linear::linear(session, &normalized2, &gate_w)?; // (length, intermediate)
-        let up = linear::linear(session, &normalized2, &up_w)?;
+        let gate_w =
+            cache.col_major(session, vec![cfg.hidden, cfg.intermediate], &layer.mlp.gate)?;
+        let up_w = cache.col_major(session, vec![cfg.hidden, cfg.intermediate], &layer.mlp.up)?;
+        let down_w =
+            cache.col_major(session, vec![cfg.intermediate, cfg.hidden], &layer.mlp.down)?;
+        let gate = linear_tenferro(session, &normalized2, &gate_w)?; // (length, intermediate)
+        let up = linear_tenferro(session, &normalized2, &up_w)?;
         let gated = activation::gated_silu(session, &gate, &up)?;
-        let mlp = linear::linear(session, &gated, &down_w)?; // (length, hidden)
+        let mlp = linear_tenferro(session, &gated, &down_w)?; // (length, hidden)
         hidden = session.add(&residual, &mlp)?;
     }
 
@@ -723,8 +742,8 @@ pub fn forward_tenferro_cached_kernel(
     let final_norm = session.reshape(&final_norm, vec![cfg.hidden])?;
     let last_normed = norm::rms_norm(session, &last, &final_norm, true, cfg.eps as f64)?; // (1, hidden)
 
-    let readout = cache.col(session, vec![cfg.hidden, weights.options], &weights.readout)?;
-    let logits = linear::linear(session, &last_normed, &readout)?; // (1, options)
+    let readout = cache.col_major(session, vec![cfg.hidden, weights.options], &weights.readout)?;
+    let logits = linear_tenferro(session, &last_normed, &readout)?; // (1, options)
     extract(session, &logits, 1, weights.options)
 }
 

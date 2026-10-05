@@ -59,7 +59,7 @@ fn main() {
     let mut cache = TensorCache::new();
 
     let mut rows = Vec::new();
-    for (length, batch) in [(8usize, 1usize), (64, 1), (8, 8)] {
+    for (length, batch) in [(8usize, 1usize), (16, 1), (64, 1), (8, 8)] {
         let (ids, mask, marker_pos, marker_mask, qtype) = make_batch(length, batch);
 
         for _ in 0..warmup {

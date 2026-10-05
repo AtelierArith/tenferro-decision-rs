@@ -237,6 +237,92 @@ pub fn input_mul_weight_transpose_bias_into(
     input_mul_weight_transpose_add_into(x, rows, in_dim, weight, out_dim, y);
 }
 
+/// `y = x · weight` for **column-major** `x (length, in_dim)` and
+/// `y (length, out_dim)`, with `weight` stored **row-major `(in_dim, out_dim)`**
+/// (the natural safetensors `Vec<f32>`).
+///
+/// `matrixmultiply` favors a column-major `A` (`rsa = 1`) and a row-major `B`
+/// (`csb = 1`); the column-major activations and the raw row-major weight are
+/// exactly that. So `A = x` (`rsa = 1`, `csa = length`), `B = weight`
+/// (`rsb = out_dim`, `csb = 1`), `C = y` (`rsc = 1`, `csc = length`), and the
+/// contraction over `i` gives `y[t, o] = Σᵢ x[t, i] · weight[i, o]` with no
+/// transpose and the fast `matrixmultiply` path.
+pub fn matmul_col_major_into(
+    x: &[f32],
+    weight: &[f32],
+    length: usize,
+    in_dim: usize,
+    out_dim: usize,
+    y: &mut [f32],
+) {
+    debug_assert_eq!(x.len(), length * in_dim);
+    debug_assert_eq!(weight.len(), in_dim * out_dim);
+    debug_assert_eq!(y.len(), length * out_dim);
+    if length == 0 || in_dim == 0 || out_dim == 0 {
+        return;
+    }
+    let work = length.saturating_mul(in_dim).saturating_mul(out_dim);
+    if work >= PARALLEL_THRESHOLD && out_dim > 1 {
+        // Block over the output features so each rayon task owns a disjoint
+        // column block of the column-major `y` (o stride = length).
+        let threads = rayon::current_num_threads().max(1);
+        let block = out_dim.div_ceil(threads * 4).max(8).min(out_dim);
+        let nblocks = out_dim.div_ceil(block);
+        let x_addr = x.as_ptr() as usize;
+        let w_addr = weight.as_ptr() as usize;
+        let y_addr = y.as_mut_ptr() as usize;
+        (0..nblocks).into_par_iter().for_each(|bi| {
+            let o0 = bi * block;
+            let n = (out_dim - o0).min(block);
+            // SAFETY: each task writes the disjoint output columns `[o0, o0+n)`
+            // of every `y` row and reads only `x`/`weight`; the raw addresses
+            // recapture the slices rayon cannot borrow for the strided output.
+            unsafe {
+                let x_ptr = x_addr as *const f32;
+                let w_ptr = (w_addr as *const f32).add(o0);
+                let y_ptr = (y_addr as *mut f32).add(length * o0);
+                matrixmultiply::sgemm(
+                    length,
+                    in_dim,
+                    n,
+                    1.0,
+                    x_ptr,
+                    1,
+                    length as isize,
+                    w_ptr,
+                    out_dim as isize,
+                    1,
+                    0.0,
+                    y_ptr,
+                    1,
+                    length as isize,
+                );
+            }
+        });
+    } else {
+        // SAFETY: the slices are validated by the debug assertions; the strides
+        // describe exactly those shapes.
+        unsafe {
+            matrixmultiply::sgemm(
+                length,
+                in_dim,
+                out_dim,
+                1.0,
+                x.as_ptr(),
+                1,
+                length as isize,
+                weight.as_ptr(),
+                out_dim as isize,
+                1,
+                0.0,
+                y.as_mut_ptr(),
+                1,
+                length as isize,
+            );
+        }
+    }
+}
+
 /// Allocating `y = x · weightᵀ`; see [`input_mul_weight_transpose_add_into`].
 pub fn input_mul_weight_transpose(
     x: &[f32],

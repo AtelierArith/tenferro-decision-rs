@@ -19,6 +19,7 @@ tenferro-tensor.workspace = true
 tenferro-infer.workspace = true
 tenferro-cpu.workspace = true
 tenferro-gated-delta = { path = "../tenferro-gated-delta" }
+tenferro-ext.workspace = true
 
 [dev-dependencies]
 hf-fetch.workspace = true

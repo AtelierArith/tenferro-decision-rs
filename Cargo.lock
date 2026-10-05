@@ -1076,6 +1076,7 @@ dependencies = [
  "serde_json",
  "tenferro-ad",
  "tenferro-cpu",
+ "tenferro-ext",
  "tenferro-gated-delta",
  "tenferro-infer",
  "tenferro-tensor",
