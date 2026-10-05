@@ -106,10 +106,14 @@ The host forwards remain the correctness oracle.
 ## `GatedDelta` extension op
 
 Making the extension op execute through tenferro session ops is **not feasible**
-with the current extension API: `execute_in_session` receives only a
-`&mut dyn BackendSession`, and `ExtensionExecutionContext` exposes just the
-backend and caches — no tensor-op helpers (`dot_general`, `triangular_solve`,
-…). The op therefore keeps its CPU fused kernel.
+with the current extension API, but for a narrower reason than first recorded:
+`execute_in_session` receives `&mut dyn BackendSession`, which *does* expose the
+raw tensor ops (`TensorBackendOps`, including `dot_general`, elementwise,
+structural, reduction). What is out of reach is **linalg** — `triangular_solve`
+/ `solve` live on `EagerSessionLinalgExt` (an eager-session trait), not on
+`BackendSession` — and the composed `tenferro-infer` primitives (norm /
+attention / RoPE). The chunked scan needs a solve, so the op keeps its CPU fused
+kernel (tracked as tensor4all/tenferro-rs#2005).
 
 Because the host recurrent kernel is faster than the tensor-native chunked scan
 on CPU (measured ~1.8× on the layer; see `bench_delta_paths`), the Jeff tenferro

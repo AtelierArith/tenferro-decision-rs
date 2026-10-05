@@ -19,6 +19,7 @@ against revision `471c4278` (workspace version `0.7.1`).
 | [#1975](https://github.com/tensor4all/tenferro-rs/issues/1975) | Add `sigmoid` / `silu` / `softplus` / `gelu` convenience ops |
 | [#1976](https://github.com/tensor4all/tenferro-rs/issues/1976) | Add `argmax` / `reduce_mean` / `softmax` / `log_softmax` |
 | [#1977](https://github.com/tensor4all/tenferro-rs/issues/1977) | Add a depthwise causal `conv1d` op |
+| [#2006](https://github.com/tensor4all/tenferro-rs/issues/2006) | Add fused CPU `layer_norm` / `rms_norm` ops (the eager form is ~10 composed ops) |
 
 ## dtype / backend coverage
 
@@ -38,6 +39,7 @@ against revision `471c4278` (workspace version `0.7.1`).
 | [#1984](https://github.com/tensor4all/tenferro-rs/issues/1984) | `from_vec_col_major` silently reinterprets row-major data |
 | [#1985](https://github.com/tensor4all/tenferro-rs/issues/1985) | `reduce_sum_squares` axes argument differs from other reductions |
 | [#1986](https://github.com/tensor4all/tenferro-rs/issues/1986) | `constant_from` vs `constant_from_host` naming is ambiguous |
+| [#2005](https://github.com/tensor4all/tenferro-rs/issues/2005) | Extension ops reach `dot_general` via `BackendSession` but not linalg/composed primitives, so a tensor-native fused op cannot solve (revises the note in `23_TENFERRO_NATIVE.md`) |
 
 ## Performance
 
@@ -47,6 +49,7 @@ against revision `471c4278` (workspace version `0.7.1`).
 | [#1992](https://github.com/tensor4all/tenferro-rs/issues/1992) | CPU eager `dot_general`: GEMM analysis recomputed per call (no plan cache) and the BLAS provider cannot execute linalg | medium |
 | [#1995](https://github.com/tensor4all/tenferro-rs/issues/1995) | CPU eager decode forward: small-`m` GEMMs (faer) and internal layout copies (`structural::typed_copy_into_uninit`) dominate; GEMM providers are shape-dependent | medium |
 | [#2003](https://github.com/tensor4all/tenferro-rs/issues/2003) | CPU eager `dot_general` is ~2.3× a plain host GEMM at decode (per-call overhead 1.7× over raw faer + faer-vs-`sgemm` kernel choice); no eager provider selection | medium |
+| [#2007](https://github.com/tensor4all/tenferro-rs/issues/2007) | `triangular_solve` / `solve` are rank-2 only (no batch dims), forcing per-batch eager loops | medium |
 
 MWE and benchmark for #1990:
 
