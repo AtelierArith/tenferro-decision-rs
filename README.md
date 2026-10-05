@@ -176,6 +176,103 @@ selects the tenferro-native forward for backend portability, and
 `engine.logits(&prepared)?` exposes the raw per-row readout logits behind the
 typed answers.
 
+## Benchmarks
+
+CPU comparison against the Julia reference implementations
+(`extern/JeffClient.jl` and `extern/Laya.jl`), driven by
+[`tools/bench_compare.sh`](tools/bench_compare.sh). Measured on an Apple M4
+(10 cores, macOS 26, Julia 1.13.1, rustc 1.99.0, release build):
+
+- 8 threads on both sides: Julia `-t 8`, Rust `RAYON_NUM_THREADS=8`.
+- Median of 10 iterations after 3 warm-ups, taken as the best of two rounds run
+  in opposite order from a cooled machine. The fanless M4 Air throttles under
+  sustained load, so absolute milliseconds drift between sessions; ratios are
+  more stable than the times.
+- Same prepared inputs on both sides; model loading is measured separately.
+- Julia **Jeff** runs on Apple **Accelerate** already (`QwenDecisionCore` pulls
+  `AppleAccelerate` in as a hard dependency; `cpu_settings().accelerate == true`)
+  with the chunked DeltaNet (`delta_chunk_size = 64`). Julia **Laya**'s default
+  `CPUBackend` is OpenBLAS; the number below is its explicit `AccelerateBackend`
+  fast path (`tools/bench_laya_real_accelerate.jl`).
+
+### Jeff
+
+Checkpoint `mstrasser/Jeff-Qwen3.5-0.8B`. Rust "oracle" is the correctness
+reference (`forward_reference`); `host_opt` is the default optimized host
+forward.
+
+| length | Julia | Rust oracle | Rust host_opt | host_opt / Julia |
+|---:|---:|---:|---:|---:|
+| L8 | 67.0 ms | 60.9 ms | 63.7 ms | 0.95× |
+| L16 | 70.2 ms | 85.9 ms | 85.9 ms | 1.22× |
+| L64 | 126.2 ms | 282.5 ms | 227.6 ms | 1.80× |
+
+Rust host vs the tenferro-native forward at L8 (the tenferro path is timed only
+at the shortest sequence; `HostRecurrent` is the default fused recurrent
+DeltaNet extension op, `TensorNative` is tensor-only):
+
+| path | ms | vs host_opt | vs Julia |
+|---|---:|---:|---:|
+| Rust host_opt | 63.7 | 1.00× | 0.95× |
+| Rust tenferro `HostRecurrent` (cached) | 93.0 | 1.46× | 1.39× |
+| Rust tenferro `TensorNative` (cached) | 120.3 | 1.89× | 1.80× |
+| Rust tenferro `HostRecurrent` (fresh cache) | 1568.8 | 24.6× | 23.4× |
+
+### Laya
+
+Checkpoint `convaiinnovations/laya` (`1c5edc17`).
+
+| shape | Julia (Accelerate) | Rust host | host / Julia |
+|---|---:|---:|---:|
+| L8 B1 | 51.9 ms | 44.1 ms | 0.85× |
+| L64 B1 | 83.0 ms | 213.5 ms | 2.57× |
+| L8 B8 | 80.9 ms | 165.1 ms | 2.04× |
+
+Rust host vs the tenferro-native forward at L8 B1:
+
+| path | ms | vs host | vs Julia |
+|---|---:|---:|---:|
+| Rust host | 44.1 | 1.00× | 0.85× |
+| Rust tenferro (cached) | 61.0 | 1.38× | 1.18× |
+| Rust tenferro (fresh cache) | 249.8 | 5.66× | 4.81× |
+
+### Model load
+
+| model | Julia | Rust |
+|---|---:|---:|
+| Jeff | 2364 ms | 2619 ms |
+| Laya | 407 ms | 1224 ms |
+
+### Reading these numbers
+
+- On this Apple-silicon host, Julia's Accelerate-backed GEMMs (AMX) dominate
+  **Laya**: at L64 B1, 83 ms against Rust's 213 ms. Rust's row-blocked
+  `matrixmultiply` wins only the tiny L8 B1 decode (44 vs 52 ms).
+- **Jeff is close at short lengths** (Rust `host_opt` is at parity at L8,
+  0.95×) but the gap grows to 1.80× at L64, where Julia's chunked DeltaNet and
+  Accelerate GEMMs pull ahead of Rust's recurrent scan.
+- The **tenferro-native forward is 1.4–1.9× behind the Rust host path** with a
+  reused tensor cache; without caching it rebuilds every weight tensor per call
+  and is 4.8× (Laya) / 23.4× (Jeff) slower. `HostRecurrent` is faster than
+  `TensorNative`, so the `GatedDelta` extension op and `JeffEngine` default to
+  the host kernels (`JeffBackend::Auto`).
+- These are Apple-silicon numbers. The x86_64 picture is different (Julia's Laya
+  lead is smaller; Rust `host_opt` was at parity or ahead at L8/L16 for Jeff):
+  see
+  [`docs/agents/specs/docs/21_SPEED_COMPARISON.md`](docs/agents/specs/docs/21_SPEED_COMPARISON.md).
+
+Reproduce:
+
+```sh
+tools/bench_compare.sh --jeff <JEFF_CKPT_DIR> --laya <LAYA_CKPT_DIR> \
+    --threads 8 --warmup 3 --iters 10 --json /tmp/bench
+
+# Optional Apple-silicon Laya Accelerate run:
+ACC=$(mktemp -d)
+julia --project="$ACC" -e 'using Pkg; Pkg.develop(path="extern/Laya.jl"); Pkg.add("AppleAccelerate")'
+tools/bench_compare.sh --jeff <JEFF_CKPT_DIR> --laya <LAYA_CKPT_DIR> --acc-env "$ACC"
+```
+
 ## Building and testing
 
 ```sh
