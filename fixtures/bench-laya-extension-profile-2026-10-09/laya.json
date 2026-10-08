@@ -1,0 +1,263 @@
+{
+  "iters": 5,
+  "metadata": {
+    "arch": "x86_64",
+    "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+    "cpu_count": 16,
+    "git_rev": "4b0883550ca54201f8e24c5af7ab8746829493dc",
+    "os": "linux",
+    "profile": "release",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+    "target": "x86_64-unknown-linux-gnu",
+    "timestamp_unix": 1791478230
+  },
+  "rayon_threads": 8,
+  "rows": [
+    {
+      "batch": 1,
+      "host_ms": 86.603871,
+      "length": 8,
+      "tenferro_ms": 106.41102500000001,
+      "extension_family_ms": {
+        "layernorm": {
+          "samples": [
+            1.0810519999999997,
+            1.0568750000000002,
+            1.055875,
+            1.056897,
+            1.059699
+          ],
+          "median": 1.056897
+        },
+        "gemm": {
+          "samples": [
+            67.932273,
+            70.39016699999998,
+            63.094860000000025,
+            66.92178699999997,
+            64.41374199999998
+          ],
+          "median": 66.92178699999997
+        },
+        "laya_attention": {
+          "samples": [
+            0.886492,
+            0.9184320000000002,
+            0.8832009999999999,
+            0.9047260000000001,
+            0.8819049999999999
+          ],
+          "median": 0.886492
+        },
+        "geglu": {
+          "samples": [
+            1.7753609999999997,
+            1.7776959999999997,
+            1.6476830000000007,
+            1.7273999999999998,
+            1.7026629999999998
+          ],
+          "median": 1.7273999999999998
+        },
+        "gemm_bias": {
+          "samples": [
+            5.6133049999999995,
+            4.862093,
+            4.859759999999999,
+            4.779140000000001,
+            4.9197690000000005
+          ],
+          "median": 4.862093
+        }
+      }
+    },
+    {
+      "batch": 1,
+      "host_ms": 98.696102,
+      "length": 16,
+      "tenferro_ms": 109.825324,
+      "extension_family_ms": {
+        "layernorm": {
+          "samples": [
+            2.0304340000000005,
+            2.011799,
+            2.021406,
+            2.0261869999999993,
+            2.006468
+          ],
+          "median": 2.021406
+        },
+        "gemm": {
+          "samples": [
+            65.17046299999998,
+            64.63329499999999,
+            68.34556500000001,
+            68.44676199999999,
+            65.35637100000001
+          ],
+          "median": 65.35637100000001
+        },
+        "laya_attention": {
+          "samples": [
+            1.5428180000000002,
+            1.540038,
+            1.6395849999999998,
+            1.6250109999999998,
+            1.577647
+          ],
+          "median": 1.577647
+        },
+        "geglu": {
+          "samples": [
+            2.712506,
+            2.727503,
+            2.8502549999999998,
+            2.663123,
+            2.7012559999999994
+          ],
+          "median": 2.712506
+        },
+        "gemm_bias": {
+          "samples": [
+            5.190367,
+            5.858377999999998,
+            5.155912,
+            5.10071,
+            5.181983000000001
+          ],
+          "median": 5.181983000000001
+        }
+      }
+    },
+    {
+      "batch": 1,
+      "host_ms": 339.47475199999997,
+      "length": 64,
+      "tenferro_ms": 200.192369,
+      "extension_family_ms": {
+        "layernorm": {
+          "samples": [
+            8.139456,
+            8.057524,
+            8.085391,
+            8.120922,
+            8.106409000000001
+          ],
+          "median": 8.106409000000001
+        },
+        "gemm": {
+          "samples": [
+            109.92228100000005,
+            122.783387,
+            117.87826099999995,
+            126.66826499999999,
+            112.31340800000007
+          ],
+          "median": 117.87826099999995
+        },
+        "laya_attention": {
+          "samples": [
+            12.825163,
+            14.640702000000001,
+            13.969691000000001,
+            15.466200999999998,
+            13.112366
+          ],
+          "median": 13.969691000000001
+        },
+        "geglu": {
+          "samples": [
+            8.879512,
+            9.204117,
+            9.110146,
+            9.505196000000002,
+            8.903577
+          ],
+          "median": 9.110146
+        },
+        "gemm_bias": {
+          "samples": [
+            10.107491,
+            9.207886000000002,
+            9.423099,
+            9.148264999999999,
+            9.19893
+          ],
+          "median": 9.207886000000002
+        }
+      }
+    },
+    {
+      "batch": 8,
+      "host_ms": 234.554767,
+      "length": 8,
+      "tenferro_ms": 184.79310199999998,
+      "extension_family_ms": {
+        "layernorm": {
+          "samples": [
+            8.005790000000003,
+            8.047286,
+            7.967573,
+            7.974376000000001,
+            8.062885000000001
+          ],
+          "median": 8.005790000000003
+        },
+        "gemm": {
+          "samples": [
+            112.61191100000003,
+            109.71674499999996,
+            111.60649400000003,
+            116.58050899999998,
+            113.33969699999994
+          ],
+          "median": 112.61191100000003
+        },
+        "laya_attention": {
+          "samples": [
+            3.2453369999999993,
+            3.219015,
+            3.2164230000000003,
+            3.2688159999999997,
+            3.259045000000001
+          ],
+          "median": 3.2453369999999993
+        },
+        "geglu": {
+          "samples": [
+            8.728302000000001,
+            8.679158,
+            8.762816000000003,
+            8.944170999999999,
+            8.839115000000001
+          ],
+          "median": 8.762816000000003
+        },
+        "gemm_bias": {
+          "samples": [
+            9.411451,
+            9.397064999999998,
+            12.333040000000002,
+            9.302841999999998,
+            9.299657000000002
+          ],
+          "median": 9.397064999999998
+        }
+      }
+    }
+  ],
+  "warmup": 2,
+  "method": {
+    "instrumentation": "Temporary Instant at execute_*_in_session entry in gemm, gemm_bias, layernorm, geglu and laya_attention; elapsed emitted immediately before output Tensor construction. Source restored after measurement.",
+    "ops_per_forward": 244,
+    "samples": "Each forward sums family execution intervals; first two forwards per shape discarded, medians from five measured forwards.",
+    "limitations": [
+      "Instrumentation adds timer and stderr overhead; not an uninstrumented speed comparison.",
+      "Intervals include extension input handling, output allocation and kernel execution, but exclude final Tensor construction and outer eager dispatch.",
+      "Independent family medians need not sum to the forward median.",
+      "No sampling profile: perf_event_paranoid=4 prevents perf recording."
+    ],
+    "cpu": "AMD Ryzen 9 PRO 8945HS",
+    "dtype": "f32"
+  }
+}

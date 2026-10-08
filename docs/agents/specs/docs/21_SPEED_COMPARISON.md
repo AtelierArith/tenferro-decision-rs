@@ -300,3 +300,27 @@ These runs show no observed slowdown relative to the historical portable
 225.0/216.6 ms L64/batch report, but do not isolate the registration changes:
 the host oracle also ran faster, and no contemporaneous old-revision baseline
 was measured. The Python/Julia Laya gap remains unresolved.
+
+### Laya extension execution profile (2026-10-09)
+
+At `4b08835`, temporary `Instant` instrumentation measured the five CPU
+extension families on the same production checkpoint, portable provider,
+eight Rayon threads, two warmups and five measured forwards. The source was
+restored after measurement. Each sample sums intervals within one family for
+one forward; the table reports independent medians in milliseconds.
+
+| shape | forward | GEMM | biased GEMM | LayerNorm | GeGLU | attention |
+|---|---:|---:|---:|---:|---:|---:|
+| L8 B1 | 106.4 | 66.9 | 4.9 | 1.1 | 1.7 | 0.9 |
+| L16 B1 | 109.8 | 65.4 | 5.2 | 2.0 | 2.7 | 1.6 |
+| L64 B1 | 200.2 | 117.9 | 9.2 | 8.1 | 9.1 | 14.0 |
+| L8 B8 | 184.8 | 112.6 | 9.4 | 8.0 | 8.8 | 3.2 |
+
+Projection execution remains the largest measured component. Family intervals
+include input handling, output allocation and kernel execution, but exclude
+final output Tensor construction and outer eager dispatch. Independent medians
+cannot be subtracted to precisely attribute the remaining time. Timers and
+stderr emission add overhead, so these are diagnostic results, not a new
+uninstrumented speed comparison. Kernel sampling was unavailable because
+`perf_event_paranoid=4`. Raw per-family samples, metadata and method are in
+[`laya.json`](../../../../fixtures/bench-laya-extension-profile-2026-10-09/laya.json).
