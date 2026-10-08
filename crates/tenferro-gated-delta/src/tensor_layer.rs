@@ -133,7 +133,7 @@ fn scalar(session: &mut EagerSession<'_>, value: f32) -> AdResult<EagerTensor> {
 }
 
 /// `y = weightᵀ x` for `x (in, L)` and prepared `weight (in, out)`.
-fn linear_col(
+pub(crate) fn linear_col(
     session: &mut EagerSession<'_>,
     x: &EagerTensor,
     weight: &EagerTensor,

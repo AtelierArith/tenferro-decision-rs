@@ -25,6 +25,8 @@ pub mod config;
 pub mod conv;
 #[cfg(feature = "cuda")]
 pub mod cuda;
+#[cfg(feature = "cuda")]
+pub mod cuda_layer;
 pub mod extension;
 pub mod layer;
 pub mod ops;

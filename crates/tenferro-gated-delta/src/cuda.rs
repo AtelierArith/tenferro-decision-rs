@@ -1,7 +1,8 @@
 //! Raw CUDA stages for a device-resident Gated DeltaNet pipeline.
 //!
 //! This is the low-level kernel component, not an enabled layer backend.
-//! The full layer adapter, chunked large-key path and device parity are pending.
+//! An explicit recurrent layer prototype is in [`crate::cuda_layer`].
+//! Production dispatch, persistent workspaces and device parity are pending.
 //! Plan resolution continues to reject CUDA until those are implemented.
 
 use tenferro_gpu::cuda::raw::{Function, Module, NvrtcOptions, Session};

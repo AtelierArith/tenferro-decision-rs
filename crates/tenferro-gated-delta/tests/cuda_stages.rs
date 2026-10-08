@@ -576,6 +576,16 @@ fn cuda_decay_preparation_feeds_native_large_key_scan_on_one_session() {
 #[test]
 #[ignore = "requires CUDA hardware, cuBLAS and cuTENSOR; run explicitly with --ignored"]
 fn native_full_layer_matches_cpu_with_masks_grouping_and_large_keys() {
+    full_layer_gpu_parity(false);
+}
+
+#[test]
+#[ignore = "requires CUDA hardware, NVRTC, cuBLAS and cuTENSOR; run explicitly with --ignored"]
+fn raw_recurrent_full_layer_matches_cpu_and_reuses_module() {
+    full_layer_gpu_parity(true);
+}
+
+fn full_layer_gpu_parity(raw_recurrent: bool) {
     use tenferro_gated_delta::{
         Algorithm, GatedDeltaConfig, GatedDeltaWeights, delta_layer_reference,
         delta_layer_tenferro_prepared_mask, prepare_tensor_weights,
@@ -584,10 +594,19 @@ fn native_full_layer_matches_cpu_with_masks_grouping_and_large_keys() {
 
     let backend = CudaBackend::new(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
     let runtime = tenferro_ad::EagerRuntime::with_cuda_backend(backend.clone()).unwrap();
-    for (kd, kh, vh, lengths) in [
-        (7, 2, 4, vec![1usize, 63, 64, 65, 127, 128, 129]),
-        (257, 1, 2, vec![1usize, 63, 64, 65]),
-    ] {
+    let cases = if raw_recurrent {
+        vec![
+            (1, 1, 1, vec![1usize, 63, 64, 65]),
+            (7, 2, 4, vec![1usize, 63, 64, 65, 127, 128, 129]),
+            (256, 1, 2, vec![1usize, 63, 64, 65]),
+        ]
+    } else {
+        vec![
+            (7, 2, 4, vec![1usize, 63, 64, 65, 127, 128, 129]),
+            (257, 1, 2, vec![1usize, 63, 64, 65]),
+        ]
+    };
+    for (kd, kh, vh, lengths) in cases {
         let cfg = GatedDeltaConfig {
             hidden: 4,
             key_dim: kd,
@@ -647,9 +666,27 @@ fn native_full_layer_matches_cpu_with_masks_grouping_and_large_keys() {
                         )?)?;
                         let mask = session
                             .constant_from_host(Tensor::from_vec_col_major(vec![length], mask)?)?;
-                        let result = delta_layer_tenferro_prepared_mask(
-                            session, &cfg, &prepared, &x, &mask,
-                        )?;
+                        let result = if raw_recurrent {
+                            use tenferro_gated_delta::cuda_layer::delta_layer_cuda_recurrent;
+                            let arch = std::env::var("TENFERRO_CUDA_ARCH")
+                                .unwrap_or_else(|_| "compute_70".into());
+                            let kernels =
+                                with_cuda_exec_session(session.backend_session(), |cuda| {
+                                    cuda.with_raw("cuda_full_layer_compile", |raw| {
+                                        CudaKernels::compile(raw, &arch)
+                                    })
+                                })
+                                .expect("CUDA execution session")?;
+                            let (kernels, _) = delta_layer_cuda_recurrent(
+                                session, &cfg, &prepared, &x, &mask, kernels,
+                            )?;
+                            let (_, result) = delta_layer_cuda_recurrent(
+                                session, &cfg, &prepared, &x, &mask, kernels,
+                            )?;
+                            result
+                        } else {
+                            delta_layer_tenferro_prepared_mask(session, &cfg, &prepared, &x, &mask)?
+                        };
                         let result = session.duplicate_value(&result)?;
                         assert!(
                             result.is_backend_buffer(),

@@ -357,6 +357,21 @@ must ensure disjoint underlying allocations and retain all buffers/module
 until successful stream synchronization, including when a later launch
 fails. A safe full-layer execution owner and hardware parity remain pending.
 
+The explicit `cuda_layer::delta_layer_cuda_recurrent` prototype composes
+prepared tenferro projections and masking with the three raw stages and a
+native tenferro output projection. It supports f32 recurrent geometry and
+returns the loaded module for reuse within the admitted callback. It performs
+no downloads or CPU fallback. This first adapter makes owning device copies
+of raw operands and allocates fresh workspaces each call, then synchronizes
+after the raw stages before registering their output. Persistent workspace
+caching and removing this intermediate barrier remain required. Normal CUDA
+plan resolution remains rejected until hardware parity and production resource
+integration are complete. The ignored
+`raw_recurrent_full_layer_matches_cpu_and_reuses_module` gate exercises the
+adapter twice with one loaded module, including masks, grouped heads, token
+boundaries and key widths 1/7/256; the native full-layer gate separately covers
+key width 257. Neither gate counts as parity without explicit hardware execution.
+
 `cuda::CudaStageRun` is a raw-session-scoped pending owner. Its unsafe
 `enqueue` takes the module, eight input tensors and three workspace tensors
 before launch; callers still guarantee disjoint allocations and no conflicting
