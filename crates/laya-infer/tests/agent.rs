@@ -269,3 +269,41 @@ fn rejects_prepared_states() {
     });
     assert!(engine.system_one(&state, &set).is_err());
 }
+
+#[test]
+fn collated_rows_match_single_rows_and_chunk_boundaries() {
+    let (_, mut batched) = engine("batched");
+    let (_, single) = engine("single");
+    let (_, chunked) = engine("chunked");
+    let mut single = single.with_batch_size(1).unwrap();
+    let mut chunked = chunked.with_batch_size(2).unwrap();
+    let mut questions = question_set();
+    questions
+        .push(
+            "pair",
+            Question::Choice(
+                ChoiceQuestion::new(
+                    Content::string("pick one first second third low mid high"),
+                    vec![
+                        ("a".into(), Content::string("first")),
+                        ("b".into(), Content::string("second")),
+                    ],
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+    let state = State::Text("hello world".into());
+    let expected = single.decide(&state, &questions).unwrap();
+    let together = batched.decide(&state, &questions).unwrap();
+    let chunks = chunked.decide(&state, &questions).unwrap();
+    assert_eq!(together.len(), 4);
+    for actual in [together, chunks] {
+        for (got, want) in actual.iter().zip(&expected) {
+            assert_eq!(got.answer, want.answer);
+            assert!((got.action_probability - want.action_probability).abs() <= 1e-4);
+        }
+    }
+    let (_, engine) = engine("zero");
+    assert!(engine.with_batch_size(0).is_err());
+}

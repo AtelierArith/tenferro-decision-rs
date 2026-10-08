@@ -5,12 +5,13 @@
 //! `[MASK]` marker positions), the ModernBERT + decision-head forward, and the
 //! Laya calibration and answer construction.
 //!
-//! Each question is answered as its own batch row (the prompt, marker count and
-//! question type differ per question), which keeps the forward free of
-//! cross-question padding and is bit-identical to the reference for a batch of
-//! one. [`State::Prepared`] is rejected: Laya is text/JSON only.
+//! Questions are collated into bounded padded batches, matching the Julia runtime.
+//! Marker masks preserve each row's option count. [`State::Prepared`] is
+//! rejected: Laya is text/JSON only.
 
-use decision_core::{Answer, DecisionEngine, DecisionError, Question, QuestionSet, Result, State};
+use decision_core::{
+    Answer, DecisionEngine, DecisionError, Question, QuestionId, QuestionSet, Result, State,
+};
 
 use std::path::Path;
 use std::sync::Arc;
@@ -24,7 +25,7 @@ use crate::calibration::{
 use crate::checkpoint::LayaCheckpoint;
 use crate::config::{AgentConfig, EncoderConfig};
 use crate::model::{LayaWeights, TensorCache, forward_tenferro_cached};
-use crate::prompt::build_sequence;
+use crate::prompt::{Tokenizer, build_sequence};
 use crate::tokenizer::BpeTokenizer;
 
 /// A fully loaded Laya engine.
@@ -35,6 +36,7 @@ pub struct LayaEngine {
     weights: LayaWeights,
     tokenizer: BpeTokenizer,
     calibration: Calibration,
+    batch_size: usize,
     /// The tenferro runtime the production forward runs on (CPU today).
     runtime: Arc<EagerRuntime>,
     /// Weight tensors cached across forwards (see [`TensorCache`]).
@@ -59,6 +61,7 @@ impl LayaEngine {
             weights,
             tokenizer,
             calibration,
+            batch_size: 16,
             runtime,
             cache: TensorCache::new(),
         })
@@ -111,6 +114,18 @@ impl LayaEngine {
         Self::load(directory)
     }
 
+    /// Set the maximum number of question rows per forward (default: 16).
+    pub fn with_batch_size(mut self, batch_size: usize) -> Result<Self> {
+        if batch_size == 0 {
+            return Err(DecisionError::invalid_field(
+                "laya.batch_size",
+                "must be positive",
+            ));
+        }
+        self.batch_size = batch_size;
+        Ok(self)
+    }
+
     /// The encoder configuration.
     pub fn encoder(&self) -> &EncoderConfig {
         &self.encoder
@@ -140,39 +155,59 @@ impl LayaEngine {
     pub fn decide(&mut self, state: &State, questions: &QuestionSet) -> Result<Vec<LayaDecision>> {
         state.validate()?;
         questions.validate()?;
-        questions
-            .questions()
-            .iter()
-            .map(|(_, question)| self.decide_one(state, question))
-            .collect()
+        let mut answers = Vec::with_capacity(questions.len());
+        for chunk in questions.questions().chunks(self.batch_size) {
+            answers.extend(self.decide_batch(state, chunk)?);
+        }
+        Ok(answers)
     }
 
-    /// Answer one question for the whole state.
-    fn decide_one(&mut self, state: &State, question: &Question) -> Result<LayaDecision> {
-        let (ids, markers) = build_sequence(
-            &self.tokenizer,
-            state,
-            question,
-            self.agent.max_len,
-            self.agent.head_max_len,
-        )?;
-        if markers.is_empty() {
-            return Err(DecisionError::invalid_field(
-                "laya.markers",
-                "the prompt produced no marker positions",
-            ));
+    fn decide_batch(
+        &mut self,
+        state: &State,
+        questions: &[(QuestionId, Question)],
+    ) -> Result<Vec<LayaDecision>> {
+        let rows = questions
+            .iter()
+            .map(|(_, question)| {
+                let (ids, markers) = build_sequence(
+                    &self.tokenizer,
+                    state,
+                    question,
+                    self.agent.max_len,
+                    self.agent.head_max_len,
+                )?;
+                let expected = match question {
+                    Question::Choice(q) => q.criteria.len(),
+                    Question::Score(q) => q.criteria.len(),
+                    Question::Noul(_) => 2,
+                };
+                if markers.len() != expected {
+                    return Err(DecisionError::invalid_field(
+                        "laya.markers",
+                        "the token budget did not preserve every option marker",
+                    ));
+                }
+                Ok((ids, markers, question_type(question)))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let batch = rows.len();
+        let length = rows.iter().map(|row| row.0.len()).max().unwrap();
+        let slots = rows.iter().map(|row| row.1.len()).max().unwrap().max(2);
+        let mut ids = vec![self.tokenizer.pad_token_id(); length * batch];
+        let mut mask = vec![false; length * batch];
+        let mut marker_pos = vec![0; slots * batch];
+        let mut marker_mask = vec![false; slots * batch];
+        let mut qtypes = Vec::with_capacity(batch);
+        for (row, (tokens, markers, qtype)) in rows.iter().enumerate() {
+            ids[row * length..row * length + tokens.len()].copy_from_slice(tokens);
+            mask[row * length..row * length + tokens.len()].fill(true);
+            for (slot, position) in markers.iter().enumerate() {
+                marker_pos[row * slots + slot] = *position as i64;
+                marker_mask[row * slots + slot] = true;
+            }
+            qtypes.push(qtype.index() as i64);
         }
-        let used = markers.len();
-        // The runtime pads to at least two marker slots for one-option choices.
-        let slots = used.max(2);
-        let mut marker_pos = vec![0_i64; slots];
-        let mut marker_mask = vec![false; slots];
-        for (slot, position) in markers.iter().enumerate() {
-            marker_pos[slot] = *position as i64;
-            marker_mask[slot] = true;
-        }
-        let mask = vec![true; ids.len()];
-        let qtype = question_type(question);
         let (logits, action) = self
             .runtime
             .with_eager_session(|session| {
@@ -186,26 +221,42 @@ impl LayaEngine {
                     &mask,
                     &marker_pos,
                     &marker_mask,
-                    &[qtype.index() as i64],
+                    &qtypes,
                 )
             })
             .map_err(forward_error)?
             .map_err(forward_error)?;
-
-        let active: Vec<f64> = logits
-            .get(..used)
-            .ok_or_else(|| {
-                DecisionError::invalid_field(
-                    "laya.logits",
-                    format!(
-                        "forward returned {} slots but the prompt needs {used}",
-                        logits.len()
-                    ),
-                )
-            })?
+        let action_count = self.agent.action_count();
+        if logits.len() != slots * batch || action.len() != action_count * batch {
+            return Err(DecisionError::invalid_field(
+                "laya.forward",
+                "unexpected batched output shape",
+            ));
+        }
+        questions
             .iter()
-            .map(|value| f64::from(*value))
-            .collect();
+            .enumerate()
+            .map(|(row, (_, question))| {
+                let used = rows[row].1.len();
+                self.answer(
+                    question,
+                    rows[row].2,
+                    &logits[row * slots..row * slots + used],
+                    &action[row * action_count..(row + 1) * action_count],
+                )
+            })
+            .collect()
+    }
+
+    fn answer(
+        &self,
+        question: &Question,
+        qtype: QType,
+        logits: &[f32],
+        action: &[f32],
+    ) -> Result<LayaDecision> {
+        let used = logits.len();
+        let active: Vec<f64> = logits.iter().map(|value| f64::from(*value)).collect();
         let probabilities = self.calibration.probabilities(qtype, used, &active);
         let answer = match question {
             Question::Choice(question) => {

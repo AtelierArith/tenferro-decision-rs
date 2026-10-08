@@ -130,8 +130,20 @@ bundled webpki roots).
   `TensorCache` (from `tenferro-infer`) so weights are not rebuilt per call;
   `LayaEngine` runs this cached tenferro path (160 ms vs 216 ms host at L8B1).
   `tests/model.rs` checks cache-reuse parity.
-- Remaining: production `system_one`/`predict` answer parity (prompt rendering +
-  calibration end to end). See `23_TENFERRO_NATIVE.md`.
+- Production answer parity (2026-10-08): `tests/production_answers.rs` compares
+  the upstream bundled email state/questions against Julia `prepare`, `collate`,
+  `DecisionModel`, and `predict`. Token ids and markers match exactly; batched
+  logits and action-head outputs match within floating-point tolerances;
+  choice/score/noul answers, calibration, and action probabilities match to
+  `2e-4` (the Julia answers are rounded to four decimals). The captured action
+  probabilities are saturated at 1, so the test also compares the raw action
+  logits to verify the trained head. The test skips when the pinned checkpoint
+  or `fixtures/laya-real/answers.json` capture is absent; regenerate with
+  `tools/gen_laya_answers.jl`.
+- `LayaEngine` now collates questions into padded tenferro batches with marker
+  masks, bounded to 16 rows per forward by default. `with_batch_size` controls
+  the limit; synthetic regression tests compare batched and chunked execution
+  against individual rows. Prepared-token states remain unsupported.
 
 ### Phase 5 — `jeff-infer`
 
@@ -230,7 +242,7 @@ bundled webpki roots).
 
 | Area | Blocker |
 |---|---|
-| Laya numerical parity (Phase 2) | Tokenizer and forward (encoder + decision head) match `extern/Laya.jl` on the production `convaiinnovations/laya` checkpoint (logits `1.7e-6`); Jeff's forward matches `extern/JeffClient.jl` on `mstrasser/Jeff-Qwen3.5-0.8B` (`1.8e-5`). Full `system_one`/`predict` answer parity (prompt rendering + calibration) is not yet cross-checked. |
+| Laya numerical parity (Phase 2) | Tokenizer and forward (encoder + decision head) match `extern/Laya.jl` on the production `convaiinnovations/laya` checkpoint (logits `1.7e-6`); Jeff's forward matches `extern/JeffClient.jl` on `mstrasser/Jeff-Qwen3.5-0.8B` (`1.8e-5`). Production `system_one`/`predict` parity (prompt rendering + calibration) is verified on the bundled Laya email example; Jeff prepared-token answers match Julia `decide`. |
 | Phase 4 / 7 CUDA | No CUDA hardware here; code can be written but not validated. |
 | Phase 8 FP16/BF16 | Deferred by decision: tenferro's public dtype set lacks `F16`/`BF16` at the pinned revision. |
 | Phase 10 Apple GPU | tenferro's WebGPU surface is effectively `dot_general` (F32/C32) plus transpose; most primitives are missing. |
