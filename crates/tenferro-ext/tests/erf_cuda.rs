@@ -115,3 +115,50 @@ fn cuda_output_boundary_downloads_strided_retained_outputs() {
             .unwrap();
     }
 }
+
+#[test]
+#[ignore = "requires CUDA hardware; run explicitly with --ignored"]
+fn cuda_native_masks_select_without_bool_leaf_import() {
+    let backend = CudaBackend::new(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
+    let runtime = EagerRuntime::with_cuda_backend(backend).unwrap();
+    let mut retained = Vec::new();
+    for keep in [
+        [true, false, false, true, true, false],
+        [false; 6],
+        [true; 6],
+    ] {
+        let selected = runtime
+            .with_eager_session(|session| {
+                let mask = tenferro_infer::input::bool_tensor_native(session, vec![2, 3], &keep)?;
+                assert_eq!(mask.dtype(), tenferro_ad::DType::Bool);
+                let values = session.constant_from_host(Tensor::from_vec_col_major(
+                    vec![2, 3],
+                    vec![1.0f32, 2., 3., 4., 5., 6.],
+                )?)?;
+                let replacement = session
+                    .constant_from_host(Tensor::from_vec_col_major(vec![], vec![-100.0f32])?)?;
+                let selected = session.where_select(&mask, &values, &replacement)?;
+                session.transpose(&selected, &[1, 0])
+            })
+            .unwrap()
+            .unwrap();
+        retained.push((keep, selected));
+    }
+    for (keep, selected) in retained {
+        let output = runtime
+            .with_eager_session(|session| tenferro_infer::output::host_value(session, &selected))
+            .unwrap()
+            .unwrap();
+        let expected: Vec<f32> = [0usize, 2, 4, 1, 3, 5]
+            .into_iter()
+            .map(|index| {
+                if keep[index] {
+                    (index + 1) as f32
+                } else {
+                    -100.
+                }
+            })
+            .collect();
+        assert_eq!(output.as_slice::<f32>().unwrap(), expected);
+    }
+}

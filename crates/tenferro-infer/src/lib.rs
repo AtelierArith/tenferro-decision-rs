@@ -21,6 +21,7 @@ pub mod activation;
 pub mod attention;
 pub mod cache;
 pub mod embedding;
+pub mod input;
 pub mod linear;
 pub mod norm;
 pub mod output;

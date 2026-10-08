@@ -618,10 +618,14 @@ fn full_attention_tenferro(
                     col[r + c * length] = keep[r * length + c];
                 }
             }
-            session.constant_from_host(tenferro_ad::Tensor::from_vec_col_major(
-                vec![length, length],
-                col,
-            )?)?
+            if tenferro_ext::cpu_extensions_supported(session) {
+                session.constant_from_host(tenferro_ad::Tensor::from_vec_col_major(
+                    vec![length, length],
+                    col,
+                )?)?
+            } else {
+                tenferro_infer::input::bool_tensor_native(session, vec![length, length], &col)?
+            }
         };
         let attended =
             tenferro_infer::attention::attention(session, &q, &k, &v, Some(&mask_t), None)?;

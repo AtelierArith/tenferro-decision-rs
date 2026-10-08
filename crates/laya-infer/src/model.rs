@@ -1002,7 +1002,11 @@ fn tensor_bool(
     shape: Vec<usize>,
     data: &[bool],
 ) -> tenferro_ad::Result<EagerTensor> {
-    session.constant_from_host(Tensor::from_vec_col_major(shape, data.to_vec())?)
+    if tenferro_ext::cpu_extensions_supported(session) {
+        session.constant_from_host(Tensor::from_vec_col_major(shape, data.to_vec())?)
+    } else {
+        tenferro_infer::input::bool_tensor_native(session, shape, data)
+    }
 }
 
 /// Reusable weight-tensor cache for the eager session.

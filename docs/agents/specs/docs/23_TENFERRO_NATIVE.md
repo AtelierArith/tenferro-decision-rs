@@ -195,8 +195,8 @@ CUDA hardware; CPU tests and CUDA compilation do not prove device execution.
 
 This fixes the transfer mechanism, not the remaining model integration. Laya
 still computes marker pooling on the host and transfers that intermediate
-back for its action head. Its Bool mask imports also encounter a missing CUDA
-Bool materialization primitive at the pinned revision. Jeff's explicitly
+back for its action head. The pinned revision lacks CUDA Bool leaf materialization; the numeric-mask
+construction described below avoids importing a Bool leaf. Jeff's explicitly
 selected host recurrent path has intermediate host reads; use the native path
 for device computation. GPU engine admission and raw CUDA request integration
 remain separate work. Full GPU model parity and latency remain unverified.
@@ -205,3 +205,24 @@ Validation: workspace tests and both ordinary/CUDA-feature workspace Clippy
 passed. The actual Laya Julia question/action reference test passed in release
 (11.01 seconds). Explicitly running the CUDA output gate failed before any
 tensor computation because `libcuda` is absent; device parity is unverified.
+
+
+## Native Bool mask construction (2026-10-09)
+
+`tenferro-infer::input::bool_tensor_native` uploads masks as F32 zero/one
+values and obtains a backend Bool tensor with `compare(..., zero, Gt)`.
+This avoids the pinned CUDA eager Bool-leaf materialization gap. Laya and
+Jeff attention use it on non-CPU sessions; CPU sessions retain direct Bool
+imports, avoiding additional conversion/allocation work in current inference.
+No failed Bool import is caught or silently retried on the host.
+
+CPU tests cover mixed/all-true/all-false column-major masks, selection,
+transposed retained outputs, multiple requests, scalar masks and shape errors.
+The ignored CUDA regression `cuda_native_masks_select_without_bool_leaf_import`
+checks device comparison and selection before downloading the resulting F32
+outputs. This is implementation and CPU evidence; GPU execution still requires
+hardware validation and does not establish complete GPU model integration.
+
+Validation: workspace tests (including the actual Laya production reference)
+and ordinary/CUDA-feature workspace Clippy passed. The explicit native-mask
+CUDA gate failed before computation because `libcuda` is absent.
