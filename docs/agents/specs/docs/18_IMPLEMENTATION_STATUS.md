@@ -165,6 +165,14 @@ bundled webpki roots).
   `NativeBackend` logits to `1.8e-5` (scale ~10). `tests/real_checkpoint.rs` is
   `#[ignore]`d (it runs the full 0.8B forward):
   `cargo test --release -p jeff-infer --test real_checkpoint -- --ignored`.
+  The same production reference also records Julia `decide` answers for
+  choice/noul/score, including an interior mask hole and left padding.
+  `engine_answers_match_production_julia_decide` verifies the production
+  temperature, chosen labels, probabilities, confidence, score, and legend
+  through `JeffEngine::system_one` (absolute answer tolerance `2e-4`). Both
+  ignored acceptance tests were run successfully on 2026-10-08. Production
+  Julia/Rust timings and the original Python comparison are recorded in
+  `21_SPEED_COMPARISON.md`.
 - Backend choice: `JeffEngine` defaults to `JeffBackend::Host` (the fused
   CPU-competitive forward) and offers `JeffBackend::Tenferro` for backend
   portability. The tenferro path uses `forward_tenferro_cached` plus the

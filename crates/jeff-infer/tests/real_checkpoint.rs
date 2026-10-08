@@ -93,3 +93,135 @@ fn forward_matches_production_reference() {
         "host-opt logits differ from the oracle by {opt_diff} (scale {scale})"
     );
 }
+
+#[test]
+#[ignore = "loads the ~1.7 GB production Jeff checkpoint; run with --release -- --ignored"]
+fn engine_answers_match_production_julia_decide() {
+    use decision_core::{
+        Answer, ChoiceQuestion, Content, DecisionEngine, NoulCriteria, NoulQuestion, PreparedState,
+        Question, QuestionSet, ScoreQuestion, State,
+    };
+    use jeff_infer::engine::JeffEngine;
+    let Some((dir, reference)) = available() else {
+        eprintln!("skipping: production Jeff checkpoint or reference is not present");
+        return;
+    };
+    let cases = reference["answer_cases"]
+        .as_array()
+        .expect("regenerate the Julia reference to include decide answers");
+    assert_eq!(cases.len(), 3);
+    let checkpoint = load_checkpoint(&dir).unwrap();
+    assert_eq!(
+        checkpoint.decision.temperature,
+        reference["temperature"].as_f64().unwrap()
+    );
+    let mut engine =
+        JeffEngine::new(checkpoint.config, checkpoint.decision, checkpoint.weights).unwrap();
+    let mut questions = QuestionSet::new();
+    questions
+        .push(
+            "choice",
+            Question::Choice(
+                ChoiceQuestion::new(
+                    Content::string("prepared-token question"),
+                    vec![
+                        ("a".into(), Content::string("first")),
+                        ("b".into(), Content::string("second")),
+                        ("c".into(), Content::string("third")),
+                    ],
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+    questions
+        .push(
+            "noul",
+            Question::Noul(
+                NoulQuestion::new(
+                    Content::string("prepared-token question"),
+                    NoulCriteria {
+                        truthy: Some(Content::string("true")),
+                        falsy: Some(Content::string("false")),
+                    },
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+    questions
+        .push(
+            "score",
+            Question::Score(
+                ScoreQuestion::new(
+                    Content::string("prepared-token question"),
+                    vec!["low".into(), "middle".into(), "high".into()],
+                )
+                .unwrap(),
+            ),
+        )
+        .unwrap();
+    let prepared = PreparedState {
+        input_ids: cases
+            .iter()
+            .map(|case| {
+                case["input_ids"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_i64().unwrap())
+                    .collect()
+            })
+            .collect(),
+        attention_mask: cases
+            .iter()
+            .map(|case| {
+                case["attention_mask"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_i64().unwrap() != 0)
+                    .collect()
+            })
+            .collect(),
+    };
+    let answers = engine
+        .system_one(&State::Prepared(prepared), &questions)
+        .unwrap();
+    let close = |got: f64, expected: &serde_json::Value| {
+        let expected = expected.as_f64().unwrap();
+        assert!(
+            (got - expected).abs() < 2e-4,
+            "answer mismatch: Rust {got}, Julia {expected}"
+        );
+    };
+    for (answer, case) in answers.iter().zip(cases) {
+        let expected = &case["answer"];
+        match answer {
+            Answer::Choice(answer) => {
+                assert_eq!(expected["type"], "choice");
+                assert_eq!(answer.choice, expected["choice"].as_str().unwrap());
+                close(answer.confidence, &expected["confidence"]);
+                for (label, probability) in &answer.probabilities {
+                    close(*probability, &expected["probabilities"][label]);
+                }
+            }
+            Answer::Noul(answer) => {
+                assert_eq!(expected["type"], "noul");
+                close(answer.noul, &expected["noul"]);
+            }
+            Answer::Score(answer) => {
+                assert_eq!(expected["type"], "score");
+                close(answer.score, &expected["score"]);
+                close(answer.confidence, &expected["confidence"]);
+                for (i, (level, probability)) in
+                    answer.legend.iter().zip(&answer.probabilities).enumerate()
+                {
+                    let key = i.to_string();
+                    assert_eq!(level, expected["legend"][&key].as_str().unwrap());
+                    close(*probability, &expected["probabilities"][&key]);
+                }
+            }
+        }
+    }
+}
