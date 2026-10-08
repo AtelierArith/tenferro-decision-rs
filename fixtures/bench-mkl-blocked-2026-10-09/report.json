@@ -1,0 +1,17 @@
+{
+  "base_revision": "c24d9bf",
+  "decision": "Rejected as production implementation: still slower than Python and about 19 GiB process RSS. No MKL packed provider retained in production.",
+  "configuration": {
+    "dtype": "F32",
+    "rayon_threads": 8,
+    "mkl_threads_per_worker": 1,
+    "model_warmup": 5,
+    "model_iterations": 15,
+    "token_tile": 32,
+    "output_block": "192 for wide outputs; 128 otherwise"
+  },
+  "accuracy": "Unpacked host reference kept disabled for the diagnostic provider. Both logits and action outputs checked at 2e-3 + abs(reference)*2e-5. Maximum difference 0.001220703125. Synthetic comparisons passed 1e-4 at rows 1/3/7/8/9/16/64/65.",
+  "measurement": "One full-model run: L8 B1 99.694 ms, L16 B1 107.390 ms, L64 B1 162.436 ms, L8 B8 159.583 ms. Not a repeated model speedup claim.",
+  "memory": "Observed process RSS 19034120 KiB during benchmark. Blocked library pack size greatly exceeds raw weights; reported in micro files.",
+  "reproduce": "Replay model_diagnostic.patch on base. Set LAYA_MKL_DIAGNOSTIC_LIBRARY to supplied MKL library; benchmark release with RAYON_NUM_THREADS=8, MKL_NUM_THREADS=1, OMP_NUM_THREADS=1, OMP_WAIT_POLICY=PASSIVE. Torch 2.14.1 CPU bundled MKL 2024.2 was used for diagnostics only."
+}

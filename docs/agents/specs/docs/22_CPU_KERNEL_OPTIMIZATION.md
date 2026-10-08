@@ -578,3 +578,21 @@ MKL packed-weight tests showed mixed gains; they do not establish a model-level
 speedup. The library remains a diagnostic dependency only. Source patches,
 synthetic checks and fresh Python/native baseline records are in
 [`bench-python-goal-blas-2026-10-09`](../../../../fixtures/bench-python-goal-blas-2026-10-09).
+
+## Blocked library-packed weights diagnostic (2026-10-09)
+
+An MKL diagnostic cached packed weight blocks, used eight Rayon workers with
+one MKL thread per worker, and fixed 32-token tiles. It left the unpacked host
+reference unchanged for output checks. One full-model run (F32, five warmups,
+15 samples) measured L8 B1 99.694 ms, L16 B1 107.390 ms, L64 B1 162.436 ms
+and L8 B8 159.583 ms. Maximum logit/action error was 0.001220703125 and passed
+the model comparison tolerance. This still misses Python's approximately
+134.5 ms L64 result.
+
+The process reached 19034120 KiB RSS: the library's packed allocation sizes
+for small output blocks greatly exceed the raw weights. The provider was
+removed rather than adopted with this memory cost; these measurements are a
+single diagnostic run, not a repeated production speedup. Microbenchmarks
+also validate token tails at lengths 1/3/7/8/9/16/64/65. Exact source, replay
+patch, raw samples and configuration are in
+[`bench-mkl-blocked-2026-10-09`](../../../../fixtures/bench-mkl-blocked-2026-10-09).
