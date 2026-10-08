@@ -16,7 +16,11 @@ use std::path::PathBuf;
 use hf_fetch::{CheckpointSpec, Hub};
 use jeff_infer::checkpoint::load_checkpoint;
 use jeff_infer::host_opt::forward_host_opt;
-use jeff_infer::model::forward_reference;
+use jeff_infer::model::{DeltaKernel, forward_reference, forward_tenferro_cached_kernel};
+use tenferro_ad::EagerRuntime;
+use tenferro_cpu::CpuBackend;
+use tenferro_gated_delta::GatedDeltaWorkspace;
+use tenferro_infer::TensorCache;
 
 /// The `mstrasser/Jeff-Qwen3.5-0.8B` commit the committed reference was
 /// generated from (the `JeffClient.jl` pin).
@@ -92,6 +96,39 @@ fn forward_matches_production_reference() {
         opt_diff < 1e-4 * scale,
         "host-opt logits differ from the oracle by {opt_diff} (scale {scale})"
     );
+
+    // Exercise the native constants cache across separate requests on the
+    // production weights, comparing both executions with the Julia logits.
+    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let mut workspace = GatedDeltaWorkspace::new();
+    let mut cache = TensorCache::new();
+    for request in 0..2 {
+        let native = runtime
+            .with_eager_session(|session| {
+                forward_tenferro_cached_kernel(
+                    &mut workspace,
+                    &mut cache,
+                    session,
+                    &cfg,
+                    &weights,
+                    &ids,
+                    &mask,
+                    DeltaKernel::TensorNative,
+                )
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(native.len(), expected.len());
+        let diff = native
+            .iter()
+            .zip(&expected)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        eprintln!(
+            "production Jeff tensor-native request {request}: logit diff {diff} (scale {scale})"
+        );
+        assert!(diff < 1e-3 * scale, "native logits differ by {diff}");
+    }
 }
 
 #[test]

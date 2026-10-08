@@ -324,3 +324,36 @@ stderr emission add overhead, so these are diagnostic results, not a new
 uninstrumented speed comparison. Kernel sampling was unavailable because
 `perf_event_paranoid=4`. Raw per-family samples, metadata and method are in
 [`laya.json`](../../../../fixtures/bench-laya-extension-profile-2026-10-09/laya.json).
+
+### Jeff native constant-cache ablation (2026-10-09)
+
+`bench_jeff_native` measures the fully TensorNative DeltaNet path on the
+production Jeff checkpoint with cached weights, float32, eight Rayon threads,
+two warmups and five measured forwards per length. Model loading is excluded.
+At `d6bea59`, sequential runs compared normal constant reuse with an ablation
+that temporarily forced `prepare_native_constants` on every layer. The native
+ops and weight cache were otherwise identical; the source was restored afterward.
+This isolates cache preparation on the current code, not changes from an older
+revision. All four runs produced identical logits at each benchmark length.
+
+| length | cached, first / repeat | prepare every layer, first / repeat |
+|---|---:|---:|
+| L8 | 250.3 / 269.6 ms | 269.5 / 270.8 ms |
+| L16 | 279.0 / 281.0 ms | 284.3 / 293.9 ms |
+| L64 | 418.5 / 414.3 ms | 410.3 / 416.4 ms |
+
+The L8 first-run improvement was not reproduced at the same magnitude; L64
+reversed ordering. These results do not show a clear speedup across all shapes.
+Sequential order and scheduler/thermal variation limit attribution. Removing
+repeated constant construction remains relevant to the device-resident CUDA
+path, but no CUDA speedup is established. CPU TensorNative L64 still takes
+about twice the original Python latency reported above; Jeff's default
+optimized host path remains faster.
+
+The release production-reference test now executes two native requests with
+one workspace/cache and checks both against the committed Julia logits.
+Both had maximum absolute error `1.1444092e-5` at reference scale `10.445133`.
+The checkpoint and reference were present, so this result exercised the model
+rather than the test's absent-snapshot skip path. Raw samples, metadata,
+ablation method and parity evidence are in
+[`bench-jeff-native-constants-2026-10-09`](../../../../fixtures/bench-jeff-native-constants-2026-10-09).

@@ -1,0 +1,22 @@
+{
+  "base_revision": "d6bea59",
+  "checkpoint": "mstrasser/Jeff-Qwen3.5-0.8B",
+  "checkpoint_revision": "0f212b3e72acb4dde3f7da61e925d6ab7f819990",
+  "reference": "fixtures/jeff-real/reference.json",
+  "test": "jeff-infer real_checkpoint::forward_matches_production_reference (release, explicitly ignored test executed)",
+  "native_requests": [
+    {
+      "request": 0,
+      "max_absolute_logit_error": 1.1444092e-05,
+      "reference_scale": 10.445133
+    },
+    {
+      "request": 1,
+      "max_absolute_logit_error": 1.1444092e-05,
+      "reference_scale": 10.445133
+    }
+  ],
+  "tolerance": "1e-3 * reference_scale",
+  "result": "passed; checkpoint/reference were present and native request bodies executed",
+  "ablation_logit_difference": 0.0
+}
