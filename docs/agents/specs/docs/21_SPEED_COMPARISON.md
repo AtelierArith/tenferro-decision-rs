@@ -201,6 +201,10 @@ The source arguments refer to local upstream Git checkouts, not installed
 package aliases; the JSON captures their revisions and the PyTorch/Transformers
 versions. The Python process forces offline Hub access.
 
+The Rust benchmark examples also capture `bench-suite` machine/build metadata
+and the actual Rayon pool size in their JSON output. Keep these fields with
+new measurements so comparisons can be traced to their execution environment.
+
 Example (in an isolated Python environment with CPU torch, torchvision,
 transformers, safetensors, Pillow, and NumPy installed):
 
@@ -230,6 +234,12 @@ versions: `fixtures/bench-python-cpu-2026-10-08/`.
 | Jeff | L8 B1 | 132.6 | 109.6 | 0.83× |
 | Jeff | L16 B1 | 143.1 | 112.3 | 0.78× |
 | Jeff | L64 B1 | 196.4 | 175.8 | 0.90× |
+
+The Rust Laya column above is the host correctness path. `LayaEngine` uses
+cached tenferro: the same report records 105.0 ms for L8 B1 versus Python's
+86.9 ms (1.21×), with only two measured native forwards. That native result
+is preliminary; the host rows do not describe production LayaEngine latency.
+Jeff's HostOpt rows match its default engine backend.
 
 PyTorch 2.14.1+cpu, torchvision 0.29.1+cpu, Transformers 5.17.0,
 safetensors 0.8.0, Python 3.12.3. Jeff uses the Transformers CPU reference

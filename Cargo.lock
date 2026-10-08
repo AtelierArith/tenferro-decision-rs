@@ -1257,6 +1257,7 @@ checksum = "8f42a60cbdf9a97f5d2305f08a87dc4e09308d1276d28c869c684d7777685682"
 name = "jeff-infer"
 version = "0.1.0"
 dependencies = [
+ "bench-suite",
  "cpu-kernels",
  "decision-core",
  "hf-fetch",
@@ -1300,9 +1301,11 @@ dependencies = [
 name = "laya-infer"
 version = "0.1.0"
 dependencies = [
+ "bench-suite",
  "cpu-kernels",
  "decision-core",
  "hf-fetch",
+ "rayon",
  "regex",
  "safetensors-io",
  "serde_json",

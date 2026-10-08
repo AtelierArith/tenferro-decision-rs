@@ -27,4 +27,6 @@ tenferro-infer.workspace = true
 tenferro-cpu.workspace = true
 
 [dev-dependencies]
+rayon.workspace = true
+bench-suite = { path = "../bench-suite" }
 hf-fetch.workspace = true

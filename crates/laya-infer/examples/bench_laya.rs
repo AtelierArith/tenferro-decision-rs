@@ -185,8 +185,20 @@ fn main() {
     let tenferro = time(false);
     let tenferro_cached = time(true);
 
+    let mut metadata = bench_suite::BenchMetadata::capture();
+    metadata.profile = Some(
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        }
+        .into(),
+    );
+    let metadata: serde_json::Value = serde_json::from_str(&metadata.to_json()).unwrap();
     let out = json!({
         "runtime": "rust-cpu",
+        "metadata": metadata,
+        "rayon_threads": rayon::current_num_threads(),
         "checkpoint": dir,
         "load_ms": load_ms,
         "warmup": warmup,

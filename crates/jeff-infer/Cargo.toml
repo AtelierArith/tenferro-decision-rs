@@ -30,4 +30,5 @@ minijinja = { version = "2", features = ["json", "loader"] }
 minijinja-contrib = { version = "2.24.0", features = ["pycompat"] }
 
 [dev-dependencies]
+bench-suite = { path = "../bench-suite" }
 hf-fetch.workspace = true
