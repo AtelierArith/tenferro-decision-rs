@@ -347,8 +347,13 @@ The `cuda::RecurrentGeometry` adapter validates nonzero dimensions, grouped
 head divisibility, the register-state key limit, CUDA grid-y limits, and all
 signed 32-bit indexing products before exposing scalar arguments and launch
 geometry. GPU-free tests cover token boundaries and overflowing dimensions.
-This does not yet validate tensor storage, residency, aliasing or stream
-lifetimes; those remain obligations of the pending execution adapter.
+`CudaKernels::enqueue_stages` now submits the three stages without a host
+barrier. It validates exact f32 tensor shapes, zero-offset column-major
+layout, runtime identity, device residency, allocation spans, and positive
+finite RMS epsilon before any launch. The method remains unsafe: the caller
+must ensure disjoint underlying allocations and retain all buffers/module
+until successful stream synchronization, including when a later launch
+fails. A safe full-layer execution owner and hardware parity remain pending.
 
 For compiler validation without a GPU, run:
 

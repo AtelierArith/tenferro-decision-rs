@@ -18,6 +18,7 @@ pub const KERNEL_SOURCE: &str = include_str!("cuda/kernels.cu");
 /// kernel is in flight. Store it in the CUDA execution owner, not a `Send`
 /// extension cache or a process-global cache.
 pub struct CudaKernels {
+    runtime: tenferro_gpu::cuda::CudaRuntimeIdentity,
     _module: Module,
     conv_silu: Function,
     recurrent: Function,
@@ -38,6 +39,7 @@ impl CudaKernels {
         };
         let module = session.compile_nvrtc(KERNEL_SOURCE, &options)?;
         Ok(Self {
+            runtime: session.runtime_identity(),
             conv_silu: module.function("gated_delta_conv_silu")?,
             recurrent: module.function("gated_delta_recurrent")?,
             norm_gate: module.function("gated_delta_norm_gate")?,
@@ -170,9 +172,176 @@ impl RecurrentGeometry {
     }
 }
 
+/// Device-resident inputs and distinct scratch/output tensors for the three
+/// raw stages. All matrices have token as their first (contiguous) dimension.
+pub struct StageBuffers<'a> {
+    pub mixed_input: &'a tenferro_tensor::TypedTensor<f32>,
+    pub conv_weight: &'a tenferro_tensor::TypedTensor<f32>,
+    pub a: &'a tenferro_tensor::TypedTensor<f32>,
+    pub b: &'a tenferro_tensor::TypedTensor<f32>,
+    pub a_decay: &'a tenferro_tensor::TypedTensor<f32>,
+    pub dt_bias: &'a tenferro_tensor::TypedTensor<f32>,
+    pub z: &'a tenferro_tensor::TypedTensor<f32>,
+    pub norm: &'a tenferro_tensor::TypedTensor<f32>,
+    pub convolved: &'a mut tenferro_tensor::TypedTensor<f32>,
+    pub scanned: &'a mut tenferro_tensor::TypedTensor<f32>,
+    pub output: &'a mut tenferro_tensor::TypedTensor<f32>,
+}
+
+fn check_stage_tensor(
+    tensor: &tenferro_tensor::TypedTensor<f32>,
+    shape: &[usize],
+) -> tenferro_tensor::Result<()> {
+    if tensor.shape() != shape
+        || !tensor.is_col_major_contiguous()?
+        || tensor.layout_linear_offset(&vec![0; shape.len()])? != 0
+    {
+        return Err(tenferro_tensor::Error::invalid_argument(
+            "gated_delta.cuda",
+            "tensor",
+            "expected zero-offset column-major stage shape",
+        ));
+    }
+    Ok(())
+}
+
+impl CudaKernels {
+    /// Enqueue convolution, recurrent scan and norm/gating on one raw stream.
+    /// Performs no upload, download, allocation or synchronization.
+    ///
+    /// # Safety
+    /// All underlying allocations must be disjoint, including allocations
+    /// shared by tensor views/aliases. The caller must retain every buffer and
+    /// this kernel owner, and prohibit conflicting access, until successful
+    /// synchronization of this stream. This obligation also applies on error:
+    /// a preceding stage may already be in flight. A failed synchronization
+    /// requires retaining/leaking resources rather than freeing them early.
+    pub unsafe fn enqueue_stages(
+        &self,
+        session: &Session<'_>,
+        geometry: &RecurrentGeometry,
+        buffers: StageBuffers<'_>,
+        eps: f32,
+    ) -> tenferro_tensor::Result<()> {
+        use tenferro_gpu::cuda::raw::KernelArg;
+        if self.runtime != session.runtime_identity() || !eps.is_finite() || eps <= 0.0 {
+            return Err(tenferro_tensor::Error::invalid_argument(
+                "gated_delta.cuda",
+                "runtime/eps",
+                "runtime must match and epsilon must be finite and positive",
+            ));
+        }
+        let l = geometry.length as usize;
+        let channels = geometry.channels as usize;
+        let heads = geometry.value_heads as usize;
+        let width = heads * geometry.value_dim as usize;
+        for (tensor, shape) in [
+            (buffers.mixed_input, vec![l, channels]),
+            (buffers.conv_weight, vec![channels, geometry.taps as usize]),
+            (buffers.a, vec![l, heads]),
+            (buffers.b, vec![l, heads]),
+            (buffers.a_decay, vec![heads]),
+            (buffers.dt_bias, vec![heads]),
+            (buffers.z, vec![l, width]),
+            (buffers.norm, vec![geometry.value_dim as usize]),
+            (&*buffers.convolved, vec![l, channels]),
+            (&*buffers.scanned, vec![l, width]),
+            (&*buffers.output, vec![l, width]),
+        ] {
+            check_stage_tensor(tensor, &shape)?;
+        }
+        // Obtain every checked device binding before enqueueing any work.
+        let mixed = session.tensor(buffers.mixed_input)?;
+        let weight = session.tensor(buffers.conv_weight)?;
+        let a = session.tensor(buffers.a)?;
+        let b = session.tensor(buffers.b)?;
+        let decay = session.tensor(buffers.a_decay)?;
+        let bias = session.tensor(buffers.dt_bias)?;
+        let z = session.tensor(buffers.z)?;
+        let norm = session.tensor(buffers.norm)?;
+        let conv = session.tensor_mut(buffers.convolved)?;
+        let scan = session.tensor_mut(buffers.scanned)?;
+        let output = session.tensor_mut(buffers.output)?;
+        for (actual, elements) in [
+            (mixed.byte_len(), l * channels),
+            (weight.byte_len(), channels * geometry.taps as usize),
+            (a.byte_len(), l * heads),
+            (b.byte_len(), l * heads),
+            (decay.byte_len(), heads),
+            (bias.byte_len(), heads),
+            (z.byte_len(), l * width),
+            (norm.byte_len(), geometry.value_dim as usize),
+            (conv.byte_len(), l * channels),
+            (scan.byte_len(), l * width),
+            (output.byte_len(), l * width),
+        ] {
+            if elements
+                .checked_mul(size_of::<f32>())
+                .is_none_or(|bytes| actual < bytes)
+            {
+                return Err(tenferro_tensor::Error::invalid_argument(
+                    "gated_delta.cuda",
+                    "allocation",
+                    "stage allocation is shorter than the kernel span",
+                ));
+            }
+        }
+        let launches = geometry.launches();
+        let [length, channels, taps] = geometry.conv_arguments();
+        // SAFETY: scalar ABI and geometry follow the compiled source; tensor
+        // shape/layout/runtime are checked above. Allocation aliasing and
+        // asynchronous lifetime are the caller's documented obligations.
+        unsafe {
+            session.launch(
+                &self.conv_silu,
+                launches[0],
+                &[
+                    KernelArg::tensor_mut(&conv),
+                    KernelArg::tensor(&mixed),
+                    KernelArg::tensor(&weight),
+                    KernelArg::i32(length),
+                    KernelArg::i32(channels),
+                    KernelArg::i32(taps),
+                ],
+            )?;
+            let mut args = vec![
+                KernelArg::tensor_mut(&scan),
+                KernelArg::tensor_mut(&conv),
+                KernelArg::tensor(&a),
+                KernelArg::tensor(&b),
+                KernelArg::tensor(&decay),
+                KernelArg::tensor(&bias),
+            ];
+            args.extend(geometry.recurrent_arguments().map(KernelArg::i32));
+            session.launch(&self.recurrent, launches[1], &args)?;
+            session.launch(
+                &self.norm_gate,
+                launches[2],
+                &[
+                    KernelArg::tensor_mut(&output),
+                    KernelArg::tensor_mut(&scan),
+                    KernelArg::tensor(&z),
+                    KernelArg::tensor(&norm),
+                    KernelArg::i32(length),
+                    KernelArg::i32(geometry.value_dim),
+                    KernelArg::f32(eps),
+                ],
+            )?;
+        }
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod geometry_tests {
     use super::RecurrentGeometry;
+
+    #[test]
+    fn stage_bindings_reject_wrong_shape() {
+        let tensor = tenferro_tensor::TypedTensor::<f32>::zeros(vec![2, 3]).unwrap();
+        assert!(super::check_stage_tensor(&tensor, &[2, 3]).is_ok());
+        assert!(super::check_stage_tensor(&tensor, &[3, 2]).is_err());
+    }
 
     #[test]
     fn grouped_heads_and_token_boundaries() {
