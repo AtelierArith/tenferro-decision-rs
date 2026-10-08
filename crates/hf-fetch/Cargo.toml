@@ -9,6 +9,7 @@ repository.workspace = true
 authors.workspace = true
 
 [dependencies]
+fs2 = "=0.4.3"
 reqwest.workspace = true
 serde.workspace = true
 serde_json.workspace = true

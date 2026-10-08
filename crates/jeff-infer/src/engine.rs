@@ -121,6 +121,28 @@ impl JeffEngine {
         })
     }
 
+    /// Load a local checkpoint with the default forward backend.
+    pub fn load(directory: impl AsRef<std::path::Path>) -> Result<Self> {
+        let checkpoint = crate::checkpoint::load_checkpoint(directory)?;
+        Self::new(checkpoint.config, checkpoint.decision, checkpoint.weights)
+    }
+
+    /// Resolve a Hub snapshot and load it with the default forward backend.
+    ///
+    /// Network access is opt-in through the `hub` feature and is delegated to
+    /// `hf-fetch`. Pass an offline Hub to require an existing cached snapshot;
+    /// customize `spec.revision` to pin a checkpoint.
+    #[cfg(feature = "hub")]
+    pub fn load_from_hub(hub: &hf_fetch::Hub, spec: &hf_fetch::CheckpointSpec) -> Result<Self> {
+        let directory = hub
+            .resolve(spec)
+            .map_err(|error| DecisionError::Transport {
+                message: "failed to resolve Jeff checkpoint from the Hub".into(),
+                source: Some(Box::new(error)),
+            })?;
+        Self::load(directory)
+    }
+
     /// Select how the tenferro forward runs each Gated DeltaNet layer.
     pub fn with_delta_kernel(mut self, kernel: DeltaKernel) -> Self {
         self.delta_kernel = kernel;

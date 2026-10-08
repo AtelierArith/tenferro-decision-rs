@@ -8,7 +8,12 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+default = []
+hub = ["dep:hf-fetch"]
+
 [dependencies]
+hf-fetch = { workspace = true, optional = true }
 decision-core.workspace = true
 cpu-kernels.workspace = true
 safetensors-io.workspace = true

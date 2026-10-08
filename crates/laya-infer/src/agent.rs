@@ -95,6 +95,22 @@ impl LayaEngine {
         Self::from_checkpoint(checkpoint, tokenizer, calibration)
     }
 
+    /// Resolve a Hub snapshot and load its weights, tokenizer, and calibration.
+    ///
+    /// Network access is opt-in through the `hub` feature and is delegated to
+    /// `hf-fetch`. Pass an offline Hub to require an existing cached snapshot;
+    /// customize `spec.revision` to pin a checkpoint.
+    #[cfg(feature = "hub")]
+    pub fn load_from_hub(hub: &hf_fetch::Hub, spec: &hf_fetch::CheckpointSpec) -> Result<Self> {
+        let directory = hub
+            .resolve(spec)
+            .map_err(|error| DecisionError::Transport {
+                message: "failed to resolve Laya checkpoint from the Hub".into(),
+                source: Some(Box::new(error)),
+            })?;
+        Self::load(directory)
+    }
+
     /// The encoder configuration.
     pub fn encoder(&self) -> &EncoderConfig {
         &self.encoder

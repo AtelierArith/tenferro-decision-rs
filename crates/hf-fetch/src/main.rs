@@ -31,6 +31,7 @@ fn run() -> Result<(), String> {
     let mut endpoint: Option<String> = None;
     let mut token: Option<String> = None;
     let mut offline = false;
+    let mut progress = false;
     let mut includes: Vec<String> = Vec::new();
     let mut required: Vec<String> = Vec::new();
 
@@ -42,6 +43,7 @@ fn run() -> Result<(), String> {
                 return Ok(());
             }
             "--offline" => offline = true,
+            "--progress" => progress = true,
             "--revision" => revision = Some(next_value(&mut args, "--revision")?),
             "--subfolder" => subfolder = Some(next_value(&mut args, "--subfolder")?),
             "--cache" => cache = Some(PathBuf::from(next_value(&mut args, "--cache")?)),
@@ -91,7 +93,32 @@ fn run() -> Result<(), String> {
         hub.offline = true;
     }
 
-    let dir = hub.resolve(&spec).map_err(|error| error.to_string())?;
+    let mut last_reported = 0u64;
+    let mut last_file = String::new();
+    let dir = hub
+        .resolve_with_progress(&spec, |event| {
+            let new_file = last_file != event.file;
+            if new_file {
+                last_file = event.file.to_string();
+                last_reported = 0;
+            }
+            if progress
+                && (new_file
+                    || event.downloaded == 0
+                    || event.downloaded < last_reported
+                    || event.downloaded.saturating_sub(last_reported) >= 8 * 1024 * 1024
+                    || event.total == Some(event.downloaded))
+            {
+                last_reported = event.downloaded;
+                match event.total {
+                    Some(total) => {
+                        eprintln!("{}: {} / {total} bytes", event.file, event.downloaded)
+                    }
+                    None => eprintln!("{}: {} bytes", event.file, event.downloaded),
+                }
+            }
+        })
+        .map_err(|error| error.to_string())?;
     println!("{}", dir.display());
     Ok(())
 }
@@ -143,6 +170,7 @@ fn print_usage() {
          \x20 --include <pattern>   file rule for a generic repo (repeatable; 'prefix/**', glob, or exact)\n\
          \x20 --required <file>     file that must exist (repeatable)\n\
          \x20 --offline             only use cached snapshots\n\
+         \x20 --progress            report download byte counts on stderr\n\
          \x20 --cache <dir>         override the Hub cache root\n\
          \x20 --endpoint <url>      override HF_ENDPOINT\n\
          \x20 --token <token>       override HF_TOKEN\n\

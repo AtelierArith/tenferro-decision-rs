@@ -48,9 +48,13 @@ list of `required` files used to decide whether a cached snapshot is complete.
   `model.safetensors.index.json` shard index, and auxiliary files
   (`chat_template.jinja`, `processor_config.json`, `LICENSE`, `NOTICE`).
 
-Partial downloads never appear inside a snapshot: files are staged in a
-temporary directory under the repository root and moved into place only after a
-complete download.
+Partial downloads never appear inside a snapshot: files are staged under
+`downloads/<commit>/` and moved into place only after a complete download.
+Interrupted files remain there for the next attempt, which sends an HTTP Range
+request. The response's Content-Range and byte count must match before a file
+is published. Servers that ignore Range or return 416 cause a fresh download.
+An OS file lock per repository serializes writers and is released on process
+exit. Only complete snapshots update `refs/<revision>`, using atomic rename.
 
 ## CLI
 
@@ -63,7 +67,7 @@ hf-fetch org/name --revision <sha> \
 
 Options: `--revision <rev>`, `--subfolder <dir>`, `--include <pattern>`
 (repeatable for a generic repository), `--required <file>`, `--offline`,
-`--cache <dir>`, `--endpoint <url>`, `--token <token>`. On success it prints the
+`--cache <dir>`, `--endpoint <url>`, `--token <token>`, `--progress`. On success it prints the
 resolved checkpoint directory.
 
 ```bash
@@ -93,11 +97,33 @@ action scores agree to `~1.7e-7` relative). The committed reference
 `crates/laya-infer/tests/real_checkpoint.rs`, which skips when the snapshot or
 reference is absent.
 
-## Not done
+## Optional engine integration
 
-- Convenience `load_from_hub` constructors behind an opt-in feature; the CLI
-  already feeds the existing `load(dir)` entry points.
-- Private/gated repositories are supported via `HF_TOKEN` but are not exercised
-  by tests.
-- Progress reporting / resumable downloads (the Julia runtimes re-download from
-  scratch, and so does this crate).
+Enable `features = ["hub"]` on `laya-infer` or `jeff-infer`, then call
+`LayaEngine::load_from_hub(&hub, &CheckpointSpec::laya())` or
+`JeffEngine::load_from_hub(&hub, &CheckpointSpec::jeff())`. The explicit Hub
+controls cache, credentials, and offline mode; the spec controls revision and
+subfolder. Without this feature, the inference crates do not link the Hub HTTP
+client. Local loading remains available in either build.
+
+## Progress, authentication, and revision pins
+
+`Hub::resolve_with_progress(&spec, callback)` reports repository-relative file
+names, staged byte counts (including a resumed prefix), and optional complete
+file sizes. Cached files emit no events. `hf-fetch --progress` prints byte
+counts to stderr; stdout remains the snapshot directory.
+
+Local HTTP integration tests enforce a synthetic `HF_TOKEN` on API requests,
+file downloads, and same-origin redirects; missing or wrong tokens return 401.
+These tests exercise private/gated-style authentication without requiring live
+private repositories or user credentials. Live gated-repository entitlement is
+not tested.
+
+Resume tests interrupt a response before its advertised Content-Length,
+verify no partial snapshot/ref is published, then require `Range: bytes=3-`
+and a matching 206 response. They also cover ignored, malformed, and
+unsatisfiable ranges. Both convenience engine APIs are tested in offline mode.
+
+Revision pinning is already available through `CheckpointSpec::revision` and
+`hf-fetch --revision <commit>`. Automatic cache pruning remains optional;
+no cached models are removed by resolution.

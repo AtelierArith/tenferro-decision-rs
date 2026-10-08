@@ -18,11 +18,12 @@
 
 use std::env;
 use std::fs;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use fs2::FileExt;
 use serde::Deserialize;
 
 /// Default Hugging Face endpoint.
@@ -56,6 +57,9 @@ pub enum HubError {
     /// The downloaded snapshot is missing required files.
     #[error("incomplete checkpoint at {0}")]
     Incomplete(PathBuf),
+    /// The server returned an invalid partial-download range.
+    #[error("invalid HTTP download range for {0:?}")]
+    InvalidRange(String),
     /// Network or HTTP failure.
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
@@ -180,6 +184,17 @@ impl CheckpointSpec {
     }
 }
 
+/// Progress for one checkpoint file. Cached files do not emit events.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct DownloadProgress<'a> {
+    /// Repository-relative file name, including the checkpoint subfolder.
+    pub file: &'a str,
+    /// Total bytes staged for this file, including a resumed prefix.
+    pub downloaded: u64,
+    /// Complete file size, when supplied by the server.
+    pub total: Option<u64>,
+}
+
 /// The configured Hub client.
 #[derive(Clone, Debug)]
 pub struct Hub {
@@ -240,7 +255,26 @@ impl Hub {
     /// Returns the directory that directly contains the checkpoint files
     /// (including `spec.subfolder` when set).
     pub fn resolve(&self, spec: &CheckpointSpec) -> Result<PathBuf> {
+        self.resolve_with_progress(spec, |_| {})
+    }
+
+    /// Resolve a snapshot and report progress as each downloaded file is written.
+    ///
+    /// The callback runs synchronously, starting at the resumed offset (zero
+    /// for fresh files). A repository lock protects staged files; the callback
+    /// must not recursively resolve downloads from the same repository.
+    /// It is not called for cached files or offline cache hits. No credentials
+    /// or response URLs are passed to the callback.
+    pub fn resolve_with_progress(
+        &self,
+        spec: &CheckpointSpec,
+        mut progress: impl FnMut(DownloadProgress<'_>),
+    ) -> Result<PathBuf> {
         validate_repo(&spec.repo)?;
+        safe_relative(&spec.revision)?;
+        for required in &spec.required {
+            safe_relative(required)?;
+        }
         let prefix = prefix_for(spec.subfolder.as_deref())?;
         if let Some(dir) = cached_snapshot(&self.cache, &spec.repo, &spec.revision) {
             let target = checkpoint_dir(&dir, &prefix);
@@ -254,15 +288,24 @@ impl Hub {
                 revision: spec.revision.clone(),
             });
         }
-        self.download(spec, &prefix)
+        self.download(spec, &prefix, &mut progress)
     }
 
-    fn download(&self, spec: &CheckpointSpec, prefix: &str) -> Result<PathBuf> {
+    fn download(
+        &self,
+        spec: &CheckpointSpec,
+        prefix: &str,
+        progress: &mut dyn FnMut(DownloadProgress<'_>),
+    ) -> Result<PathBuf> {
         let client = reqwest::blocking::Client::builder()
             .redirect(reqwest::redirect::Policy::limited(10))
             .build()?;
         let info = self.model_info(&client, &spec.repo, &spec.revision)?;
         let commit = info.sha;
+        safe_relative(&commit)?;
+        if commit.contains('/') || commit.contains('\\') {
+            return Err(HubError::UnsafePath(commit));
+        }
         let files: Vec<String> = info
             .siblings
             .into_iter()
@@ -277,8 +320,18 @@ impl Hub {
         }
 
         let root = repo_root(&self.cache, &spec.repo);
+        fs::create_dir_all(&root)?;
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(root.join("download.lock"))?;
+        FileExt::lock_exclusive(&lock)?;
+        // The OS releases the lock when this file is dropped, including errors
+        // and process termination. The lock inode itself must stay in place.
         let snapshot = root.join("snapshots").join(&commit);
-        let temp = root.join(format!("download-{}", unique_suffix()));
+        let temp = root.join("downloads").join(&commit);
         fs::create_dir_all(&temp)?;
 
         let outcome = (|| -> Result<()> {
@@ -292,7 +345,7 @@ impl Hub {
                 if let Some(parent) = staged.parent() {
                     fs::create_dir_all(parent)?;
                 }
-                self.fetch_file(&client, &spec.repo, &commit, file, &staged)?;
+                self.fetch_file(&client, &spec.repo, &commit, file, &staged, progress)?;
                 if let Some(parent) = destination.parent() {
                     fs::create_dir_all(parent)?;
                 }
@@ -300,20 +353,20 @@ impl Hub {
             }
             Ok(())
         })();
-        let _ = fs::remove_dir_all(&temp);
         outcome?;
+        let _ = fs::remove_dir_all(&temp);
+        let target = checkpoint_dir(&snapshot, prefix);
+        if !has_required(&target, spec) {
+            return Err(HubError::Incomplete(target));
+        }
 
         let ref_path = root.join("refs").join(&spec.revision);
         if let Some(parent) = ref_path.parent() {
             fs::create_dir_all(parent)?;
         }
-        let mut ref_file = fs::File::create(&ref_path)?;
-        ref_file.write_all(commit.as_bytes())?;
-
-        let target = checkpoint_dir(&snapshot, prefix);
-        if !has_required(&target, spec) {
-            return Err(HubError::Incomplete(target));
-        }
+        let staged_ref = root.join(format!("ref-{}", unique_suffix()));
+        fs::write(&staged_ref, commit.as_bytes())?;
+        fs::rename(staged_ref, ref_path)?;
         Ok(target)
     }
 
@@ -344,6 +397,7 @@ impl Hub {
         commit: &str,
         file: &str,
         destination: &Path,
+        progress: &mut dyn FnMut(DownloadProgress<'_>),
     ) -> Result<()> {
         let url = format!(
             "{}/{}/resolve/{}/{}",
@@ -352,13 +406,76 @@ impl Hub {
             commit,
             escape_path(file)
         );
-        let mut response = self
-            .authorize(client.get(&url))
-            .send()?
-            .error_for_status()?;
-        let mut output = fs::File::create(destination)?;
-        response.copy_to(&mut output)?;
+        let offset = match fs::metadata(destination) {
+            Ok(metadata) => metadata.len(),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => 0,
+            Err(error) => return Err(error.into()),
+        };
+        let mut request = self.authorize(client.get(&url));
+        if offset > 0 {
+            request = request.header(reqwest::header::RANGE, format!("bytes={offset}-"));
+        }
+        let mut response = request.send()?;
+        if offset > 0 && response.status() == reqwest::StatusCode::RANGE_NOT_SATISFIABLE {
+            // A complete-but-unpublished or stale partial file can be retried
+            // safely by requesting the whole immutable commit's file.
+            response = self.authorize(client.get(&url)).send()?;
+        }
+        response = response.error_for_status()?;
+        let partial = response.status() == reqwest::StatusCode::PARTIAL_CONTENT;
+        let (mut downloaded, total) = if partial {
+            let range = response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|header| header.to_str().ok())
+                .and_then(parse_content_range)
+                .ok_or_else(|| HubError::InvalidRange(file.to_string()))?;
+            let (start, end, size) = range;
+            if start != offset
+                || end.checked_add(1) != Some(size)
+                || response
+                    .content_length()
+                    .is_some_and(|length| length != size - start)
+            {
+                return Err(HubError::InvalidRange(file.to_string()));
+            }
+            (offset, Some(size))
+        } else if response.status() == reqwest::StatusCode::OK {
+            // A server may ignore Range. Restart instead of appending a full
+            // response onto the partial prefix.
+            (0, response.content_length())
+        } else {
+            return Err(HubError::InvalidRange(file.to_string()));
+        };
+        let mut output = fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .append(partial)
+            .truncate(!partial)
+            .open(destination)?;
+        progress(DownloadProgress {
+            file,
+            downloaded,
+            total,
+        });
+        let mut buffer = [0u8; 64 * 1024];
+        loop {
+            let count = response.read(&mut buffer)?;
+            if count == 0 {
+                break;
+            }
+            output.write_all(&buffer[..count])?;
+            downloaded += count as u64;
+            progress(DownloadProgress {
+                file,
+                downloaded,
+                total,
+            });
+        }
         output.flush()?;
+        if total.is_some_and(|size| downloaded != size) {
+            return Err(HubError::InvalidRange(file.to_string()));
+        }
         Ok(())
     }
 
@@ -384,6 +501,18 @@ struct ModelInfo {
 #[derive(Deserialize)]
 struct Sibling {
     rfilename: String,
+}
+
+/// Parse only a fully specified byte range, rejecting overflow and reversed bounds.
+fn parse_content_range(value: &str) -> Option<(u64, u64, u64)> {
+    let (range, total) = value.strip_prefix("bytes ")?.split_once('/')?;
+    let (start, end) = range.split_once('-')?;
+    let (start, end, total) = (start.parse().ok()?, end.parse().ok()?, total.parse().ok()?);
+    if start <= end && end < total {
+        Some((start, end, total))
+    } else {
+        None
+    }
 }
 
 // ------------------------------------------------------------------- helpers
