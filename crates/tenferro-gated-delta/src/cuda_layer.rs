@@ -9,7 +9,7 @@ use tenferro_tensor::{Tensor, TensorRead, TypedTensor};
 
 use crate::{
     GatedDeltaConfig, GatedDeltaTensorWeights,
-    cuda::{CudaKernels, CudaStageRun, RecurrentGeometry},
+    cuda::{CudaKernels, OwnedStageInputs, RecurrentGeometry, StageBuffers},
     layer::invalid_weights,
     tensor_layer::linear_col,
 };
@@ -24,14 +24,35 @@ pub struct CudaRecurrentWorkspace {
     output: Tensor,
 }
 
+// Local to this function's admitted eager scope: the current execution stream
+// remains active until this guard is completed or dropped. No pending owner
+// escapes the scope or crosses a Send boundary.
+struct PendingLayer {
+    runtime: tenferro_gpu::cuda::CudaRuntime,
+    kernels: Option<CudaKernels>,
+    inputs: Option<OwnedStageInputs>,
+    workspace: Option<CudaRecurrentWorkspace>,
+    completed: bool,
+}
+
+impl Drop for PendingLayer {
+    fn drop(&mut self) {
+        if !self.completed && self.runtime.synchronize().is_err() {
+            std::mem::forget(self.kernels.take());
+            std::mem::forget(self.inputs.take());
+            std::mem::forget(self.workspace.take());
+        }
+    }
+}
+
 /// Run the f32 CUDA recurrent formulation with prepared device weights/mask.
 ///
 /// `x` is `[hidden, length]`, `mask` is `[length]`. The returned kernel owner
 /// can be reused within the admitted eager callback (it is naturally !Send).
 /// No tensors are downloaded. This prototype makes device copies of raw-stage
 /// operands and allocates workspaces per call; persistent workspace caching is
-/// still required. It synchronizes after the raw stages before registering the
-/// output, then composes the readout using native tenferro operations.
+/// still required. It retains the raw operands through native readout and
+/// synchronizes once before returning completed resources.
 ///
 /// This explicit entry point does not enable CUDA in normal plan resolution;
 /// hardware parity is still required. Unsupported backends/shapes/dtypes fail.
@@ -52,8 +73,8 @@ pub fn delta_layer_cuda_recurrent(
 ///
 /// Pass `None` to allocate once, then retain the returned workspace and module
 /// within the admitted callback. The workspace must match shape/runtime. Raw
-/// operands still use device copies, and the raw-stage completion barrier
-/// remains. The output is copied on device before eager registration, so a
+/// operands still use device copies; completion is synchronized once after
+/// native readout. The output is copied on device before eager registration, so a
 /// later workspace reuse cannot overwrite the returned tensor.
 pub fn delta_layer_cuda_recurrent_cached(
     session: &mut EagerSession<'_>,
@@ -148,54 +169,95 @@ pub fn delta_layer_cuda_recurrent_cached(
         .map_err(|failure| failure.into_parts().1)?;
     let channels = 2 * cfg.key_heads * cfg.key_dim + cfg.value_heads * cfg.value_dim;
     let width = cfg.value_heads * cfg.value_dim;
-    let (kernels, workspace) = with_cuda_exec_session(session.backend_session(), |cuda| {
+    let runtime = with_cuda_exec_session(session.backend_session(), |cuda| cuda.runtime().clone())
+        .expect("CUDA session checked above");
+    let mut pending = PendingLayer {
+        runtime,
+        kernels: Some(kernels),
+        inputs: Some([mixed, conv, a, b, decay, bias, z, norm]),
+        workspace,
+        completed: false,
+    };
+    if pending.workspace.is_none() {
+        pending.workspace = Some(
+            with_cuda_exec_session(session.backend_session(), |cuda| {
+                cuda.with_raw("cuda_recurrent_workspace", |raw| {
+                    Ok(CudaRecurrentWorkspace {
+                        convolved: raw.alloc_output::<f32>(&[*length, channels])?,
+                        scanned: raw.alloc_output::<f32>(&[*length, width])?,
+                        output: Tensor::from_typed(raw.alloc_output::<f32>(&[*length, width])?),
+                    })
+                })
+            })
+            .expect("CUDA session checked above")?,
+        );
+    }
+    let launched = with_cuda_exec_session(session.backend_session(), |cuda| {
         cuda.with_raw("cuda_recurrent_layer", |raw| {
-            let outputs = if let Some(workspace) = workspace {
-                [
-                    workspace.convolved,
-                    workspace.scanned,
-                    workspace
-                        .output
-                        .into_typed::<f32>()
-                        .map_err(|failure| failure.into_parts().1)?,
-                ]
-            } else {
-                [
-                    raw.alloc_output::<f32>(&[*length, channels])?,
-                    raw.alloc_output::<f32>(&[*length, width])?,
-                    raw.alloc_output::<f32>(&[*length, width])?,
-                ]
-            };
-            // SAFETY: duplicate_value provides distinct owning device copies;
-            // workspace allocations are exclusively owned and disjoint. No handles escape
-            // before the pending owner completes this stream.
-            let run = unsafe {
-                CudaStageRun::enqueue(
-                    raw,
-                    kernels,
-                    &geometry,
-                    [mixed, conv, a, b, decay, bias, z, norm],
-                    outputs,
-                    cfg.eps,
-                )?
-            };
-            let (kernels, _, [convolved, scanned, output]) = run.finish()?;
-            Ok((
-                kernels,
-                CudaRecurrentWorkspace {
-                    convolved,
-                    scanned,
-                    output: Tensor::from_typed(output),
-                },
-            ))
+            let [mixed_input, conv_weight, a, b, a_decay, dt_bias, z, norm] =
+                pending.inputs.as_ref().expect("owned inputs");
+            let workspace = pending.workspace.as_mut().expect("owned workspace");
+            // SAFETY: operand copies and private workspace buffers are distinct;
+            // pending owns all buffers/module before enqueue and retains them
+            // through the final native-readout barrier, including errors/unwind.
+            unsafe {
+                pending
+                    .kernels
+                    .as_ref()
+                    .expect("owned module")
+                    .enqueue_stages(
+                        raw,
+                        &geometry,
+                        StageBuffers {
+                            mixed_input,
+                            conv_weight,
+                            a,
+                            b,
+                            a_decay,
+                            dt_bias,
+                            z,
+                            norm,
+                            convolved: &mut workspace.convolved,
+                            scanned: &mut workspace.scanned,
+                            output: workspace
+                                .output
+                                .as_typed_mut::<f32>()
+                                .expect("private f32 workspace"),
+                        },
+                        cfg.eps,
+                    )
+            }
         })
     })
-    .expect("CUDA session checked above")?;
-    let output = session
-        .backend_session()
-        .to_contiguous_read(TensorRead::from_tensor(&workspace.output))?;
-    let output = session.constant_from(output)?;
-    let output = session.transpose(&output, &[1, 0])?;
-    let output = linear_col(session, &output, &weights.out_proj)?;
-    Ok((kernels, workspace, output))
+    .expect("CUDA session checked above");
+    // Capture every fallible operation after enqueue rather than returning
+    // early. Original raw allocations remain owned even if import fails.
+    let computed = (|| {
+        launched?;
+        let output = session
+            .backend_session()
+            .to_contiguous_read(TensorRead::from_tensor(
+                &pending.workspace.as_ref().expect("owned workspace").output,
+            ))?;
+        let output = session.constant_from(output)?;
+        let output = session.transpose(&output, &[1, 0])?;
+        linear_col(session, &output, &weights.out_proj)
+    })();
+    let synchronized = with_cuda_exec_session(session.backend_session(), |cuda| {
+        cuda.with_raw("cuda_recurrent_layer_finish", |raw| raw.synchronize())
+    })
+    .expect("CUDA session checked above");
+    if let Err(error) = synchronized {
+        // Completion is unknown for readout/copies too. Preserve their output
+        // owner while Drop retries the barrier and retains raw resources.
+        std::mem::forget(computed);
+        return Err(error.into());
+    }
+    pending.completed = true;
+    let output = computed?;
+    Ok((
+        pending.kernels.take().expect("owned module"),
+        pending.workspace.take().expect("owned workspace"),
+        output,
+    ))
 }

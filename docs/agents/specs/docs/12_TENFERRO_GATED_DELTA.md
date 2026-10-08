@@ -362,9 +362,13 @@ prepared tenferro projections and masking with the three raw stages and a
 native tenferro output projection. It supports f32 recurrent geometry and
 returns the loaded module for reuse within the admitted callback. It performs
 no downloads or CPU fallback. This first adapter makes owning device copies
-of raw operands and allocates fresh workspaces each call, then synchronizes
-after the raw stages before registering their output. Persistent workspace
-caching and removing this intermediate barrier remain required. Normal CUDA
+of raw operands and allocates fresh workspaces in its convenience entry point.
+The cached variant reuses workspaces; both now retain raw resources through
+device output copying, eager registration and native readout, then synchronize
+once before returning completed resources. No barrier occurs between raw stages
+and readout. The private guard synchronizes on errors/unwind and retains raw
+resources if completion remains unknown. This still synchronizes per layer;
+request-wide resource scheduling remains required. Normal CUDA
 plan resolution remains rejected until hardware parity and production resource
 integration are complete. The ignored
 `raw_recurrent_full_layer_matches_cpu_and_reuses_module` gate exercises the
@@ -380,7 +384,7 @@ registered in eager, so later reuse cannot overwrite a previously returned
 result. The raw full-layer gate uses different inputs for the two calls and
 compares both outputs after reuse. This implements scratch-buffer reuse for
 matching shapes/runtime inside the admitted callback; raw operand copies,
-the intermediate completion barrier and production cache integration remain.
+per-layer completion and production cache integration remain.
 
 `cuda::CudaStageRun` is a raw-session-scoped pending owner. Its unsafe
 `enqueue` takes the module, eight input tensors and three workspace tensors
