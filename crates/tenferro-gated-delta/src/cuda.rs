@@ -340,6 +340,111 @@ impl CudaKernels {
     }
 }
 
+/// Owned operands in [`StageBuffers`] order: mixed input, convolution weight,
+/// a, b, decay, bias, z and normalization weight.
+pub type OwnedStageInputs = [tenferro_tensor::TypedTensor<f32>; 8];
+
+/// Owned scratch/output in [`StageBuffers`] order: convolved, scanned, output.
+pub type OwnedStageOutputs = [tenferro_tensor::TypedTensor<f32>; 3];
+
+/// Pending raw stages with stream-scoped ownership of every operand and module.
+///
+/// Keep this inside the raw session. [`Self::finish`] returns resources for
+/// reuse only after completion. Dropping, including unwinding, synchronizes;
+/// if completion cannot be established, resources are deliberately leaked.
+/// This is a low-level owner, not enabled full-layer production dispatch.
+pub struct CudaStageRun<'a, 's> {
+    session: &'a Session<'s>,
+    kernels: Option<CudaKernels>,
+    inputs: Option<OwnedStageInputs>,
+    outputs: Option<OwnedStageOutputs>,
+    completed: bool,
+}
+
+impl<'a, 's> CudaStageRun<'a, 's> {
+    /// Enqueue three stages, taking ownership before the first launch.
+    /// No success-path barrier occurs until [`Self::finish`].
+    ///
+    /// # Safety
+    /// All allocations must be disjoint, with no conflicting aliases/access
+    /// while work is pending, as required by [`CudaKernels::enqueue_stages`].
+    /// Resources must not have outstanding work on other streams. The owner
+    /// manages their subsequent asynchronous lifetime, including enqueue errors.
+    pub unsafe fn enqueue(
+        session: &'a Session<'s>,
+        kernels: CudaKernels,
+        geometry: &RecurrentGeometry,
+        inputs: OwnedStageInputs,
+        outputs: OwnedStageOutputs,
+        eps: f32,
+    ) -> tenferro_tensor::Result<Self> {
+        let mut run = Self {
+            session,
+            kernels: Some(kernels),
+            inputs: Some(inputs),
+            outputs: Some(outputs),
+            completed: false,
+        };
+        let [mixed_input, conv_weight, a, b, a_decay, dt_bias, z, norm] =
+            run.inputs.as_ref().expect("owned inputs");
+        let [convolved, scanned, output] = run.outputs.as_mut().expect("owned outputs");
+        // SAFETY: caller guarantees allocation separation and exclusive access;
+        // run owns all resources before enqueue, and Drop fences even on error.
+        unsafe {
+            run.kernels
+                .as_ref()
+                .expect("owned kernels")
+                .enqueue_stages(
+                    session,
+                    geometry,
+                    StageBuffers {
+                        mixed_input,
+                        conv_weight,
+                        a,
+                        b,
+                        a_decay,
+                        dt_bias,
+                        z,
+                        norm,
+                        convolved,
+                        scanned,
+                        output,
+                    },
+                    eps,
+                )?;
+        }
+        Ok(run)
+    }
+
+    /// Borrow the device output while the owner retains pending resources.
+    pub fn output(&self) -> &tenferro_tensor::TypedTensor<f32> {
+        &self.outputs.as_ref().expect("owned outputs")[2]
+    }
+
+    /// Complete the stream and recover module, inputs and workspace for reuse.
+    pub fn finish(
+        mut self,
+    ) -> tenferro_tensor::Result<(CudaKernels, OwnedStageInputs, OwnedStageOutputs)> {
+        self.session.synchronize()?;
+        self.completed = true;
+        Ok((
+            self.kernels.take().expect("owned kernels"),
+            self.inputs.take().expect("owned inputs"),
+            self.outputs.take().expect("owned outputs"),
+        ))
+    }
+}
+
+impl Drop for CudaStageRun<'_, '_> {
+    fn drop(&mut self) {
+        if !self.completed && self.session.synchronize().is_err() {
+            std::mem::forget(self.inputs.take());
+            std::mem::forget(self.outputs.take());
+            std::mem::forget(self.kernels.take());
+        }
+    }
+}
+
 /// Validated geometry for device-resident chunk decay preparation.
 #[derive(Clone, Copy, Debug)]
 pub struct ChunkDecayGeometry {

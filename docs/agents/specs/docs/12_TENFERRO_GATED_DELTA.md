@@ -357,11 +357,23 @@ must ensure disjoint underlying allocations and retain all buffers/module
 until successful stream synchronization, including when a later launch
 fails. A safe full-layer execution owner and hardware parity remain pending.
 
+`cuda::CudaStageRun` is a raw-session-scoped pending owner. Its unsafe
+`enqueue` takes the module, eight input tensors and three workspace tensors
+before launch; callers still guarantee disjoint allocations and no conflicting
+access. `finish` synchronizes once and returns all resources for reuse. Drop,
+including unwinding or partial enqueue failure, also establishes completion;
+if synchronization fails it leaks owned resources rather than freeing them.
+The lifetime ties the owner to the borrowed raw session. This addresses raw
+stage lifetime ownership, but does not provide safe full-layer dispatch or a
+cross-request cache outside the admitted execution scope.
+
 The ignored hardware test `tests/cuda_stages.rs` compares the three-stage
 output with causal convolution plus the existing CPU recurrent oracle for
 lengths 1/63/64/65/127/128/129, key widths 1/33/256, and grouped heads. It
-synchronizes once after all stages, including after enqueue errors; if the
-barrier fails it intentionally retains the allocations and kernel module.
+uses the pending owner and repeats execution with the same loaded module and
+workspaces before comparing against the oracle, verifying state reset on reuse.
+Each completed execution synchronizes once after all stages; errors and
+unwinding retain resources until completion is established.
 This is a raw-stage gate, not full-layer mask/padding or large-key coverage.
 Run it explicitly on a CUDA runner with NVRTC available:
 

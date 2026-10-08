@@ -5,7 +5,7 @@
 
 use tenferro_gated_delta::{
     DeltaScanInputs,
-    cuda::{CudaKernels, RecurrentGeometry, StageBuffers},
+    cuda::{CudaKernels, CudaStageRun, RecurrentGeometry},
     delta_scan_reference,
     ops::{l2_normalize, sigmoid, silu, softplus},
 };
@@ -134,43 +134,27 @@ fn recurrent_stages_match_cpu_at_boundaries_and_grouped_heads() {
                     with_cuda_exec_session(session, |cuda| {
                         cuda.with_raw("cuda_stage_parity", |raw| {
                             let kernels = CudaKernels::compile(raw, &arch)?;
-                            let mut conv = raw.alloc_output::<f32>(&[length, channels])?;
-                            let mut scan = raw.alloc_output::<f32>(&[length, vh * vd])?;
-                            let mut out = raw.alloc_output::<f32>(&[length, vh * vd])?;
-                            let mut retained = Vec::new();
-                            for tensor in inputs.iter().chain([&conv, &scan, &out]) {
-                                retained.push(raw.retain_tensor(tensor, "cuda_stage_parity")?);
-                            }
-                            // SAFETY: each upload/allocation is distinct; all resources
-                            // are retained until the barrier, including on launch errors.
-                            let launched = unsafe {
-                                kernels.enqueue_stages(
-                                    raw,
-                                    &geometry,
-                                    StageBuffers {
-                                        mixed_input: &inputs[0],
-                                        conv_weight: &inputs[1],
-                                        a: &inputs[2],
-                                        b: &inputs[3],
-                                        a_decay: &inputs[4],
-                                        dt_bias: &inputs[5],
-                                        z: &inputs[6],
-                                        norm: &inputs[7],
-                                        convolved: &mut conv,
-                                        scanned: &mut scan,
-                                        output: &mut out,
-                                    },
-                                    1e-5,
-                                )
+                            let outputs = [
+                                raw.alloc_output::<f32>(&[length, channels])?,
+                                raw.alloc_output::<f32>(&[length, vh * vd])?,
+                                raw.alloc_output::<f32>(&[length, vh * vd])?,
+                            ];
+                            // SAFETY: all uploads/allocations are distinct, and
+                            // ownership prevents conflicting accesses until finish.
+                            let pending = unsafe {
+                                CudaStageRun::enqueue(
+                                    raw, kernels, &geometry, inputs, outputs, 1e-5,
+                                )?
                             };
-                            if let Err(error) = raw.synchronize() {
-                                // GPU completion is unknown: retain allocations/module
-                                // permanently rather than racing resource reclamation.
-                                std::mem::forget(retained);
-                                std::mem::forget(kernels);
-                                return Err(error);
-                            }
-                            launched?;
+                            let (kernels, inputs, outputs) = pending.finish()?;
+                            // Reuse the loaded module and all workspaces. A second
+                            // scan must restart its recurrent state and match the oracle.
+                            let pending = unsafe {
+                                CudaStageRun::enqueue(
+                                    raw, kernels, &geometry, inputs, outputs, 1e-5,
+                                )?
+                            };
+                            let (_, _, [_, _, out]) = pending.finish()?;
                             Ok(Tensor::from_typed(out))
                         })
                     })
