@@ -512,7 +512,34 @@ pub fn delta_layer_tenferro_native(
     x: &EagerTensor,
     mask: &[f32],
 ) -> AdResult<EagerTensor> {
-    let length = mask.len();
+    let mask_t = constant(session, &[mask.len()], mask)?;
+    delta_layer_tenferro_prepared_mask(session, cfg, weights, x, &mask_t)
+}
+
+/// Tensor-native layer accepting an already prepared attention mask.
+///
+/// `x` is `(hidden, length)` and `mask` is `(length,)`. Both may remain
+/// device-resident across layers; this entry point never reads the mask on the
+/// host. Mask values retain the host wrapper's multiplicative semantics.
+pub fn delta_layer_tenferro_prepared_mask(
+    session: &mut EagerSession<'_>,
+    cfg: &GatedDeltaConfig,
+    weights: &GatedDeltaTensorWeights,
+    x: &EagerTensor,
+    mask: &EagerTensor,
+) -> AdResult<EagerTensor> {
+    cfg.validate().map_err(invalid_weights)?;
+    let mask_dims = mask.shape();
+    if mask_dims.len() != 1 || mask_dims[0] == 0 || x.shape() != [cfg.hidden, mask_dims[0]] {
+        return Err(tenferro_ad::Error::TensorRuntime(
+            tenferro_tensor::Error::invalid_argument(
+                "delta_layer_tenferro_prepared_mask",
+                "shape",
+                "GatedDelta requires x [hidden, length] and a nonempty mask [length]",
+            ),
+        ));
+    }
+    let length = mask_dims[0];
     let key_dim = cfg.key_dim;
     let value_dim = cfg.value_dim;
     let heads = cfg.value_heads;
@@ -521,8 +548,7 @@ pub fn delta_layer_tenferro_native(
     let conv_channels = 2 * key_width + value_width;
     let groups = cfg.value_heads / cfg.key_heads;
 
-    let mask_t = constant(session, &[length], mask)?;
-    let x_masked = session.mul(x, &mask_t)?;
+    let x_masked = session.mul(x, mask)?;
 
     let qkv = linear_col(session, &x_masked, &weights.qkv)?; // (conv_channels, L)
     let mixed = causal_depthwise_silu_tensor(
@@ -697,7 +723,7 @@ mod tests {
         };
         let length = 7usize;
         let x = rand_vec(&mut state, cfg.hidden * length);
-        let mask = vec![1.0f32; length];
+        let mask = vec![0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0];
 
         let reference = delta_layer_reference(&cfg, &weights, &x, &mask).unwrap();
         let native = runtime()
@@ -709,7 +735,8 @@ mod tests {
                     &[cfg.hidden, length],
                     &col_major(cfg.hidden, length, &x)?,
                 )?;
-                let out = delta_layer_tenferro_native(session, &cfg, &tw, &x, &mask)?;
+                let mask = constant(session, &[length], &mask)?;
+                let out = delta_layer_tenferro_prepared_mask(session, &cfg, &tw, &x, &mask)?;
                 let host = session.duplicate_value(&out)?;
                 let values = host.as_slice::<f32>()?;
                 // col-major (hidden, length) -> row-major
