@@ -436,6 +436,18 @@ variation. A full-model faer experiment at 32 or more rows measured L64 B1
 its improvements to the host oracle did not carry over to the production
 tenferro path. Both changes were rejected and reverted.
 
+An additional 2026-10-09 experiment at `61269c4` swapped the existing Laya
+`matrixmultiply` GEMM operands and strides to compute `Yᵀ = W Xᵀ`, retaining
+the same output layout and column-task partition. Existing scalar-oracle and
+parallel GEMM tests passed, but full-model cached tenferro latency did not
+improve overall: L8 B1 100.8 → 104.7 ms, L16 B1 108.9 → 108.5 ms,
+L64 B1 192.7 → 197.8 ms, and L8 B8 186.0 → 184.0 ms. These were sequential
+same-machine runs, portable provider, eight Rayon threads, two warmups and
+median of five measured forwards. The small batch improvement does not justify
+the regressions/variation elsewhere; the source change was rejected and restored.
+Reports are in
+[`bench-laya-gemm-orientation-2026-10-09`](../../../../fixtures/bench-laya-gemm-orientation-2026-10-09).
+
 ## Optional system OpenBLAS projections (2026-10-08)
 
 `cpu-kernels/openblas` links an installed **LP64** OpenBLAS (`libopenblas`)
