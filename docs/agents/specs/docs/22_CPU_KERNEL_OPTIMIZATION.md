@@ -1,10 +1,10 @@
 # CPU Kernel Optimization: BLAS / SIMD Opportunities
 
-**Status:** analysis (priorities to be confirmed with the Jeff timings in `21_SPEED_COMPARISON.md`)  
+**Status:** CPU optimizations implemented; remaining performance differences measured in `21_SPEED_COMPARISON.md`
 **Date:** 2026-10-04  
 **Context:** issue [#2](https://github.com/AtelierArith/tenferro-decision-rs/issues/2)
 
-## Current state
+## Initial baseline (before the optimizations below)
 
 - The host forwards (`forward_reference`) use hand-written triple loops
   (`linear_host` / `linear_into`) with no BLAS or explicit SIMD.
@@ -32,8 +32,8 @@ Measured effect (`21_SPEED_COMPARISON.md`): **12–30×** faster than the naive
 host loops; a further 1.25–1.3× from `rayon` at larger shapes. All parity tests
 still pass.
 
-Still open below (attention `QKᵀ`/`PV`, SIMD elementwise, tenferro weight
-caching, DeltaNet scan).
+The later sections track attention `QKᵀ`/`PV`, SIMD elementwise, tenferro weight
+caching, and the DeltaNet scan.
 
 ## Host-optimized forward (`host_opt`, Jeff) — 2026-10-04
 
@@ -382,3 +382,25 @@ Accelerate (the host DeltaNet kernels), and thread-pool/barrier waits — small
 -shape parallel inefficiency, not Rust bookkeeping. `TensorNative` gains two
 transposes (it is written for `(hidden, length)`), so it is slightly slower than
 before; it only matters off-CPU.
+
+## Parallel Laya GeGLU (2026-10-08)
+
+The fused `tenferro-ext::GegluOp` previously evaluated every token serially.
+Its erf polynomial performs many multiply-adds per element, so the CPU kernel
+now distributes independent token columns across Rayon once the output has
+at least 16,384 elements. Small shapes retain the serial path. The formula and
+per-element evaluation order are unchanged; a regression test checks exact
+floating-point bits against the scalar formula with one and three workers and
+uneven feature/column sizes.
+
+On Ryzen 9 PRO 8945HS, eight Rayon threads, float32, warmup 2 and median of 5,
+cached tenferro Laya L64 B1 improved from 297.3 to 220.2 ms and L8 B8 from
+284.5 to 211.3 ms (about 26% shorter). An intermediate rerun measured 223.5
+and 243.7 ms, respectively; the batching result varies more between runs.
+The host oracle is untouched. This improves the production tenferro path but
+does not eliminate its remaining Julia/Python gap.
+
+Two GEMM alternatives were also measured and rejected: fewer output-column
+tasks improved isolated contractions but had no consistent model-level gain;
+faer was faster on some square projections and slower on the wide MLP
+projection. Neither experimental change is included.

@@ -471,11 +471,20 @@ pub fn geglu_into(u: &[f32], intermediate: usize, cols: usize, out: &mut [f32]) 
     if intermediate == 0 || cols == 0 {
         return;
     }
-    for c in 0..cols {
-        let base = 2 * intermediate * c;
-        let out_base = intermediate * c;
+    let activate = |input: &[f32], output: &mut [f32]| {
         for i in 0..intermediate {
-            out[out_base + i] = gelu_erf_f32(u[base + i]) * u[base + intermediate + i];
+            output[i] = gelu_erf_f32(input[i]) * input[intermediate + i];
+        }
+    };
+    // The erf polynomial performs many fused multiply-adds per element, so
+    // it benefits from threading at smaller sizes than a dense projection.
+    if cols > 1 && intermediate.saturating_mul(cols) >= 1 << 14 {
+        out.par_chunks_mut(intermediate)
+            .zip(u.par_chunks(2 * intermediate))
+            .for_each(|(output, input)| activate(input, output));
+    } else {
+        for (output, input) in out.chunks_mut(intermediate).zip(u.chunks(2 * intermediate)) {
+            activate(input, output);
         }
     }
 }
@@ -952,5 +961,35 @@ mod tests {
             .map(|(a, b)| (a - b).abs())
             .fold(0.0f32, f32::max);
         assert!(diff < 1e-3, "diff {diff}");
+    }
+
+    #[test]
+    fn threaded_geglu_preserves_scalar_results_and_column_layout() {
+        // Uneven feature/column counts exercise partial Rayon work splits.
+        let (intermediate, cols) = (257, 65);
+        let input: Vec<f32> = (0..2 * intermediate * cols)
+            .map(|i| ((i % 103) as f32 - 51.0) / 7.0)
+            .collect();
+        let expected: Vec<f32> = input
+            .chunks_exact(2 * intermediate)
+            .flat_map(|column| {
+                column[..intermediate]
+                    .iter()
+                    .zip(&column[intermediate..])
+                    .map(|(&value, &gate)| gelu_erf_f32(value) * gate)
+            })
+            .collect();
+        for threads in [1, 3] {
+            let pool = rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap();
+            let mut output = vec![f32::NAN; intermediate * cols];
+            pool.install(|| geglu_into(&input, intermediate, cols, &mut output));
+            assert_eq!(
+                output.iter().map(|x| x.to_bits()).collect::<Vec<_>>(),
+                expected.iter().map(|x| x.to_bits()).collect::<Vec<_>>()
+            );
+        }
     }
 }

@@ -1,0 +1,36 @@
+{
+  "blas_threads": 1,
+  "julia_threads": 8,
+  "julia_version": "1.13.1",
+  "load_ms": 4991.020064,
+  "runtime": "julia-cpu",
+  "shapes": [
+    {
+      "batch": 1,
+      "iterations": 5,
+      "length": 8,
+      "ms_mean": 76.8672104,
+      "ms_median": 76.165138,
+      "ms_min": 75.813688
+    },
+    {
+      "batch": 1,
+      "iterations": 5,
+      "length": 16,
+      "ms_mean": 98.5433864,
+      "ms_median": 97.455777,
+      "ms_min": 83.899237
+    },
+    {
+      "batch": 1,
+      "iterations": 5,
+      "length": 64,
+      "ms_mean": 174.902335,
+      "ms_median": 178.539039,
+      "ms_min": 155.979114
+    }
+  ],
+  "warmup": 2,
+  "checkpoint_revision": "0f212b3e72acb4dde3f7da61e925d6ab7f819990",
+  "source_revision": "9e7357af02db9960faee738813e4d26a936a24f3"
+}

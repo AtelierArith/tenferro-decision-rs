@@ -250,3 +250,30 @@ Julia references: Laya 2.44e-6, Jeff 6.68e-6. Laya's wider/longer shapes favor
 PyTorch's CPU kernels; these results do not establish that the performance
 issue is resolved. The existing Apple measurements above are from a different
 machine and should not be combined into ratios with these Python rows.
+
+### Cached tenferro Laya after parallel GeGLU (2026-10-08)
+
+On the same Ryzen CPU, float32, eight Rayon/Julia workers, warmup 2 and median
+of 5, token-column GeGLU parallelism improves production Laya's tenferro
+forward. Julia was remeasured on this machine with eight BLAS threads; these
+are not the earlier Apple-platform timings. Runs were sequential.
+
+| shape | tenferro before (ms) | tenferro after (ms) | Julia (ms) | after / Julia |
+|---|---:|---:|---:|---:|
+| L8 B1 | 113.1 | 101.5 | 72.6 | 1.40× |
+| L64 B1 | 297.3 | 220.2 | 122.0 | 1.80× |
+| L8 B8 | 284.5 | 211.3 | 117.9 | 1.79× |
+
+Raw reports: `fixtures/bench-geglu-cpu-2026-10-08/`. The after report includes
+`bench-suite` machine/build metadata; `source_patch` identifies the uncommitted
+kernel change applied to its recorded Git revision at measurement time. The
+baseline report predates metadata capture in the per-shape example. A second
+after run measured L64 B1 223.5 ms and L8 B8 243.7 ms, so batch timing has some
+run-to-run variation. These results demonstrate a production-path improvement,
+while #2's remaining Laya performance gap stays open.
+
+The same-machine Julia Jeff remeasurement is included in this directory:
+76.2/97.5/178.5 ms at L8/L16/L64, eight Julia workers and one BLAS thread
+(selected by the upstream native backend). Rust HostOpt's Python-comparison
+report above records 109.6/112.3/175.8 ms; the relative Julia gap is therefore
+shape-dependent, rather than a uniform language/runtime advantage.

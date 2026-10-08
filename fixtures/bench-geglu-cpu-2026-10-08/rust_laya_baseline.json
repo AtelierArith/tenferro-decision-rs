@@ -1,0 +1,33 @@
+{
+  "iters": 5,
+  "rows": [
+    {
+      "batch": 1,
+      "host_ms": 87.07960100000001,
+      "length": 8,
+      "tenferro_ms": 113.08924200000001
+    },
+    {
+      "batch": 1,
+      "host_ms": 108.52792,
+      "length": 16,
+      "tenferro_ms": 132.58329999999998
+    },
+    {
+      "batch": 1,
+      "host_ms": 367.516337,
+      "length": 64,
+      "tenferro_ms": 297.26817500000004
+    },
+    {
+      "batch": 8,
+      "host_ms": 266.714989,
+      "length": 8,
+      "tenferro_ms": 284.523486
+    }
+  ],
+  "warmup": 2,
+  "checkpoint_revision": "7b928d828b7b0e022f929d9bd2e44165aa270148",
+  "source_patch": "unmodified 7f843e0 projection and GeGLU kernels",
+  "rayon_threads": 8
+}

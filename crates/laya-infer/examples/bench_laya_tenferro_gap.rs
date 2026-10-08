@@ -128,10 +128,22 @@ fn main() {
         }));
     }
 
+    let mut metadata = bench_suite::BenchMetadata::capture();
+    metadata.profile = Some(
+        if cfg!(debug_assertions) {
+            "debug"
+        } else {
+            "release"
+        }
+        .into(),
+    );
+    let metadata: serde_json::Value = serde_json::from_str(&metadata.to_json()).unwrap();
     println!(
         "{}",
         serde_json::to_string_pretty(&json!({
             "warmup": warmup, "iters": iters, "rows": rows,
+            "metadata": metadata,
+            "rayon_threads": rayon::current_num_threads(),
         }))
         .unwrap()
     );
