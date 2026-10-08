@@ -503,7 +503,7 @@ fn extract(
     rows: usize,
     cols: usize,
 ) -> tenferro_ad::Result<Vec<f32>> {
-    let host = session.duplicate_value(tensor)?;
+    let host = tenferro_infer::output::host_value(session, tensor)?;
     let values = host.as_slice::<f32>()?;
     let mut out = vec![0.0f32; rows * cols];
     for r in 0..rows {

@@ -23,6 +23,7 @@ pub mod cache;
 pub mod embedding;
 pub mod linear;
 pub mod norm;
+pub mod output;
 pub mod rope;
 pub mod softmax;
 pub(crate) mod util;

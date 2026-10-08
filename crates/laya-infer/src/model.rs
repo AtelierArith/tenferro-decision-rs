@@ -1015,7 +1015,9 @@ fn extract_col(
     session: &mut EagerSession<'_>,
     tensor: &EagerTensor,
 ) -> tenferro_ad::Result<Vec<f32>> {
-    Ok(session.duplicate_value(tensor)?.as_slice::<f32>()?.to_vec())
+    Ok(tenferro_infer::output::host_value(session, tensor)?
+        .as_slice::<f32>()?
+        .to_vec())
 }
 
 fn slice_axis(

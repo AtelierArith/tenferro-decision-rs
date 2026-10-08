@@ -76,3 +76,42 @@ fn cuda_erf_and_gelu_use_native_operations() {
         }
     }
 }
+
+#[test]
+#[ignore = "requires CUDA hardware; run explicitly with --ignored"]
+fn cuda_output_boundary_downloads_strided_retained_outputs() {
+    let backend = CudaBackend::new(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
+    let runtime = EagerRuntime::with_cuda_backend(backend).unwrap();
+    let mut retained = Vec::new();
+    for factor in [1.0f32, -0.5, 3.0] {
+        let output = runtime
+            .with_eager_session(|session| {
+                let input = session.constant_from_host(Tensor::from_vec_col_major(
+                    vec![2, 3],
+                    vec![1.0f32, 2., 3., 4., 5., 6.],
+                )?)?;
+                let factor = session
+                    .constant_from_host(Tensor::from_vec_col_major(vec![], vec![factor])?)?;
+                let changed = session.mul(&input, &factor)?;
+                session.transpose(&changed, &[1, 0])
+            })
+            .unwrap()
+            .unwrap();
+        retained.push((factor, output));
+    }
+    // Transfer only after subsequent requests, preserving all original outputs.
+    for (factor, output) in retained {
+        runtime
+            .with_eager_session(|session| {
+                for _ in 0..2 {
+                    let host = tenferro_infer::output::host_value(session, &output)?;
+                    assert_eq!(host.shape(), &[3, 2]);
+                    let expected = [1., 3., 5., 2., 4., 6.].map(|value| value * factor);
+                    assert_eq!(host.as_slice::<f32>()?, &expected);
+                }
+                Ok::<_, tenferro_ad::Error>(())
+            })
+            .unwrap()
+            .unwrap();
+    }
+}

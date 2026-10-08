@@ -1,7 +1,9 @@
 # Tenferro-Native Execution
 
-**Status:** Laya and Jeff production forwards run tenferro-native; caching added  
-**Date:** 2026-10-04  
+**Status:** Eager forwards and caching implemented; full device-resident model execution remains incomplete
+
+**Date:** 2026-10-09
+
 **See:** `AGENTS.md`, `21_SPEED_COMPARISON.md`, `22_CPU_KERNEL_OPTIMIZATION.md`
 
 ## Why
@@ -173,3 +175,33 @@ extension-op fixed cost cancelled the saved eager ops.
   (e.g. attention mask construction) and to future backends.
 - When tenferro exposes device backends, weight tensors prepared the same way
   can be kept device-resident.
+
+
+## Explicit output transfer (2026-10-09)
+
+`tenferro-infer::output::host_value` materializes an eager output in logical
+column-major order, validates session/runtime ownership through
+`duplicate_value`, then calls the admitted backend's `download_to_host` for
+backend storage. Host tensors retain the existing single materialization.
+Laya's `extract_col` and Jeff's final readout use this boundary. Previously,
+these helpers assumed `duplicate_value` produced host storage, although on a
+GPU it only copies within the device and `as_slice` cannot read those bytes.
+
+CPU tests cover transposed views, retained outputs, repeated readout and foreign
+runtime rejection. The ignored CUDA gate
+`cuda_output_boundary_downloads_strided_retained_outputs` covers the same
+logical layout across three requests and repeated downloads. This gate needs
+CUDA hardware; CPU tests and CUDA compilation do not prove device execution.
+
+This fixes the transfer mechanism, not the remaining model integration. Laya
+still computes marker pooling on the host and transfers that intermediate
+back for its action head. Its Bool mask imports also encounter a missing CUDA
+Bool materialization primitive at the pinned revision. Jeff's explicitly
+selected host recurrent path has intermediate host reads; use the native path
+for device computation. GPU engine admission and raw CUDA request integration
+remain separate work. Full GPU model parity and latency remain unverified.
+
+Validation: workspace tests and both ordinary/CUDA-feature workspace Clippy
+passed. The actual Laya Julia question/action reference test passed in release
+(11.01 seconds). Explicitly running the CUDA output gate failed before any
+tensor computation because `libcuda` is absent; device parity is unverified.
