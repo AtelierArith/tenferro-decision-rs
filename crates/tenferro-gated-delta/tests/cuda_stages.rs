@@ -20,6 +20,28 @@ fn values(count: usize, salt: usize) -> Vec<f32> {
         .collect()
 }
 
+// Construct inside the admitted eager callback: loaded modules cannot cross
+// its Send boundary. Drop runs before the enclosing execution scope exits.
+struct CudaScanResources {
+    runtime: tenferro_gpu::cuda::CudaRuntime,
+    inputs: Option<[tenferro_tensor::TypedTensor<f32>; 4]>,
+    buffers: Option<[Tensor; 5]>,
+    kernels: Option<CudaKernels>,
+    completed: bool,
+}
+
+impl Drop for CudaScanResources {
+    fn drop(&mut self) {
+        if !self.completed && self.runtime.synchronize().is_err() {
+            // Completion is unknown, including during unwinding. Retain every
+            // allocation and module rather than returning them to an allocator.
+            std::mem::forget(self.inputs.take());
+            std::mem::forget(self.buffers.take());
+            std::mem::forget(self.kernels.take());
+        }
+    }
+}
+
 #[test]
 #[ignore = "requires CUDA hardware and NVRTC; run explicitly with --ignored"]
 fn recurrent_stages_match_cpu_at_boundaries_and_grouped_heads() {
@@ -336,6 +358,233 @@ fn chunk_decay_matches_cpu_with_padding_and_underflow() {
                     "L={length} output={index}: {actual} vs {expected}"
                 );
             }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires CUDA hardware, NVRTC, cuTENSOR and cuBLAS; run explicitly with --ignored"]
+fn cuda_decay_preparation_feeds_native_large_key_scan_on_one_session() {
+    use tenferro_ad::EagerRuntime;
+    use tenferro_gated_delta::chunked::{PreparedChunkScan, delta_scan_prepared};
+    use tenferro_gated_delta::cuda::{ChunkDecayBuffers, ChunkDecayGeometry};
+    use tenferro_tensor::TensorRead;
+
+    let backend = CudaBackend::new(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
+    let runtime = EagerRuntime::with_cuda_backend(backend.clone()).unwrap();
+    let arch = std::env::var("TENFERRO_CUDA_ARCH").unwrap_or_else(|_| "compute_70".into());
+    let length = 65usize;
+    let kd = 257;
+    let vd = 3;
+    let chunk_size = 64;
+    let chunks = length.div_ceil(chunk_size);
+    let mut q = values(kd * length, 21);
+    let mut k = values(kd * length, 22);
+    for token in 0..length {
+        for (data, scale) in [(&mut q, 1.0 / (kd as f32).sqrt()), (&mut k, 1.0)] {
+            let mut column: Vec<_> = (0..kd).map(|d| data[d * length + token]).collect();
+            l2_normalize(&mut column, 1e-6);
+            for d in 0..kd {
+                data[d * length + token] = column[d] * scale;
+            }
+        }
+    }
+    let v = values(vd * length, 23);
+    let z = values(vd * length, 24);
+    let a = values(length, 25);
+    let b = values(length, 26);
+    let decay = [-0.4f32];
+    let bias = [0.1f32];
+    let beta: Vec<_> = b.iter().copied().map(sigmoid).collect();
+    let log_decay: Vec<_> = a.iter().map(|a| decay[0] * softplus(a + bias[0])).collect();
+    let norm = vec![1.0; vd];
+    let expected = delta_scan_reference(&DeltaScanInputs {
+        q: &q,
+        k: &k,
+        v: &v,
+        z: &z,
+        beta: &beta,
+        decay: &log_decay,
+        norm: &norm,
+        eps: 1e-5,
+        key_dim: kd,
+        value_dim: vd,
+        length,
+    });
+    let upload = |shape, data| {
+        let host = Tensor::from_vec_col_major(shape, data).unwrap();
+        upload_tensor(backend.runtime(), &host)
+            .unwrap()
+            .into_typed::<f32>()
+            .unwrap()
+    };
+    let inputs = [
+        upload(vec![length, 1], a),
+        upload(vec![length, 1], b),
+        upload(vec![1], decay.to_vec()),
+        upload(vec![1], bias.to_vec()),
+    ];
+    let runtime_handle = backend.runtime().clone();
+    let output = runtime
+        .with_eager_session(move |session| {
+            let mut resources = CudaScanResources {
+                runtime: runtime_handle,
+                inputs: Some(inputs),
+                buffers: None,
+                kernels: None,
+                completed: false,
+            };
+            // Prepare model inputs/constants before the raw producer is enqueued.
+            let matrix = |session: &mut tenferro_ad::EagerSession<'_>, rows, data: &[f32]| {
+                let col: Vec<_> = (0..length)
+                    .flat_map(|t| (0..rows).map(move |r| data[r * length + t]))
+                    .collect();
+                session.constant_from_host(Tensor::from_vec_col_major(vec![rows, length], col)?)
+            };
+            let q = matrix(session, kd, &q)?;
+            let k = matrix(session, kd, &k)?;
+            let v = matrix(session, vd, &v)?;
+            let z = matrix(session, vd, &z)?;
+            let state = session.constant_from_host(Tensor::from_vec_col_major(
+                vec![vd, kd],
+                vec![0.0; vd * kd],
+            )?)?;
+            let norm = session.constant_from_host(Tensor::from_vec_col_major(vec![vd], norm)?)?;
+            let eps =
+                session.constant_from_host(Tensor::from_vec_col_major(vec![], vec![1e-5f32])?)?;
+            let inverse = session
+                .constant_from_host(Tensor::from_vec_col_major(vec![], vec![1.0 / vd as f32])?)?;
+            let one =
+                session.constant_from_host(Tensor::from_vec_col_major(vec![], vec![1.0f32])?)?;
+            let geometry = ChunkDecayGeometry::new(length, 1, chunk_size).unwrap();
+            resources.kernels = Some(
+                with_cuda_exec_session(session.backend_session(), |cuda| {
+                    cuda.with_raw("cuda_scan_compile", |raw| CudaKernels::compile(raw, &arch))
+                })
+                .expect("CUDA execution session")?,
+            );
+            // Install every output owner before launch, so an unwind from the
+            // driver or later graph code cannot drop a raw allocation early.
+            resources.buffers = Some(
+                with_cuda_exec_session(session.backend_session(), |cuda| {
+                    cuda.with_raw("cuda_scan_alloc", |raw| {
+                        Ok([
+                            raw.alloc_output::<f32>(&[length, 1])?,
+                            raw.alloc_output::<f32>(&[length, 1])?,
+                            raw.alloc_output::<f32>(&[chunk_size, chunk_size, chunks, 1])?,
+                            raw.alloc_output::<f32>(&[length, 1])?,
+                            raw.alloc_output::<f32>(&[chunks, 1])?,
+                        ]
+                        .map(Tensor::from_typed))
+                    })
+                })
+                .expect("CUDA execution session")?,
+            );
+            let launched = with_cuda_exec_session(session.backend_session(), |cuda| {
+                cuda.with_raw("cuda_scan_prepare", |raw| {
+                    let inputs = resources.inputs.as_ref().expect("owned inputs");
+                    let [cumulative, beta, pair, tail, final_factor] =
+                        resources.buffers.as_mut().expect("owned outputs");
+                    // SAFETY: distinct allocations/module are owned by the
+                    // guard through final synchronization or error unwinding.
+                    unsafe {
+                        resources
+                            .kernels
+                            .as_ref()
+                            .expect("loaded module")
+                            .enqueue_chunk_decay(
+                                raw,
+                                &geometry,
+                                ChunkDecayBuffers {
+                                    a: &inputs[0],
+                                    b: &inputs[1],
+                                    a_decay: &inputs[2],
+                                    dt_bias: &inputs[3],
+                                    cumulative: cumulative.as_typed_mut::<f32>().unwrap(),
+                                    beta: beta.as_typed_mut::<f32>().unwrap(),
+                                    pair: pair.as_typed_mut::<f32>().unwrap(),
+                                    tail: tail.as_typed_mut::<f32>().unwrap(),
+                                    final_factor: final_factor.as_typed_mut::<f32>().unwrap(),
+                                },
+                            )
+                    }
+                })
+            })
+            .expect("CUDA execution session");
+            // Never use `?` outside this result-producing scope after enqueue:
+            // both the success and error paths must reach the final barrier.
+            let computed: tenferro_ad::Result<Tensor> = (|| {
+                launched?;
+                let mut factors = Vec::new();
+                for buffer in resources.buffers.as_ref().expect("owned outputs") {
+                    // Make provider-owned device copies for eager registration;
+                    // raw originals remain owned until the barrier even if import
+                    // fails. There is no host download between producer and scan.
+                    let copy = session
+                        .backend_session()
+                        .to_contiguous_read(TensorRead::from_tensor(buffer))?;
+                    if !copy.is_backend_buffer() {
+                        return Err(tenferro_tensor::Error::invalid_argument(
+                            "cuda_scan",
+                            "storage",
+                            "factor copy must stay device-backed",
+                        )
+                        .into());
+                    }
+                    factors.push(session.constant_from(copy)?);
+                }
+                let cumulative = session.reshape(&factors[0], vec![length])?;
+                let beta = session.reshape(&factors[1], vec![length])?;
+                let pair = session.reshape(&factors[2], vec![chunk_size, chunk_size, chunks])?;
+                let tail = session.reshape(&factors[3], vec![length])?;
+                let final_decay = session.reshape(&factors[4], vec![chunks])?;
+                let (_, output) = delta_scan_prepared(
+                    session,
+                    PreparedChunkScan {
+                        state: &state,
+                        q: &q,
+                        k: &k,
+                        v: &v,
+                        z: &z,
+                        beta: &beta,
+                        cumulative: &cumulative,
+                        pair: &pair,
+                        tail: &tail,
+                        final_decay: &final_decay,
+                        norm_weight: &norm,
+                        eps: &eps,
+                        inverse_value_dim: &inverse,
+                        one: &one,
+                    },
+                    chunk_size,
+                )?;
+                session.duplicate_value(&output)
+            })();
+            let synchronized = with_cuda_exec_session(session.backend_session(), |cuda| {
+                cuda.with_raw("cuda_scan_finish", |raw| raw.synchronize())
+            })
+            .expect("CUDA execution session");
+            if let Err(error) = synchronized {
+                // The raw guard also protects its resources on return/unwind.
+                std::mem::forget(computed);
+                return Err(error.into());
+            }
+            resources.completed = true;
+            computed
+        })
+        .unwrap()
+        .unwrap();
+    let output = download_tensor(backend.runtime(), &output).unwrap();
+    let actual = output.as_slice::<f32>().unwrap();
+    assert_eq!(actual.len(), expected.len());
+    for row in 0..vd {
+        for token in 0..length {
+            let actual = actual[row + token * vd];
+            let expected = expected[row * length + token];
+            assert!(
+                actual.is_finite() && (actual - expected).abs() <= 5e-3,
+                "row={row} token={token}: {actual} vs {expected}"
+            );
         }
     }
 }

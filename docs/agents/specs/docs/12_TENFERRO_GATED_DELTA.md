@@ -429,6 +429,20 @@ decay pass on CPU. This still does not establish CUDA execution parity: the
 CUDA adapter must bind device preparation outputs to eager tensors, manage
 raw resource lifetimes, iterate heads and integrate the full layer.
 
+The ignored hardware gate
+`cuda_decay_preparation_feeds_native_large_key_scan_on_one_session` now
+connects raw decay preparation to the prepared eager scan at key width 257
+and length 65. `EagerSession::backend_session()` supplies the same admitted
+backend for both phases. The test retains raw module/inputs/outputs in a
+scope owner through the final synchronization, including graph errors and
+panic unwinding; unknown completion intentionally retains the raw resources.
+Preparation outputs are copied device-to-device for eager registration, so
+registration errors cannot reclaim the raw allocations prematurely. There
+is no intervening host download or success-path host barrier. The test
+compiles, but remains unverified on hardware in this environment.
+This is a scoped integration harness, not an enabled production layer owner
+or a cross-request compiled-module cache.
+
 For compiler validation without a GPU, run:
 
 ```sh
