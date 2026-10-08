@@ -43,6 +43,7 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # The MVP engine path uses the CPU provider only.
 tenferro-runtime = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb" }
 tenferro-cpu = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb" }
+tenferro-gpu = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb", default-features = false }
 tenferro-tensor = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb" }
 tenferro-ad = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb" }
 tenferro-linalg = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb" }

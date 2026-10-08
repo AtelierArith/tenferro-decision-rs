@@ -8,6 +8,10 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+default = []
+cuda = ["dep:tenferro-gpu"]
+
 [dependencies]
 decision-core.workspace = true
 cpu-kernels.workspace = true
@@ -18,7 +22,7 @@ tenferro-runtime.workspace = true
 tenferro-linalg = { workspace = true, features = ["autodiff"] }
 tenferro-tensor.workspace = true
 tenferro-cpu.workspace = true
+tenferro-gpu = { workspace = true, optional = true, features = ["cuda"] }
 tenferro-infer.workspace = true
 
 [dev-dependencies]
-

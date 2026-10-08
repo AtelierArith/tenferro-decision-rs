@@ -206,8 +206,10 @@ CudaBackend::with_backend_session
 - `session.tensor()/tensor_mut()` validate residency and return bounded device
   spans; `alloc_output::<T>()` allocates; `raw::KernelArg` / `LaunchConfig`
   describe the launch.
-- `NvrtcOptions`, `load_ptx`, `load_cubin`, `compile_nvrtc`; cache modules via
-  `raw::Session::resource`.
+- `NvrtcOptions`, `load_ptx`, `load_cubin`, `compile_nvrtc`. A raw module is
+  `!Send`/`!Sync`, whereas `raw::Session::resource` requires `Send`; keep loaded
+  modules in the thread-bound CUDA execution owner. The resource cache can
+  retain compatible `Send` state, not a raw `Module` directly.
 - Device-side libraries (cuBLASDx, cuSOLVERDx) are callable from downstream
   kernels.
 - Stream ordering and lifetime rules: launch on the session stream, keep

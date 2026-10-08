@@ -1,0 +1,134 @@
+{
+  "nvrtc_version": "12.6",
+  "source": "crates/tenferro-gated-delta/src/cuda/kernels.cu",
+  "source_sha256": "8b6e50b88a8e18a336ac98e59fab2c33609c1197b6c31fd21afec9901a4832d0",
+  "targets": [
+    {
+      "arch": "compute_70",
+      "flags": [
+        "--std=c++14",
+        "--gpu-architecture=compute_70",
+        "--fmad=false"
+      ],
+      "ptx_bytes": 25901,
+      "signatures": {
+        "gated_delta_conv_silu": [
+          "u64",
+          "u64",
+          "u64",
+          "u32",
+          "u32",
+          "u32"
+        ],
+        "gated_delta_recurrent": [
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u32",
+          "u32",
+          "u32",
+          "u32",
+          "u32"
+        ],
+        "gated_delta_norm_gate": [
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u32",
+          "u32",
+          "f32"
+        ]
+      },
+      "log": ""
+    },
+    {
+      "arch": "compute_80",
+      "flags": [
+        "--std=c++14",
+        "--gpu-architecture=compute_80",
+        "--fmad=false"
+      ],
+      "ptx_bytes": 25901,
+      "signatures": {
+        "gated_delta_conv_silu": [
+          "u64",
+          "u64",
+          "u64",
+          "u32",
+          "u32",
+          "u32"
+        ],
+        "gated_delta_recurrent": [
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u32",
+          "u32",
+          "u32",
+          "u32",
+          "u32"
+        ],
+        "gated_delta_norm_gate": [
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u32",
+          "u32",
+          "f32"
+        ]
+      },
+      "log": ""
+    },
+    {
+      "arch": "compute_90",
+      "flags": [
+        "--std=c++14",
+        "--gpu-architecture=compute_90",
+        "--fmad=false"
+      ],
+      "ptx_bytes": 25901,
+      "signatures": {
+        "gated_delta_conv_silu": [
+          "u64",
+          "u64",
+          "u64",
+          "u32",
+          "u32",
+          "u32"
+        ],
+        "gated_delta_recurrent": [
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u32",
+          "u32",
+          "u32",
+          "u32",
+          "u32"
+        ],
+        "gated_delta_norm_gate": [
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u32",
+          "u32",
+          "f32"
+        ]
+      },
+      "log": ""
+    }
+  ],
+  "gpu_execution_tested": false
+}

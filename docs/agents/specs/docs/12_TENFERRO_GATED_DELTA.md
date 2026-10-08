@@ -334,6 +334,30 @@ Constraints:
 CUDA support is behind a `cuda` feature; the crate compiles and its CPU paths
 remain testable without a GPU.
 
+The current optional component is `cuda::CudaKernels`, which compiles and holds
+raw handles for convolution/SiLU, the register-state scan (`key_dim <= 256`)
+with fused Q/K normalization and beta/decay gates, and output RMSNorm/gating.
+It is not yet wired into full layer dispatch. The scan owns one warp per value
+row; the norm/gate epilogue is separate because it reduces across value rows.
+The source documents buffer layouts, argument order, and launch geometry.
+Loaded modules must stay in a thread-bound execution owner until queued work
+completes; the raw launch contract is not automatically managed by this helper.
+
+For compiler validation without a GPU, run:
+
+```sh
+python3 tools/check_cuda_kernels.py --nvrtc-library "$NVRTC_LIBRARY"
+```
+
+This validates PTX generation and parameter widths/order for virtual targets
+`compute_70`, `compute_80`, and `compute_90`. It neither launches kernels nor
+proves CPU/CUDA numerical parity, residency, or asynchronous lifetime safety.
+Those exit criteria, large-key chunked execution, and the full layer adapter
+remain open. CUDA plan requests continue to return `UnsupportedConfig`.
+The 2026-10-08 compiler report is saved in
+`fixtures/cuda-compile-2026-10-08/nvrtc.json`, using the NVIDIA
+`nvidia-cuda-nvrtc-cu12==12.6.85` distribution (NVRTC version 12.6).
+
 ---
 
 ## 11. Workspace and prepared plans

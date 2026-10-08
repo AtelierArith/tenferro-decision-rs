@@ -17,11 +17,14 @@
 //! - [`extension`]: the `GatedDelta` tenferro extension op
 //! - [`gated_delta`]: the direct entry point dispatching on a plan
 //!
-//! Still to come: CUDA kernels (`cuda` feature; no hardware here to validate).
+//! The optional `cuda` feature exposes compiled raw CUDA kernel handles.
+//! Full device-resident layer dispatch and hardware parity are still pending.
 
 pub mod chunked;
 pub mod config;
 pub mod conv;
+#[cfg(feature = "cuda")]
+pub mod cuda;
 pub mod extension;
 pub mod layer;
 pub mod ops;

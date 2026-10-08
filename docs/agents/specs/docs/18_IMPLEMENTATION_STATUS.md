@@ -255,7 +255,13 @@ bundled webpki roots).
 - Cross-checks: the fused recurrent kernel matches the reference to <1e-6; the
   direct entry matches for every algorithm; the extension op matches the
   reference through the eager session.
-- Remaining: CUDA kernels (`cuda` feature; no hardware here to validate) and
+- Optional CUDA kernel component: `cuda::CudaKernels` compiles and retains raw
+  handles for causal conv/SiLU, warp-owned register-state recurrent scan with
+  fused Q/K normalization and beta/decay gates, and output RMSNorm/gate.
+  `tools/check_cuda_kernels.py` validates PTX generation and entry-point ABIs
+  with NVRTC without a GPU. This does not enable full CUDA layer dispatch.
+- Remaining: CUDA layer integration, large-key chunked kernels and device
+  parity (no hardware here to validate), and
   wiring `jeff-infer`'s forward onto the plan/extension path.
 
 ## Blocked / needs external input

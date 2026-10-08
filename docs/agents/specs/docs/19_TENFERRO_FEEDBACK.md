@@ -77,6 +77,23 @@ quality** issue (`tenferro-cpu-fused` / `strided_fused` on CPU), not a
 dispatch/segmentation issue: the fused region's per-element cost exceeds the
 eager path's sequential per-op SIMD kernels.
 
+## Raw CUDA ownership caveat (2026-10-08)
+
+At the pinned revision, `cuda::raw::Module` and `Function` are `!Send`/`!Sync`.
+`raw::Session::resource` requires `T: Send`; the runtime's
+`ExtensionCacheStore::put` requires `Send + Sync`. Loaded module handles
+therefore cannot be cached directly in either store. A thread-bound CUDA
+execution owner must retain the module instead; do not add unsafe `Send`/`Sync`
+implementations to bypass this boundary.
+
+`raw::Session::launch` explicitly requires modules and device allocations to
+remain live until a subsequent synchronization; launch does not retain them
+for asynchronous completion. An extension-local module that is dropped on
+return is insufficient. Full GatedDelta integration must provide an execution
+owner/lease that spans the device work, with stream-ordered buffer reuse and
+cleanup. The current low-level `CudaKernels` owner exposes handles but neither
+launches nor claims to solve this lifetime contract.
+
 ## Positive findings (not filed)
 
 - `triangular_solve(..., unit_diagonal = true)` fits the chunked Gated DeltaNet
