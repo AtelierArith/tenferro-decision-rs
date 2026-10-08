@@ -60,6 +60,26 @@ def main() -> None:
     )
     print()
 
+    for name, rust, julia in (("jeff", rust_jeff, julia_jeff), ("laya", rust_laya, julia_laya)):
+        filename = f"python_{name}.json"
+        if not os.path.isfile(os.path.join(out, filename)):
+            continue
+        upstream = load(filename)
+        print(f"### {name.title()} — original Python CPU forward (ms, median)")
+        print()
+        print(f"PyTorch {upstream['torch_version']}, Transformers {upstream['transformers_version']}, "
+              f"source `{upstream['source_revision']}`, {upstream['cpu_threads']} threads, float32.")
+        print()
+        print("| shape | Python | Julia | Rust host |")
+        print("|---|---:|---:|---:|")
+        for shape in upstream["shapes"]:
+            length, batch = shape["length"], shape["batch"]
+            r, j = by_shape(rust, length, batch), by_shape(julia, length, batch)
+            rm = r.get("host_opt", {}).get("ms_median", r.get("ms_median")) if r else None
+            jm = j.get("ms_median") if j else None
+            print(f"| {label(length, batch)} | {ms(shape['ms_median'])} | {ms(jm)} | {ms(rm)} |")
+        print()
+
     # ---- Jeff: forward latency ----
     print("### Jeff — forward (ms, median)")
     print()

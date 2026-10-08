@@ -15,7 +15,8 @@
 #
 #   tools/bench_compare.sh --jeff <JEFF_CKPT_DIR> --laya <LAYA_CKPT_DIR> \
 #       [--threads N] [--warmup W] [--iters I] [--no-build] [--json DIR] \
-#       [--acc-env DIR]
+#       [--acc-env DIR] [--python-bin PYTHON] \
+#       [--python-laya-source REPO] [--python-jeff-source REPO]
 #
 #   JEFF_CKPT_DIR  mstrasser/Jeff-Qwen3.5-0.8B snapshot (decision_config.json +
 #                  readout.safetensors + model.safetensors)
@@ -54,6 +55,9 @@ OUT=""
 JEFF=""
 LAYA=""
 ACC_ENV=""
+PYTHON_BIN="python3"
+PYTHON_LAYA_SOURCE=""
+PYTHON_JEFF_SOURCE=""
 
 usage() {
     sed -n '2,41p' "$ROOT/tools/bench_compare.sh" | sed 's/^# \{0,1\}//'
@@ -68,6 +72,9 @@ while [ $# -gt 0 ]; do
         --iters)   ITERS="$2"; shift 2 ;;
         --json)    OUT="$2"; shift 2 ;;
         --acc-env) ACC_ENV="$2"; shift 2 ;;
+        --python-bin) PYTHON_BIN="$2"; shift 2 ;;
+        --python-laya-source) PYTHON_LAYA_SOURCE="$2"; shift 2 ;;
+        --python-jeff-source) PYTHON_JEFF_SOURCE="$2"; shift 2 ;;
         --no-build) BUILD=0; shift ;;
         -h|--help) usage; exit 0 ;;
         *) echo "unknown option: $1" >&2; usage; exit 2 ;;
@@ -106,6 +113,18 @@ run julia "-t$THREADS" --project=extern/JeffClient.jl \
     tools/bench_jeff_real.jl "$JEFF" "$WARMUP" "$ITERS" > "$OUT/julia_jeff.json"
 run julia "-t$THREADS" --project=extern/Laya.jl \
     tools/bench_laya_real.jl "$LAYA" "$WARMUP" "$ITERS" > "$OUT/julia_laya.json"
+
+# Optional original PyTorch forwards, using the same checkpoint and thread budget.
+if [ -n "$PYTHON_LAYA_SOURCE" ]; then
+    run "$PYTHON_BIN" tools/bench_python_real.py laya "$LAYA" \
+        --source "$PYTHON_LAYA_SOURCE" --threads "$THREADS" \
+        --warmup "$WARMUP" --iters "$ITERS" > "$OUT/python_laya.json"
+fi
+if [ -n "$PYTHON_JEFF_SOURCE" ]; then
+    run "$PYTHON_BIN" tools/bench_python_real.py jeff "$JEFF" \
+        --source "$PYTHON_JEFF_SOURCE" --threads "$THREADS" \
+        --warmup "$WARMUP" --iters "$ITERS" > "$OUT/python_jeff.json"
+fi
 
 # Optional Apple-silicon runs with Accelerate BLAS (Julia's fastest CPU path).
 # The same environment provides AppleAccelerate for both models.

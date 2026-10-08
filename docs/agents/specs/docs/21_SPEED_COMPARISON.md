@@ -184,3 +184,59 @@ decode shapes the gap is in).
 the raw row-major weight give exactly that. A single-threaded or row-major-`A`
 variant is 3–5× slower, which is why the host path parallelizes over output
 columns.
+
+## Original Python / PyTorch comparison
+
+`tools/bench_python_real.py` runs the upstream forward directly, including the
+trained readout and (for Laya) action head. It uses the same fixed prepared
+batches as the Rust and Julia scripts, float32 on CPU, inference mode, and an
+explicit thread count. Checkpoint loading is timed separately. The L8 B1 logits
+must pass a comparison with the committed production Julia reference before
+benchmark results are accepted. This measures forward latency; tokenization,
+prompt rendering, and answer conversion are excluded on all sides.
+
+Pass `--python-bin`, `--python-laya-source`, and `--python-jeff-source` to
+`tools/bench_compare.sh` to include the Python rows in its Markdown report.
+The source arguments refer to local upstream Git checkouts, not installed
+package aliases; the JSON captures their revisions and the PyTorch/Transformers
+versions. The Python process forces offline Hub access.
+
+Example (in an isolated Python environment with CPU torch, torchvision,
+transformers, safetensors, Pillow, and NumPy installed):
+
+```sh
+python tools/bench_python_real.py laya "$LAYA_CHECKPOINT" \
+  --source "$LAYA_SOURCE" --threads 8 --warmup 2 --iters 5
+python tools/bench_python_real.py jeff "$JEFF_CHECKPOINT" \
+  --source extern/JeffClient.jl/extern/jeff --threads 8 --warmup 2 --iters 5
+```
+
+Laya upstream: https://github.com/NandhaKishorM/laya (the original PyTorch
+implementation, rather than the MLX port). Jeff upstream:
+https://github.com/firelex/jeff (the pinned nested submodule).
+
+### Ryzen 9 PRO 8945HS CPU measurement (2026-10-08)
+
+Linux x86_64, 8 physical / 16 logical CPUs; 8 PyTorch/Rayon threads, float32,
+2 warmup forwards and 5 measured forwards, median. Runs were sequential;
+model loading and input preparation are excluded. Raw samples and dependency
+versions: `fixtures/bench-python-cpu-2026-10-08/`.
+
+| model | shape | Python PyTorch (ms) | Rust host (ms) | Rust / Python |
+|---|---|---:|---:|---:|
+| Laya | L8 B1 | 86.9 | 88.0 | 1.01× |
+| Laya | L64 B1 | 135.3 | 370.6 | 2.74× |
+| Laya | L8 B8 | 158.3 | 274.4 | 1.73× |
+| Jeff | L8 B1 | 132.6 | 109.6 | 0.83× |
+| Jeff | L16 B1 | 143.1 | 112.3 | 0.78× |
+| Jeff | L64 B1 | 196.4 | 175.8 | 0.90× |
+
+PyTorch 2.14.1+cpu, torchvision 0.29.1+cpu, Transformers 5.17.0,
+safetensors 0.8.0, Python 3.12.3. Jeff uses the Transformers CPU reference
+DeltaNet kernels (`causal_conv1d` and `flash-linear-attention` are absent);
+this comparison does not measure the optional CUDA kernels or torch.compile.
+Laya uses the upstream eager backend. L8 B1 logit errors against the committed
+Julia references: Laya 2.44e-6, Jeff 6.68e-6. Laya's wider/longer shapes favor
+PyTorch's CPU kernels; these results do not establish that the performance
+issue is resolved. The existing Apple measurements above are from a different
+machine and should not be combined into ratios with these Python rows.
