@@ -143,3 +143,40 @@ fn native_gelu_matches_cpu_erf_form() {
     eprintln!("native GELU F32 max absolute error: {max_error}");
     assert!(max_error <= 2e-6);
 }
+
+#[test]
+fn cached_native_gelu_reuses_constants_across_changed_inputs_and_runtime() {
+    let runtimes = [EagerRuntime::new().unwrap(), EagerRuntime::new().unwrap()];
+    let mut cache = tenferro_infer::TensorCache::new();
+    let mut retained = Vec::new();
+    let mut count = 0;
+    for runtime in &runtimes {
+        for shift in [0.0f32, 0.25, -0.5] {
+            let (cached, plain) = runtime
+                .with_eager_session(|session| {
+                    let data = vec![-2.0 + shift, 0.0 + shift, 2.0 + shift, 3.0 + shift];
+                    let x = session
+                        .constant_from_host(Tensor::from_vec_col_major(vec![2, 2], data)?)?;
+                    // Exercise a strided feature-first view as well as changed data.
+                    let x = session.transpose(&x, &[1, 0])?;
+                    let output =
+                        tenferro_ext::gelu_erf_tensor_native_cached(session, &mut cache, &x)?;
+                    let plain = tenferro_ext::gelu_erf_tensor_native(session, &x)?;
+                    Ok::<_, tenferro_ad::Error>((output, plain))
+                })
+                .unwrap()
+                .unwrap();
+            let actual = cached.value().unwrap().as_slice::<f32>().unwrap().to_vec();
+            assert_eq!(actual, plain.value().unwrap().as_slice::<f32>().unwrap());
+            if count == 0 {
+                count = cache.len();
+            }
+            assert!(count > 0);
+            assert_eq!(cache.len(), count);
+            retained.push((cached, actual));
+            for (old, expected) in &retained {
+                assert_eq!(old.value().unwrap().as_slice::<f32>().unwrap(), expected);
+            }
+        }
+    }
+}

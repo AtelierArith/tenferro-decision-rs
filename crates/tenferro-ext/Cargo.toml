@@ -18,4 +18,5 @@ tenferro-runtime.workspace = true
 tenferro-tensor.workspace = true
 tenferro-cpu.workspace = true
 cpu-kernels.workspace = true
+tenferro-infer.workspace = true
 tenferro-gpu = { workspace = true, optional = true, features = ["cuda"] }

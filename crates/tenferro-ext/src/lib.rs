@@ -38,7 +38,10 @@ pub use laya_attention::{
 };
 pub use layernorm::{EagerSessionLayerNormExt, LAYER_NORM_FF_FAMILY_ID, LayerNormFeatureFirstOp};
 pub use linear::{EagerSessionLinearExt, LINEAR_FAMILY_ID, LinearOp};
-pub use native_erf::{erf_tensor_native, gelu_erf_tensor_native};
+pub use native_erf::{
+    erf_tensor_native, erf_tensor_native_cached, gelu_erf_tensor_native,
+    gelu_erf_tensor_native_cached,
+};
 pub use rms_norm::{EagerSessionRmsNormExt, RMS_NORM_FAMILY_ID, RmsNormLastOp};
 
 use std::any::Any;

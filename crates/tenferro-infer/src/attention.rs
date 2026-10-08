@@ -33,7 +33,7 @@ pub fn attention(
             rhs_batch_dims: [0, 1].as_slice().into(),
         },
     )?;
-    let scores = session.scale_real(&scores, scale)?;
+    let scores = crate::util::scale_real(session, &scores, scale)?;
 
     let probs = match mask {
         Some(mask) => {

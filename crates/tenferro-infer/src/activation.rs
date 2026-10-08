@@ -46,14 +46,14 @@ pub fn gated_silu(
 pub fn gelu(session: &mut EagerSession<'_>, x: &EagerTensor) -> Result<EagerTensor> {
     let x2 = session.mul(x, x)?;
     let x3 = session.mul(&x2, x)?;
-    let cubic = session.scale_real(&x3, 0.044715)?;
+    let cubic = crate::util::scale_real(session, &x3, 0.044715)?;
     let inner = session.add(x, &cubic)?;
     let root_two_over_pi = (2.0 / PI).sqrt();
-    let inner = session.scale_real(&inner, root_two_over_pi)?;
+    let inner = crate::util::scale_real(session, &inner, root_two_over_pi)?;
     let tanh = session.tanh(&inner)?;
     let one = scalar_like(session, x, 1.0)?;
     let gate = session.add(&tanh, &one)?;
-    let half = session.scale_real(x, 0.5)?;
+    let half = crate::util::scale_real(session, x, 0.5)?;
     session.mul(&half, &gate)
 }
 

@@ -54,7 +54,9 @@ CPU fused model extensions are selected using the admitted CPU execution
 marker as well as F32 dtype. Other backends use native dense, norm, attention
 and gated-activation compositions. This routing does not yet establish full
 GPU support: Laya's erf-based GELU now has a native polynomial composition,
-but device parity and CUDA request integration remain pending (see
+with scalar coefficients reused by the model cache. Eager native scaling uses
+explicitly uploaded scalars, and DeltaNet retains its Q multiplier with its
+prepared constants. Device parity and CUDA request integration remain pending (see
 `19_TENFERRO_FEEDBACK.md`).
 
 ### tenferro conventions pinned down

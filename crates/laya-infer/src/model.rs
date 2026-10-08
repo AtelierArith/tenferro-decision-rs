@@ -1078,6 +1078,18 @@ fn layer_norm_feature_first(
     session.transpose(&normalized, &back)
 }
 
+fn gelu_erf_cached(
+    session: &mut EagerSession<'_>,
+    cache: &mut TensorCache,
+    x: &EagerTensor,
+) -> tenferro_ad::Result<EagerTensor> {
+    if tenferro_ext::cpu_extensions_supported(session) {
+        session.gelu_erf(x)
+    } else {
+        tenferro_ext::gelu_erf_tensor_native_cached(session, cache, x)
+    }
+}
+
 /// Linear over axis 0 of an activation `(in, ...)`, returning `(out, ...)`.
 fn linear_feature_first(
     session: &mut EagerSession<'_>,
@@ -1262,7 +1274,7 @@ fn encoder_tensor(
         } else {
             let value = slice_axis(session, &u, 0, 0, intermediate)?;
             let gate = slice_axis(session, &u, 0, intermediate, intermediate)?;
-            let activated = session.gelu_erf(&value)?;
+            let activated = gelu_erf_cached(session, cache, &value)?;
             session.mul(&activated, &gate)?
         };
         let down = linear_feature_first(session, cache, &g, &layer.wo_mlp, d)?;
@@ -1520,7 +1532,7 @@ pub fn forward_tenferro_cached(
         encoder.norm_eps,
     )?;
     let s1 = linear_feature_first(session, cache, &s0, &weights.scorer1, d)?;
-    let g1 = session.gelu_erf(&s1)?;
+    let g1 = gelu_erf_cached(session, cache, &s1)?;
     let s2 = linear_feature_first(session, cache, &g1, &weights.scorer2, 1)?;
     let s2 = session.reshape(&s2, vec![k_count, batch])?;
     let raw_logits = extract_col(session, &s2)?;
@@ -1541,7 +1553,7 @@ pub fn forward_tenferro_cached(
     let pooled = tensor_col(session, vec![d + 4, batch], &pooled)?;
     let action_hidden = weights.act1.weight.len() / (d + 4);
     let a1 = linear_feature_first(session, cache, &pooled, &weights.act1, action_hidden)?;
-    let g2 = session.gelu_erf(&a1)?;
+    let g2 = gelu_erf_cached(session, cache, &a1)?;
     let action = linear_feature_first(session, cache, &g2, &weights.act2, agent.action_count())?;
     let action = extract_col(session, &action)?;
     Ok((logits, action))

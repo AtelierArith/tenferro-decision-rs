@@ -137,6 +137,7 @@ pub struct NativeDeltaConstants {
     zero: EagerTensor,
     one: EagerTensor,
     l2_eps: EagerTensor,
+    inverse_key_scale: EagerTensor,
     norm_eps: EagerTensor,
     initial_state: EagerTensor,
     full_width: usize,
@@ -206,6 +207,7 @@ pub fn prepare_native_constants(
         zero: scalar(session, 0.0)?,
         one: scalar(session, 1.0)?,
         l2_eps: constant(session, &[length], &vec![1e-6f32; length])?,
+        inverse_key_scale: scalar(session, (1.0 / (cfg.key_dim as f64).sqrt()) as f32)?,
         norm_eps: constant(session, &[], &[cfg.eps])?,
         initial_state: constant(
             session,
@@ -335,7 +337,7 @@ fn softplus(
     let one = &constants.one;
     let positive = session.maximum(x, zero)?;
     let abs = session.abs(x)?;
-    let neg_abs = session.scale_real(&abs, -1.0)?;
+    let neg_abs = session.neg(&abs)?;
     let exp = session.exp(&neg_abs)?;
     let shifted = session.add(&exp, one)?;
     let log = session.log(&shifted)?;
@@ -830,8 +832,7 @@ pub fn delta_layer_from_projected_with_constants(
     // reference) and scale Q by 1/sqrt(key_dim).
     let l2_eps = &constants.l2_eps;
     let q = l2_normalize_heads(session, &q, heads, length, l2_eps)?;
-    let inv_scale = 1.0 / (key_dim as f64).sqrt();
-    let q = session.scale_real(&q, inv_scale)?;
+    let q = session.mul(&q, &constants.inverse_key_scale)?;
     let k = l2_normalize_heads(session, &k, heads, length, l2_eps)?;
 
     // Gates: beta = sigmoid(b); decay = a_decay * softplus(a + dt_bias).

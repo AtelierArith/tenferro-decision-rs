@@ -16,6 +16,17 @@ pub(crate) fn scalar_like(
     session.constant_from_host(tensor)
 }
 
+/// Scale floating values with an explicitly uploaded backend-resident scalar.
+/// The pinned eager `scale_real` imports its host scalar without uploading it.
+pub(crate) fn scale_real(
+    session: &mut EagerSession<'_>,
+    x: &EagerTensor,
+    factor: f64,
+) -> Result<EagerTensor> {
+    let factor = scalar_like(session, x, factor)?;
+    session.mul(x, &factor)
+}
+
 /// Insert a singleton at `axis` and broadcast back to `target`.
 pub(crate) fn broadcast_axis(
     session: &mut EagerSession<'_>,

@@ -3,6 +3,8 @@
 use tenferro_ad::{CompareDir, EagerSession, EagerTensor, Result};
 use tenferro_tensor::DType;
 
+use tenferro_infer::TensorCache;
+
 use crate::scalar_like;
 
 /// Erf-based GELU evaluated entirely through native session operations.
@@ -10,11 +12,30 @@ pub fn gelu_erf_tensor_native(
     session: &mut EagerSession<'_>,
     x: &EagerTensor,
 ) -> Result<EagerTensor> {
-    let scaled = session.scale_real(x, std::f64::consts::FRAC_1_SQRT_2)?;
-    let erf = erf_tensor_native(session, &scaled)?;
-    let one = scalar_like(session, x, 1.0)?;
+    gelu_impl(session, x, &mut None)
+}
+
+/// Native GELU with scalar constants reused through the model cache.
+pub fn gelu_erf_tensor_native_cached(
+    session: &mut EagerSession<'_>,
+    cache: &mut TensorCache,
+    x: &EagerTensor,
+) -> Result<EagerTensor> {
+    gelu_impl(session, x, &mut Some(cache))
+}
+
+fn gelu_impl(
+    session: &mut EagerSession<'_>,
+    x: &EagerTensor,
+    cache: &mut Option<&mut TensorCache>,
+) -> Result<EagerTensor> {
+    let factor = scalar(session, x, std::f64::consts::FRAC_1_SQRT_2, cache)?;
+    let scaled = session.mul(x, &factor)?;
+    let erf = erf_impl(session, &scaled, cache)?;
+    let one = scalar(session, x, 1.0, cache)?;
     let gate = session.add(&erf, &one)?;
-    let half = session.scale_real(x, 0.5)?;
+    let half_factor = scalar(session, x, 0.5, cache)?;
+    let half = session.mul(x, &half_factor)?;
     session.mul(&half, &gate)
 }
 
@@ -27,21 +48,38 @@ pub fn gelu_erf_tensor_native(
 /// No tensor values are downloaded. Unsupported backend primitives return
 /// their typed errors.
 pub fn erf_tensor_native(session: &mut EagerSession<'_>, x: &EagerTensor) -> Result<EagerTensor> {
-    let zero = scalar_like(session, x, 0.0)?;
+    erf_impl(session, x, &mut None)
+}
+
+/// Native erf with scalar constants reused through the model cache.
+pub fn erf_tensor_native_cached(
+    session: &mut EagerSession<'_>,
+    cache: &mut TensorCache,
+    x: &EagerTensor,
+) -> Result<EagerTensor> {
+    erf_impl(session, x, &mut Some(cache))
+}
+
+fn erf_impl(
+    session: &mut EagerSession<'_>,
+    x: &EagerTensor,
+    cache: &mut Option<&mut TensorCache>,
+) -> Result<EagerTensor> {
+    let zero = scalar(session, x, 0.0, cache)?;
     let magnitude = match x.dtype() {
         DType::F32 => {
             let abs = session.abs(x)?;
             // Beyond four, erf rounds to one in F32. Bounding the polynomial
             // also prevents overflow for very large finite values/infinities.
-            let limit = scalar_like(session, x, 4.0)?;
+            let limit = scalar(session, x, 4.0, cache)?;
             let t = session.minimum(&abs, &limit)?;
             let s = session.mul(&t, &t)?;
-            let r = polynomial(session, x, &t, &[-1.728_534_7e-5, 3.831_971_3e-4])?;
-            let u = polynomial(session, x, &t, &[-3.883_964_4e-3, 2.425_462_2e-2])?;
+            let r = polynomial(session, x, &t, &[-1.728_534_7e-5, 3.831_971_3e-4], cache)?;
+            let u = polynomial(session, x, &t, &[-3.883_964_4e-3, 2.425_462_2e-2], cache)?;
             let rs = session.mul(&r, &s)?;
             let mut r = session.add(&rs, &u)?;
             for coefficient in [-1.067_778_8e-1, -6.348_466_9e-1, -1.287_175_1e-1] {
-                r = multiply_add_scalar(session, x, &r, &t, coefficient)?;
+                r = multiply_add_scalar(session, x, &r, &t, coefficient, cache)?;
             }
             let rt = session.mul(&r, &t)?;
             let r = session.sub(&rt, &t)?;
@@ -62,17 +100,19 @@ pub fn erf_tensor_native(session: &mut EagerSession<'_>, x: &EagerTensor) -> Res
                     -3.761_253_4e-1,
                     1.283_791_7e-1,
                 ],
+                cache,
             )?;
             let small = session.mul(&small, x)?;
             let small = session.add(&small, x)?;
-            let boundary = scalar_like(session, x, 0.927_734_4)?;
+            let boundary = scalar(session, x, 0.927_734_4, cache)?;
             let use_large = session.compare(&abs, &boundary, CompareDir::Gt)?;
             session.where_select(&use_large, &large, &small)?
         }
         DType::F64 => {
             let abs = session.abs(x)?;
-            let one = scalar_like(session, x, 1.0)?;
-            let scaled = session.scale_real(&abs, 0.327_591_1)?;
+            let one = scalar(session, x, 1.0, cache)?;
+            let factor = scalar(session, x, 0.327_591_1, cache)?;
+            let scaled = session.mul(&abs, &factor)?;
             let denom = session.add(&one, &scaled)?;
             let t = session.div(&one, &denom)?;
             let poly = polynomial(
@@ -86,6 +126,7 @@ pub fn erf_tensor_native(session: &mut EagerSession<'_>, x: &EagerTensor) -> Res
                     -0.284_496_736,
                     0.254_829_592,
                 ],
+                cache,
             )?;
             let poly = session.mul(&poly, &t)?;
             let square = session.mul(&abs, &abs)?;
@@ -113,9 +154,10 @@ fn multiply_add_scalar(
     r: &EagerTensor,
     t: &EagerTensor,
     coefficient: f64,
+    cache: &mut Option<&mut TensorCache>,
 ) -> Result<EagerTensor> {
     let product = session.mul(r, t)?;
-    let constant = scalar_like(session, like, coefficient)?;
+    let constant = scalar(session, like, coefficient, cache)?;
     session.add(&product, &constant)
 }
 
@@ -124,10 +166,23 @@ fn polynomial(
     like: &EagerTensor,
     t: &EagerTensor,
     coefficients: &[f64],
+    cache: &mut Option<&mut TensorCache>,
 ) -> Result<EagerTensor> {
-    let mut r = scalar_like(session, like, coefficients[0])?;
+    let mut r = scalar(session, like, coefficients[0], cache)?;
     for &coefficient in &coefficients[1..] {
-        r = multiply_add_scalar(session, like, &r, t, coefficient)?;
+        r = multiply_add_scalar(session, like, &r, t, coefficient, cache)?;
     }
     Ok(r)
+}
+
+fn scalar(
+    session: &mut EagerSession<'_>,
+    like: &EagerTensor,
+    value: f64,
+    cache: &mut Option<&mut TensorCache>,
+) -> Result<EagerTensor> {
+    match cache {
+        Some(cache) => cache.scalar_like(session, like, value),
+        None => scalar_like(session, like, value),
+    }
 }

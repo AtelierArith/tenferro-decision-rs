@@ -21,12 +21,12 @@ pub fn layer_norm(
     let target = x.shape().to_vec();
 
     let sum = session.reduce_sum(x, Some(&[axis]))?;
-    let mean = session.scale_real(&sum, 1.0 / width)?;
+    let mean = crate::util::scale_real(session, &sum, 1.0 / width)?;
     let mean = broadcast_axis(session, &mean, &target, axis)?;
 
     let centered = session.sub(x, &mean)?;
     let sq = session.reduce_sum_squares(&centered, &[axis])?;
-    let var = session.scale_real(&sq, 1.0 / width)?;
+    let var = crate::util::scale_real(session, &sq, 1.0 / width)?;
     let eps = scalar_like(session, x, eps)?;
     let var_eps = session.add(&var, &eps)?;
     let inv = session.rsqrt(&var_eps)?;
@@ -86,7 +86,7 @@ pub fn rms_norm_with_epsilon(
     let target = x.shape().to_vec();
 
     let sq = session.reduce_sum_squares(x, &[axis])?;
-    let mean_sq = session.scale_real(&sq, 1.0 / width)?;
+    let mean_sq = crate::util::scale_real(session, &sq, 1.0 / width)?;
     let denom = session.add(&mean_sq, eps)?;
     let inv = session.rsqrt(&denom)?;
     let inv = broadcast_axis(session, &inv, &target, axis)?;

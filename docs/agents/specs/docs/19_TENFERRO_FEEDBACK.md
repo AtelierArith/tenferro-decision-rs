@@ -128,9 +128,24 @@ This does not establish full GPU model support. Jeff's default HostRecurrent
 DeltaKernel remains explicitly CPU-only; TensorNative is the portable
 formulation. Raw CUDA request integration, full-model GPU parity and backend
 primitive coverage remain outstanding work. The native erf convenience path
-currently uploads scalar coefficients per call; preparing and caching those
-constants is also required before claiming device-resident production
-constants across requests.
+uploads scalar coefficients per call; cached erf/GELU entry points now reuse
+floating scalar tensors through `TensorCache`. Scalar keys use effective F32
+or F64 bits (preserving signed zeros), and scalar entries are cleared when the
+input runtime changes. Laya's cached forward uses the cached native GELU at
+all three activation sites on non-CPU sessions. CPU fused activation dispatch
+is retained. This covers these activation coefficients, not every model
+constant or input on every backend.
+
+At the pinned revision, eager `scale_real` constructs a host tensor then
+calls `constant_from`, whose CUDA materialization expects a device-resident
+view. Native erf/GELU therefore uses explicitly uploaded scalars and `mul`;
+the cached variant reuses those tensors. Shared inference norm/attention/tanh
+GELU scaling also uses explicit upload plus `mul`. Native DeltaNet prepares
+its inverse key-width square-root scalar with its reusable constants and uses
+`neg` for softplus's negative absolute value. No pinned dependency was changed.
+This avoids the known implicit scalar-placement boundary in these eager model
+paths; actual GPU behavior remains subject to hardware validation. Traced
+`scale_real` behavior and other dtype/primitive coverage are separate concerns.
 
 A diagnostic release run forced only Laya's GeGLU/erf/GELU compositions onto
 the native path on CPU and passed the actual production
@@ -140,6 +155,16 @@ other model operations retained their CPU paths. This provides full-model CPU
 accuracy evidence for the new activation, not GPU evidence. The conditions,
 existing tolerance and result are recorded in
 [`native-erf-production-2026-10-09`](../../../../fixtures/native-erf-production-2026-10-09/report.json).
+
+A follow-up diagnostic selected the cached native GELU at every Laya activation
+site and passed the same production Julia logits/action/answer test. The
+conditions and result are in
+[`report-cached.json`](../../../../fixtures/native-erf-production-2026-10-09/report-cached.json).
+Cache regression tests also exercise changed inputs, strided views, old-output
+retention, scalar bit/dtype identity and runtime replacement. The CUDA gate
+now retains plain and cached erf/GELU outputs across three changed-input
+requests before downloading and comparing them; it remains unverified on
+hardware because libcuda is absent.
 
 ## Positive findings (not filed)
 
