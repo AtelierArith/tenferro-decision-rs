@@ -3,6 +3,8 @@
 //! Projections use tenferro operations. Raw stages own their operands through
 //! completion, then the output projection remains in the eager session.
 
+use std::rc::Rc;
+
 use tenferro_ad::{DType, EagerSession, EagerTensor, Result};
 use tenferro_gpu::cuda::with_cuda_exec_session;
 use tenferro_tensor::{Tensor, TensorRead, TensorView, TypedTensor};
@@ -67,15 +69,15 @@ pub(crate) fn same_raw_weights(previous: &[EagerTensor], current: &[&EagerTensor
 // Local to this function's admitted eager scope: the current execution stream
 // remains active until this guard is completed or dropped. No pending owner
 // escapes the scope or crosses a Send boundary.
-struct PendingLayer {
+pub(crate) struct PendingRecurrentLayer {
     runtime: tenferro_gpu::cuda::CudaRuntime,
-    kernels: Option<CudaKernels>,
+    kernels: Option<Rc<CudaKernels>>,
     inputs: Option<[TypedTensor<f32>; 4]>,
     workspace: Option<CudaRecurrentWorkspace>,
     completed: bool,
 }
 
-impl Drop for PendingLayer {
+impl Drop for PendingRecurrentLayer {
     fn drop(&mut self) {
         if !self.completed && self.runtime.synchronize().is_err() {
             std::mem::forget(self.kernels.take());
@@ -126,6 +128,52 @@ pub fn delta_layer_cuda_recurrent_cached(
     kernels: CudaKernels,
     workspace: Option<CudaRecurrentWorkspace>,
 ) -> Result<(CudaKernels, CudaRecurrentWorkspace, EagerTensor)> {
+    let kernels = Rc::new(kernels);
+    let (mut pending, output) =
+        enqueue_recurrent_layer(session, cfg, weights, x, mask, kernels.clone(), workspace)?;
+    let synchronized = with_cuda_exec_session(session.backend_session(), |cuda| {
+        cuda.with_raw("cuda_recurrent_layer_finish", |raw| raw.synchronize())
+    })
+    .expect("CUDA session checked by enqueue");
+    if let Err(error) = synchronized {
+        std::mem::forget(output);
+        return Err(error.into());
+    }
+    let workspace = pending.complete_workspace();
+    Ok((
+        Rc::try_unwrap(kernels)
+            .ok()
+            .expect("private module ownership"),
+        workspace,
+        output,
+    ))
+}
+
+impl PendingRecurrentLayer {
+    /// Caller establishes stream completion before recovering resources.
+    pub(crate) fn complete_workspace(&mut self) -> CudaRecurrentWorkspace {
+        self.completed = true;
+        self.kernels.take();
+        self.inputs.take();
+        self.workspace.take().expect("owned workspace")
+    }
+
+    pub(crate) fn mark_completed(&mut self) {
+        self.completed = true;
+    }
+}
+
+// Success leaves raw work owned by the scoped request or single-layer caller.
+// Any error/unwind fences through the private pending owner.
+pub(crate) fn enqueue_recurrent_layer(
+    session: &mut EagerSession<'_>,
+    cfg: &GatedDeltaConfig,
+    weights: &GatedDeltaTensorWeights,
+    x: &EagerTensor,
+    mask: &EagerTensor,
+    kernels: Rc<CudaKernels>,
+    workspace: Option<CudaRecurrentWorkspace>,
+) -> Result<(PendingRecurrentLayer, EagerTensor)> {
     let invalid = |message| {
         tenferro_ad::Error::TensorRuntime(tenferro_tensor::Error::invalid_argument(
             "delta_layer_cuda_recurrent",
@@ -226,7 +274,7 @@ pub fn delta_layer_cuda_recurrent_cached(
     let width = cfg.value_heads * cfg.value_dim;
     let runtime = with_cuda_exec_session(session.backend_session(), |cuda| cuda.runtime().clone())
         .expect("CUDA session checked above");
-    let mut pending = PendingLayer {
+    let mut pending = PendingRecurrentLayer {
         runtime,
         kernels: Some(kernels),
         inputs: Some([mixed, a, b, z]),
@@ -302,21 +350,6 @@ pub fn delta_layer_cuda_recurrent_cached(
         let output = session.transpose(&output, &[1, 0])?;
         linear_col(session, &output, &weights.out_proj)
     })();
-    let synchronized = with_cuda_exec_session(session.backend_session(), |cuda| {
-        cuda.with_raw("cuda_recurrent_layer_finish", |raw| raw.synchronize())
-    })
-    .expect("CUDA session checked above");
-    if let Err(error) = synchronized {
-        // Completion is unknown for readout/copies too. Preserve their output
-        // owner while Drop retries the barrier and retains raw resources.
-        std::mem::forget(computed);
-        return Err(error.into());
-    }
-    pending.completed = true;
     let output = computed?;
-    Ok((
-        pending.kernels.take().expect("owned module"),
-        pending.workspace.take().expect("owned workspace"),
-        output,
-    ))
+    Ok((pending, output))
 }

@@ -444,26 +444,31 @@ Native regression tests check different inputs, repeated requests, changed
 epsilon/length/runtime, allocation reuse and retained prior outputs against the
 CPU oracle. Cross-request plan caching and measured CUDA performance remain pending.
 
-`cuda_request::with_cuda_chunked_request` now provides a scoped scheduling
-prototype for multiple chunked layers. Its borrowed request owner retains one
+`cuda_request::with_cuda_request` now provides a scoped scheduling
+prototype for recurrent and chunked layers. Its borrowed request owner retains one
 loaded module through shared `Rc` handles, all projected raw inputs, each
 layer's private workspace and eager output handles. Layers enqueue convolution,
 native scan and readout without an explicit intermediate fence; the wrapper
 synchronizes once after the callback succeeds and only then recovers the module
-and ordered workspaces. The next request may reuse them. Existing single-layer
-entry points use the same enqueue helper and keep their completion fence.
+and ordered `CudaLayerWorkspace` values. The next request may reuse them. The
+default layer call selects recurrent for key widths up to 256 and native
+chunked for larger keys; explicit recurrent/chunked calls are also available.
+A changed formulation replaces that completed workspace slot. Shape/runtime
+changes still require compatible workspaces. Existing single-layer entry points
+use the same enqueue helpers and keep their completion fence.
+`with_cuda_chunked_request` remains a chunked-only facade over the common owner.
 
 The scoped owner has no public constructor and cannot be exported through the
 callback's Send result; no unsafe Send implementation was added. Layer errors
 poison the request, including when the callback ignores the error. Error/unwind
 guards establish stream completion; unknown completion retains module, raw
-resources and eager outputs instead of releasing them. The hardware gate
-composes key-width 7 and 257 layers, including masks and chunk boundaries, then
-reuses two completed workspaces with changed inputs and compares all retained
-outputs against the CPU oracle. This gate still requires explicit GPU execution.
-The prototype covers chunked adapters; recurrent request scheduling, engine
-integration and production dispatch remain pending. It is not GPU parity or
-performance evidence.
+resources and eager outputs instead of releasing them. Hardware gates compose
+key-width 7/256 recurrent layers with a 257-key chunked layer, or two chunked
+layers. Masks, chunk boundaries, three changed-input requests, workspace reuse
+and replacement of recurrent storage with chunked storage are covered; all prior
+outputs are retained until comparison with CPU oracles. These gates still
+require explicit GPU execution. Engine integration and production dispatch
+remain pending. This prototype is not GPU parity or performance evidence.
 
 `cuda::CudaStageRun` is a raw-session-scoped pending owner. Its unsafe
 `enqueue` takes the module, eight input tensors and three workspace tensors

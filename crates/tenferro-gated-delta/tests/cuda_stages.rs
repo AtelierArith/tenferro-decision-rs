@@ -601,7 +601,21 @@ enum FullLayerPath {
 #[test]
 #[ignore = "requires CUDA hardware, NVRTC, cuBLAS and cuTENSOR; run explicitly with --ignored"]
 fn chunked_request_composes_layers_and_reuses_completed_resources() {
-    use tenferro_gated_delta::cuda_request::with_cuda_chunked_request;
+    request_composition_gpu_parity(false, 7);
+}
+
+#[test]
+#[ignore = "requires CUDA hardware, NVRTC, cuBLAS and cuTENSOR; run explicitly with --ignored"]
+fn mixed_request_selects_recurrent_and_chunked_and_reuses_completed_resources() {
+    for key_dim in [7, 256] {
+        request_composition_gpu_parity(true, key_dim);
+    }
+}
+
+fn request_composition_gpu_parity(mixed: bool, key_dim: usize) {
+    use tenferro_gated_delta::cuda_request::{
+        CudaLayerWorkspace, with_cuda_chunked_request, with_cuda_request,
+    };
     use tenferro_gated_delta::{
         Algorithm, GatedDeltaConfig, GatedDeltaWeights, delta_layer_reference,
         prepare_tensor_weights,
@@ -629,7 +643,7 @@ fn chunked_request_composes_layers_and_reuses_completed_resources() {
     let arch = std::env::var("TENFERRO_CUDA_ARCH").unwrap_or_else(|_| "compute_70".into());
     let cfg = GatedDeltaConfig {
         hidden: 8,
-        key_dim: 7,
+        key_dim,
         value_dim: 3,
         key_heads: 2,
         value_heads: 4,
@@ -657,7 +671,7 @@ fn chunked_request_composes_layers_and_reuses_completed_resources() {
                 .collect();
             let input = values(cfg.hidden * length, 81);
             let mut expected = Vec::new();
-            for scale in [1.0, 0.5] {
+            for scale in [1.0, 0.5, 0.75] {
                 let input: Vec<_> = input.iter().map(|&x| x * scale).collect();
                 let first = delta_layer_reference(&cfg, &first_weights, &input, &mask).unwrap();
                 let second = delta_layer_reference(&large, &second_weights, &first, &mask).unwrap();
@@ -680,7 +694,7 @@ fn chunked_request_composes_layers_and_reuses_completed_resources() {
                     .expect("CUDA execution session")?;
                     let mut workspaces = Vec::new();
                     let mut retained = Vec::new();
-                    for scale in [1.0, 0.5] {
+                    for (request_index, scale) in [1.0, 0.5, 0.75].into_iter().enumerate() {
                         let column_major: Vec<_> = (0..length)
                             .flat_map(|t| {
                                 let input = &input;
@@ -691,13 +705,20 @@ fn chunked_request_composes_layers_and_reuses_completed_resources() {
                             vec![cfg.hidden, length],
                             column_major,
                         )?)?;
-                        let (module, buffers, results) = with_cuda_chunked_request(
-                            session,
-                            kernels,
-                            workspaces,
-                            |request, session| {
-                                let first =
-                                    request.layer(session, &cfg, &first_weights, &input, &mask)?;
+                        let forced_chunked = mixed && request_index == 2;
+                        let (module, buffers, results) = if mixed {
+                            with_cuda_request(session, kernels, workspaces, |request, session| {
+                                let first = if forced_chunked {
+                                    request.chunked_layer(
+                                        session,
+                                        &cfg,
+                                        &first_weights,
+                                        &input,
+                                        &mask,
+                                    )?
+                                } else {
+                                    request.layer(session, &cfg, &first_weights, &input, &mask)?
+                                };
                                 let second = request.layer(
                                     session,
                                     &large,
@@ -706,14 +727,61 @@ fn chunked_request_composes_layers_and_reuses_completed_resources() {
                                     &mask,
                                 )?;
                                 Ok([first, second])
-                            },
-                        )?;
+                            })?
+                        } else {
+                            let chunked = workspaces
+                                .into_iter()
+                                .map(|workspace| match workspace {
+                                    CudaLayerWorkspace::Chunked(workspace) => *workspace,
+                                    CudaLayerWorkspace::Recurrent(_) => {
+                                        unreachable!("chunked-only case")
+                                    }
+                                })
+                                .collect();
+                            let (module, buffers, results) = with_cuda_chunked_request(
+                                session,
+                                kernels,
+                                chunked,
+                                |request, session| {
+                                    let first = request.layer(
+                                        session,
+                                        &cfg,
+                                        &first_weights,
+                                        &input,
+                                        &mask,
+                                    )?;
+                                    let second = request.layer(
+                                        session,
+                                        &large,
+                                        &second_weights,
+                                        &first,
+                                        &mask,
+                                    )?;
+                                    Ok([first, second])
+                                },
+                            )?;
+                            (
+                                module,
+                                buffers
+                                    .into_iter()
+                                    .map(|workspace| {
+                                        CudaLayerWorkspace::Chunked(Box::new(workspace))
+                                    })
+                                    .collect(),
+                                results,
+                            )
+                        };
                         assert_eq!(buffers.len(), 2);
+                        assert_eq!(
+                            matches!(buffers[0], CudaLayerWorkspace::Recurrent(_)),
+                            mixed && !forced_chunked
+                        );
+                        assert!(matches!(buffers[1], CudaLayerWorkspace::Chunked(_)));
                         kernels = module;
                         workspaces = buffers;
                         retained.extend(results);
                     }
-                    // Inspect all results only after both requests, so earlier
+                    // Inspect all results only after all requests, so earlier
                     // results must survive workspace reuse. No layer downloads.
                     let mut copies = Vec::new();
                     for output in retained {
