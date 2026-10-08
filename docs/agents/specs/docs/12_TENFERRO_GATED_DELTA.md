@@ -345,6 +345,16 @@ The source documents buffer layouts, argument order, and launch geometry.
 Loaded modules must stay in a thread-bound execution owner until queued work
 completes; the raw launch contract is not automatically managed by this helper.
 
+`cuda::ConvGeometry` and `CudaKernels::enqueue_conv` expose convolution/SiLU
+independently of the register-state scan's key-width limit. The geometry checks
+positive dimensions, signed indexing products and padded threads in the last
+block; even unused threads must not overflow the signed flat index. Recurrent
+geometry applies the same check. Enqueue validates runtime, exact f32 layouts,
+residency and allocation spans; disjointness and lifetime through completion
+remain caller obligations. This enables connecting raw convolution to the
+shared native prepared-projection completion path for large keys; that adapter
+and its hardware parity are still pending.
+
 The `cuda::RecurrentGeometry` adapter validates nonzero dimensions, grouped
 head divisibility, the register-state key limit, CUDA grid-y limits, and all
 signed 32-bit indexing products before exposing scalar arguments and launch

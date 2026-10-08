@@ -75,6 +75,126 @@ impl CudaKernels {
     }
 }
 
+/// Independent convolution geometry, including large-key channel widths.
+#[derive(Clone, Copy, Debug)]
+pub struct ConvGeometry {
+    length: i32,
+    channels: i32,
+    taps: i32,
+    grid_x: u32,
+}
+
+impl ConvGeometry {
+    /// Validate the signed indexing ABI, including padded threads in the last block.
+    pub fn new(length: usize, channels: usize, taps: usize) -> decision_core::Result<Self> {
+        let invalid = || {
+            decision_core::DecisionError::unsupported(
+                "CUDA convolution dimensions exceed supported indexing or launch range",
+            )
+        };
+        if [length, channels, taps].contains(&0) {
+            return Err(invalid());
+        }
+        let count = length.checked_mul(channels).ok_or_else(invalid)?;
+        let padded = count
+            .checked_add(255)
+            .map(|n| n / 256 * 256)
+            .ok_or_else(invalid)?;
+        if padded > i32::MAX as usize
+            || channels
+                .checked_mul(taps)
+                .is_none_or(|n| n > i32::MAX as usize)
+        {
+            return Err(invalid());
+        }
+        let narrow = |n| i32::try_from(n).map_err(|_| invalid());
+        Ok(Self {
+            length: narrow(length)?,
+            channels: narrow(channels)?,
+            taps: narrow(taps)?,
+            grid_x: (padded / 256) as u32,
+        })
+    }
+
+    pub fn arguments(&self) -> [i32; 3] {
+        [self.length, self.channels, self.taps]
+    }
+
+    pub fn launch(&self) -> tenferro_gpu::cuda::raw::LaunchConfig {
+        tenferro_gpu::cuda::raw::LaunchConfig {
+            grid: [self.grid_x, 1, 1],
+            block: [256, 1, 1],
+            shared_mem_bytes: 0,
+        }
+    }
+}
+
+impl CudaKernels {
+    /// Enqueue convolution/SiLU independently of the recurrent key-width limit.
+    /// Performs no allocation, transfer or host barrier.
+    ///
+    /// # Safety
+    /// All allocations must be disjoint and retained, together with this module,
+    /// without conflicting accesses until stream completion, including on error.
+    pub unsafe fn enqueue_conv(
+        &self,
+        session: &Session<'_>,
+        geometry: &ConvGeometry,
+        input: &tenferro_tensor::TypedTensor<f32>,
+        weight: &tenferro_tensor::TypedTensor<f32>,
+        output: &mut tenferro_tensor::TypedTensor<f32>,
+    ) -> tenferro_tensor::Result<()> {
+        use tenferro_gpu::cuda::raw::KernelArg;
+        if self.runtime != session.runtime_identity() {
+            return Err(tenferro_tensor::Error::invalid_argument(
+                "gated_delta.cuda",
+                "runtime",
+                "convolution module must match runtime",
+            ));
+        }
+        let [length, channels, taps] = geometry.arguments();
+        let count = length as usize * channels as usize;
+        check_stage_tensor(input, &[length as usize, channels as usize])?;
+        check_stage_tensor(weight, &[channels as usize, taps as usize])?;
+        check_stage_tensor(output, &[length as usize, channels as usize])?;
+        let input = session.tensor(input)?;
+        let weight = session.tensor(weight)?;
+        let output = session.tensor_mut(output)?;
+        for (bytes, elements) in [
+            (input.byte_len(), count),
+            (weight.byte_len(), channels as usize * taps as usize),
+            (output.byte_len(), count),
+        ] {
+            if elements
+                .checked_mul(size_of::<f32>())
+                .is_none_or(|n| n > bytes)
+            {
+                return Err(tenferro_tensor::Error::invalid_argument(
+                    "gated_delta.cuda",
+                    "allocation",
+                    "convolution allocation is shorter than kernel span",
+                ));
+            }
+        }
+        // SAFETY: ABI, geometry, layouts and spans are validated. The caller
+        // guarantees disjoint allocations and asynchronous resource lifetime.
+        unsafe {
+            session.launch(
+                &self.conv_silu,
+                geometry.launch(),
+                &[
+                    KernelArg::tensor_mut(&output),
+                    KernelArg::tensor(&input),
+                    KernelArg::tensor(&weight),
+                    KernelArg::i32(length),
+                    KernelArg::i32(channels),
+                    KernelArg::i32(taps),
+                ],
+            )
+        }
+    }
+}
+
 /// Validated indexing and launch geometry for the f32 register-state stages.
 ///
 /// This validates scalar dimensions only. The eventual execution adapter must
@@ -128,6 +248,7 @@ impl RecurrentGeometry {
                 return Err(unsupported());
             }
         }
+        ConvGeometry::new(length, channels, taps)?;
         let narrow = |n| i32::try_from(n).map_err(|_| unsupported());
         Ok(Self {
             length: narrow(length)?,
@@ -603,6 +724,35 @@ impl CudaKernels {
 #[cfg(test)]
 mod geometry_tests {
     use super::RecurrentGeometry;
+
+    #[test]
+    fn independent_conv_supports_large_keys_and_rejects_padded_index_overflow() {
+        for length in [1usize, 63, 64, 65, 127, 128, 129] {
+            let channels = 2 * 257 + 6;
+            let geometry = super::ConvGeometry::new(length, channels, 4).unwrap();
+            assert_eq!(geometry.arguments(), [length as i32, channels as i32, 4]);
+            assert_eq!(
+                geometry.launch().grid,
+                [(length * channels).div_ceil(256) as u32, 1, 1]
+            );
+        }
+        let largest_padded_safe = (i32::MAX as usize / 256) * 256;
+        assert!(super::ConvGeometry::new(largest_padded_safe, 1, 1).is_ok());
+        assert!(super::ConvGeometry::new(largest_padded_safe + 1, 1, 1).is_err());
+        assert!(super::ConvGeometry::new(i32::MAX as usize, 1, 1).is_err());
+        assert!(RecurrentGeometry::new(largest_padded_safe / 3 + 1, 1, 1, 1, 1, 1).is_err());
+        for dims in [
+            [0, 1, 1],
+            [1, 0, 1],
+            [1, 1, 0],
+            [usize::MAX, 1, 1],
+            [1, usize::MAX, 1],
+            [1, 1, usize::MAX],
+        ] {
+            let [length, channels, taps] = dims;
+            assert!(super::ConvGeometry::new(length, channels, taps).is_err());
+        }
+    }
 
     #[test]
     fn chunk_geometry_checks_padding_and_index_overflow() {
