@@ -127,6 +127,97 @@ pub fn prepare_kernel_weights(
     })
 }
 
+/// Immutable device constants for repeated native layers of one configuration
+/// and sequence length. The tensors retain their eager runtime.
+#[derive(Clone, Debug)]
+pub struct NativeDeltaConstants {
+    cfg: GatedDeltaConfig,
+    length: usize,
+    neg_big: EagerTensor,
+    zero: EagerTensor,
+    one: EagerTensor,
+    l2_eps: EagerTensor,
+    norm_eps: EagerTensor,
+    initial_state: EagerTensor,
+    full_width: usize,
+    full_lower: EagerTensor,
+    tail_lower: Option<EagerTensor>,
+}
+
+impl NativeDeltaConstants {
+    pub(crate) fn matches(
+        &self,
+        cfg: &GatedDeltaConfig,
+        length: usize,
+        input: &EagerTensor,
+    ) -> bool {
+        self.cfg == *cfg && self.length == length && self.zero.ctx_id() == input.ctx_id()
+    }
+}
+
+/// Prepare native scan constants once on the session's backend. No model
+/// intermediate is read on the host. Invalid/empty geometry returns an error.
+pub fn prepare_native_constants(
+    session: &mut EagerSession<'_>,
+    cfg: &GatedDeltaConfig,
+    length: usize,
+) -> AdResult<NativeDeltaConstants> {
+    cfg.validate().map_err(invalid_weights)?;
+    let invalid = || {
+        invalid_weights(decision_core::DecisionError::invalid_field(
+            "native_delta_constants",
+            "nonempty geometry with representable tensor sizes required",
+        ))
+    };
+    if length == 0 {
+        return Err(invalid());
+    }
+    let state_len = cfg
+        .value_heads
+        .checked_mul(cfg.value_dim)
+        .and_then(|n| n.checked_mul(cfg.key_dim))
+        .ok_or_else(invalid)?;
+    let full_width = cfg.chunk_size.min(length);
+    full_width
+        .checked_mul(full_width)
+        .and_then(|n| n.checked_mul(cfg.value_heads))
+        .ok_or_else(invalid)?;
+    let full_lower = lower_tri_ones(session, full_width)?;
+    let full_lower = session.broadcast_in_dim(
+        &full_lower,
+        &[cfg.value_heads, full_width, full_width],
+        &[1, 2],
+    )?;
+    let tail_width = length % cfg.chunk_size;
+    let tail_lower = if tail_width != 0 && tail_width != full_width {
+        let lower = lower_tri_ones(session, tail_width)?;
+        Some(session.broadcast_in_dim(
+            &lower,
+            &[cfg.value_heads, tail_width, tail_width],
+            &[1, 2],
+        )?)
+    } else {
+        None
+    };
+    Ok(NativeDeltaConstants {
+        cfg: *cfg,
+        length,
+        neg_big: scalar(session, -1.0e30)?,
+        zero: scalar(session, 0.0)?,
+        one: scalar(session, 1.0)?,
+        l2_eps: constant(session, &[length], &vec![1e-6f32; length])?,
+        norm_eps: constant(session, &[], &[cfg.eps])?,
+        initial_state: constant(
+            session,
+            &[cfg.value_heads, cfg.value_dim, cfg.key_dim],
+            &vec![0.0f32; state_len],
+        )?,
+        full_width,
+        full_lower,
+        tail_lower,
+    })
+}
+
 /// A rank-1 constant, used for broadcast scalars.
 fn scalar(session: &mut EagerSession<'_>, value: f32) -> AdResult<EagerTensor> {
     constant(session, &[1], &[value])
@@ -223,15 +314,30 @@ fn slice_time(
     )
 }
 
+fn sigmoid_prepared(
+    session: &mut EagerSession<'_>,
+    x: &EagerTensor,
+    one: &EagerTensor,
+) -> AdResult<EagerTensor> {
+    let neg = session.neg(x)?;
+    let exp = session.exp(&neg)?;
+    let denom = session.add(&exp, one)?;
+    session.div(one, &denom)
+}
+
 /// `softplus(x) = max(x, 0) + log(1 + exp(-|x|))`, matching [`crate::ops`].
-fn softplus(session: &mut EagerSession<'_>, x: &EagerTensor) -> AdResult<EagerTensor> {
-    let zero = scalar(session, 0.0)?;
-    let one = scalar(session, 1.0)?;
-    let positive = session.maximum(x, &zero)?;
+fn softplus(
+    session: &mut EagerSession<'_>,
+    x: &EagerTensor,
+    constants: &NativeDeltaConstants,
+) -> AdResult<EagerTensor> {
+    let zero = &constants.zero;
+    let one = &constants.one;
+    let positive = session.maximum(x, zero)?;
     let abs = session.abs(x)?;
     let neg_abs = session.scale_real(&abs, -1.0)?;
     let exp = session.exp(&neg_abs)?;
-    let shifted = session.add(&exp, &one)?;
+    let shifted = session.add(&exp, one)?;
     let log = session.log(&shifted)?;
     session.add(&positive, &log)
 }
@@ -391,29 +497,15 @@ fn delta_scan_chunked_batched(
     beta: &EagerTensor,
     decay: &EagerTensor,
     norm_weight: &EagerTensor,
-    eps: f64,
+    constants: &NativeDeltaConstants,
 ) -> AdResult<EagerTensor> {
-    let neg_big = scalar(session, -1.0e30)?;
-    let zero = scalar(session, 0.0)?;
-    let norm_eps = constant(session, &[], &[eps as f32])?;
-    // There are at most two chunk widths. Prepare each lower mask once, then
-    // reuse its device tensor for every chunk instead of uploading/tril again.
-    let full_width = chunk_size.min(length);
-    let full_lower = lower_tri_ones(session, full_width)?;
-    let full_lower =
-        session.broadcast_in_dim(&full_lower, &[heads, full_width, full_width], &[1, 2])?;
-    let tail_width = length % chunk_size;
-    let tail_lower = if tail_width != 0 && tail_width != full_width {
-        let lower = lower_tri_ones(session, tail_width)?;
-        Some(session.broadcast_in_dim(&lower, &[heads, tail_width, tail_width], &[1, 2])?)
-    } else {
-        None
-    };
-    let mut state = constant(
-        session,
-        &[heads, value_dim, key_dim],
-        &vec![0.0f32; heads * value_dim * key_dim],
-    )?;
+    let neg_big = &constants.neg_big;
+    let zero = &constants.zero;
+    let norm_eps = &constants.norm_eps;
+    let full_width = constants.full_width;
+    let full_lower = &constants.full_lower;
+    let tail_lower = &constants.tail_lower;
+    let mut state = constants.initial_state.clone();
     let mut chunks: Vec<EagerTensor> = Vec::new();
 
     let mut start = 0usize;
@@ -442,7 +534,7 @@ fn delta_scan_chunked_batched(
         let cum_col = session.reshape(&cumulative, vec![heads, n, 1])?;
         let cum_row = session.reshape(&cumulative, vec![heads, 1, n])?;
         let diff = session.sub(&cum_col, &cum_row)?; // (H, n, n)
-        let diff = session.clamp(&diff, &neg_big, &zero)?;
+        let diff = session.clamp(&diff, neg_big, zero)?;
         let pair = session.exp(&diff)?;
         let pair_decay = session.mul(&pair, &lower)?;
         let pair_decay_t = session.transpose(&pair_decay, &[0, 2, 1])?;
@@ -502,9 +594,10 @@ fn delta_scan_chunked_batched(
         // Non-centered RMSNorm over the value dimension, then the output gate.
         let result_t = session.transpose(&result, &[0, 2, 1])?; // (H, n, vd)
         let normalized_t =
-            norm::rms_norm_with_epsilon(session, &result_t, norm_weight, false, &norm_eps)?;
+            norm::rms_norm_with_epsilon(session, &result_t, norm_weight, false, norm_eps)?;
         let normalized = session.transpose(&normalized_t, &[0, 2, 1])?;
-        let gated_z = activation::silu(session, &zc)?;
+        let gate = sigmoid_prepared(session, &zc, &constants.one)?;
+        let gated_z = session.mul(&zc, &gate)?;
         let chunk_out = session.mul(&normalized, &gated_z)?;
         chunks.push(chunk_out);
 
@@ -542,6 +635,50 @@ pub fn delta_layer_tenferro_prepared_mask(
     x: &EagerTensor,
     mask: &EagerTensor,
 ) -> AdResult<EagerTensor> {
+    let length = mask.shape().first().copied().unwrap_or(0);
+    let constants = prepare_native_constants(session, cfg, length)?;
+    delta_layer_with_constants(session, cfg, weights, x, mask, &constants)
+}
+
+/// Native layer with bounded cross-request constant caching in the workspace.
+/// A changed configuration, length or eager runtime replaces the single entry.
+pub fn delta_layer_tenferro_cached(
+    session: &mut EagerSession<'_>,
+    cfg: &GatedDeltaConfig,
+    weights: &GatedDeltaTensorWeights,
+    x: &EagerTensor,
+    mask: &EagerTensor,
+    workspace: &mut crate::GatedDeltaWorkspace,
+) -> AdResult<EagerTensor> {
+    let length = mask.shape().first().copied().unwrap_or(0);
+    if !workspace
+        .native_constants
+        .as_ref()
+        .is_some_and(|constants| constants.matches(cfg, length, x))
+    {
+        workspace.native_constants = Some(prepare_native_constants(session, cfg, length)?);
+    }
+    delta_layer_with_constants(
+        session,
+        cfg,
+        weights,
+        x,
+        mask,
+        workspace
+            .native_constants
+            .as_ref()
+            .expect("prepared constants"),
+    )
+}
+
+fn delta_layer_with_constants(
+    session: &mut EagerSession<'_>,
+    cfg: &GatedDeltaConfig,
+    weights: &GatedDeltaTensorWeights,
+    x: &EagerTensor,
+    mask: &EagerTensor,
+    constants: &NativeDeltaConstants,
+) -> AdResult<EagerTensor> {
     cfg.validate().map_err(invalid_weights)?;
     let mask_dims = mask.shape();
     if mask_dims.len() != 1 || mask_dims[0] == 0 || x.shape() != [cfg.hidden, mask_dims[0]] {
@@ -573,7 +710,7 @@ pub fn delta_layer_tenferro_prepared_mask(
     let a = linear_col(session, &x_masked, &weights.a)?; // (value_heads, L)
     let b = linear_col(session, &x_masked, &weights.b)?; // (value_heads, L)
 
-    delta_layer_from_projected(
+    delta_layer_from_projected_with_constants(
         session,
         cfg,
         weights,
@@ -583,6 +720,7 @@ pub fn delta_layer_tenferro_prepared_mask(
             a: &a,
             b: &b,
         },
+        constants,
     )
 }
 
@@ -610,6 +748,20 @@ pub fn delta_layer_from_projected(
     weights: &GatedDeltaTensorWeights,
     inputs: ProjectedDeltaTensors<'_>,
 ) -> AdResult<EagerTensor> {
+    let length = inputs.mixed.shape().get(1).copied().unwrap_or(0);
+    let constants = prepare_native_constants(session, cfg, length)?;
+    delta_layer_from_projected_with_constants(session, cfg, weights, inputs, &constants)
+}
+
+/// Complete native projections using immutable prepared constants. Configuration,
+/// length and eager runtime must match; scan constants are reused on this path.
+pub fn delta_layer_from_projected_with_constants(
+    session: &mut EagerSession<'_>,
+    cfg: &GatedDeltaConfig,
+    weights: &GatedDeltaTensorWeights,
+    inputs: ProjectedDeltaTensors<'_>,
+    constants: &NativeDeltaConstants,
+) -> AdResult<EagerTensor> {
     cfg.validate().map_err(invalid_weights)?;
     let invalid = || {
         tenferro_ad::Error::TensorRuntime(tenferro_tensor::Error::invalid_argument(
@@ -634,6 +786,7 @@ pub fn delta_layer_from_projected(
     };
     let length = *length;
     if length == 0
+        || !constants.matches(cfg, length, mixed)
         || *channels != expected_channels
         || z.shape() != [value_width, length]
         || a.shape() != [heads, length]
@@ -675,17 +828,17 @@ pub fn delta_layer_from_projected(
 
     // L2-normalize Q/K over the head width (eps fixed at 1e-6, as in the host
     // reference) and scale Q by 1/sqrt(key_dim).
-    let l2_eps = constant(session, &[length], &vec![1e-6f32; length])?;
-    let q = l2_normalize_heads(session, &q, heads, length, &l2_eps)?;
+    let l2_eps = &constants.l2_eps;
+    let q = l2_normalize_heads(session, &q, heads, length, l2_eps)?;
     let inv_scale = 1.0 / (key_dim as f64).sqrt();
     let q = session.scale_real(&q, inv_scale)?;
-    let k = l2_normalize_heads(session, &k, heads, length, &l2_eps)?;
+    let k = l2_normalize_heads(session, &k, heads, length, l2_eps)?;
 
     // Gates: beta = sigmoid(b); decay = a_decay * softplus(a + dt_bias).
-    let beta = activation::sigmoid(session, b)?; // (heads, L)
+    let beta = sigmoid_prepared(session, b, &constants.one)?; // (heads, L)
     let dt_bias = session.reshape(&weights.dt_bias, vec![heads, 1])?;
     let a_shifted = session.add(a, &dt_bias)?;
-    let softplus = softplus(session, &a_shifted)?;
+    let softplus = softplus(session, &a_shifted, constants)?;
     let a_decay = session.reshape(&weights.a_decay, vec![heads, 1])?;
     let decay = session.mul(&a_decay, &softplus)?;
 
@@ -703,7 +856,7 @@ pub fn delta_layer_from_projected(
         &beta,
         &decay,
         &weights.norm,
-        cfg.eps as f64,
+        constants,
     )?; // (heads, value_dim, L)
 
     let out = session.transpose(&out, &[1, 0, 2])?; // (value_dim, heads, L)
@@ -800,43 +953,114 @@ mod tests {
                 .collect(),
             out_proj: rand_vec(&mut state, value_width * cfg.hidden),
         };
-        let length = 7usize;
-        let x = rand_vec(&mut state, cfg.hidden * length);
+        let x = rand_vec(&mut state, cfg.hidden * 7);
         let mask = vec![0.0, 0.0, 1.0, 1.0, 0.0, 1.0, 1.0];
 
-        let reference = delta_layer_reference(&cfg, &weights, &x, &mask).unwrap();
-        let native = runtime()
-            .with_eager_session(|session| {
-                let mut cache = TensorCache::new();
-                let tw = prepare_tensor_weights(session, &cfg, &weights, &mut cache)?;
-                let x = constant(
-                    session,
-                    &[cfg.hidden, length],
-                    &col_major(cfg.hidden, length, &x)?,
-                )?;
-                let mask = constant(session, &[length], &mask)?;
-                let out = delta_layer_tenferro_prepared_mask(session, &cfg, &tw, &x, &mask)?;
-                let host = session.duplicate_value(&out)?;
-                let values = host.as_slice::<f32>()?;
-                // col-major (hidden, length) -> row-major
-                Ok::<Vec<f32>, tenferro_ad::Error>(
-                    (0..cfg.hidden * length)
-                        .map(|index| {
-                            let row = index / length;
-                            let col = index % length;
-                            values[row + col * cfg.hidden]
-                        })
-                        .collect(),
-                )
-            })
-            .unwrap()
-            .unwrap();
+        let mut workspace = crate::GatedDeltaWorkspace::new();
+        for _runtime_change in 0..2 {
+            let runtime = runtime();
+            let mut cache = TensorCache::new();
+            let mut retained = None;
+            let mut retained_reference = Vec::new();
+            for (length, scale, eps) in [
+                (7, 1.0, 1e-5),
+                (7, 0.5, 1e-5),
+                (7, 1.0, 1e-5),
+                (7, 1.0, 0.1),
+                (2, 0.5, 0.1),
+            ] {
+                let request_cfg = GatedDeltaConfig { eps, ..cfg };
+                let input: Vec<f32> = (0..cfg.hidden * length)
+                    .map(|index| x[(index / length) * 7 + index % length] * scale)
+                    .collect();
+                let request_mask = if length == 2 {
+                    vec![1.0; 2]
+                } else {
+                    mask.clone()
+                };
+                let reference =
+                    delta_layer_reference(&request_cfg, &weights, &input, &request_mask).unwrap();
+                runtime
+                    .with_eager_session(|session| {
+                        let tw =
+                            prepare_tensor_weights(session, &request_cfg, &weights, &mut cache)?;
+                        let xt = constant(
+                            session,
+                            &[cfg.hidden, length],
+                            &col_major(cfg.hidden, length, &input)?,
+                        )?;
+                        let mt = constant(session, &[length], &request_mask)?;
+                        let previous = workspace.native_constants.clone();
+                        let expected_reuse = previous
+                            .as_ref()
+                            .is_some_and(|c| c.matches(&request_cfg, length, &xt));
+                        let out = delta_layer_tenferro_cached(
+                            session,
+                            &request_cfg,
+                            &tw,
+                            &xt,
+                            &mt,
+                            &mut workspace,
+                        )?;
+                        let constants = workspace.native_constants.as_ref().unwrap();
+                        assert!(constants.matches(&request_cfg, length, &xt));
+                        if expected_reuse {
+                            assert_eq!(
+                                previous
+                                    .as_ref()
+                                    .unwrap()
+                                    .initial_state
+                                    .value()?
+                                    .as_slice::<f32>()?
+                                    .as_ptr(),
+                                constants.initial_state.value()?.as_slice::<f32>()?.as_ptr()
+                            );
+                        }
+                        assert!(
+                            constants
+                                .initial_state
+                                .value()?
+                                .as_slice::<f32>()?
+                                .iter()
+                                .all(|&v| v == 0.0)
+                        );
+                        let host = session.duplicate_value(&out)?;
+                        let values = host.as_slice::<f32>()?;
+                        if retained.is_none() {
+                            let uncached = delta_layer_tenferro_prepared_mask(
+                                session,
+                                &request_cfg,
+                                &tw,
+                                &xt,
+                                &mt,
+                            )?;
+                            assert_eq!(
+                                session.duplicate_value(&uncached)?.as_slice::<f32>()?,
+                                values
+                            );
+                        }
 
-        let diff = reference
-            .iter()
-            .zip(&native)
-            .map(|(a, b)| (a - b).abs())
-            .fold(0.0f32, f32::max);
-        assert!(diff < 1e-3, "native vs reference max diff {diff}");
+                        let native: Vec<f32> = (0..cfg.hidden * length)
+                            .map(|index| values[index / length + (index % length) * cfg.hidden])
+                            .collect();
+                        let diff = reference
+                            .iter()
+                            .zip(&native)
+                            .map(|(a, b)| (a - b).abs())
+                            .fold(0.0f32, f32::max);
+                        assert!(diff < 1e-3, "native vs reference max diff {diff}");
+                        if let Some(first) = &retained {
+                            let first = session.duplicate_value(first)?;
+                            assert_eq!(first.as_slice::<f32>()?, retained_reference.as_slice());
+                        } else {
+                            retained_reference = values.to_vec();
+                            retained = Some(out);
+                        }
+                        Ok::<_, tenferro_ad::Error>(())
+                    })
+                    .unwrap()
+                    .unwrap();
+            }
+        }
     }
 }

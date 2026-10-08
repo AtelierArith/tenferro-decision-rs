@@ -5,6 +5,8 @@
 //! requests use separate workspaces. The layer-level buffers are shared, while
 //! each value head owns a [`HeadScratch`] so the heads can run in parallel.
 //! Buffers grow to the largest sequence length seen and are then reused.
+//! Native execution also retains one immutable constants entry, replaced when
+//! its configuration, sequence length or eager runtime changes.
 
 use crate::config::GatedDeltaConfig;
 
@@ -37,6 +39,7 @@ pub struct GatedDeltaWorkspace {
     pub(crate) out: Vec<f32>,
     pub(crate) output: Vec<f32>,
     pub(crate) heads: Vec<HeadScratch>,
+    pub(crate) native_constants: Option<crate::tensor_layer::NativeDeltaConstants>,
 }
 
 impl GatedDeltaWorkspace {
@@ -50,7 +53,7 @@ impl GatedDeltaWorkspace {
         Self::default()
     }
 
-    /// The total bytes retained by the workspace buffers.
+    /// The total bytes retained by the host scratch buffers (excludes native constants).
     pub fn retained_bytes(&self) -> usize {
         let layer: usize = [
             &self.masked,

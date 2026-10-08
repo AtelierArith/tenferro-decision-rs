@@ -10,7 +10,8 @@
 > (§9, §11), the direct `gated_delta` entry (§12), and the `GatedDelta`
 > extension op (§12) are implemented and cross-checked in
 > `crates/tenferro-gated-delta` (see `18_IMPLEMENTATION_STATUS.md`). CUDA (§10)
-> remains unimplemented: no CUDA hardware is available here to validate it.
+> has compiling raw kernels and explicit layer adapters, but production dispatch
+> remains disabled: no CUDA hardware is available here to validate parity.
 
 `tenferro-gated-delta` is the crate that extends tenferro-rs with the
 Qwen3.5 Gated DeltaNet execution needed by `jeff-infer`. It owns the causal
@@ -428,7 +429,20 @@ uploading them. Q/K share one epsilon vector, and all scan chunks share a
 prepared rank-zero RMSNorm epsilon through
 `tenferro_infer::norm::rms_norm_with_epsilon`. These changes reduce repeated
 constant preparation within a layer and retain the native operation path;
-cross-request constant/plan caching and measured CUDA performance remain pending.
+The new `NativeDeltaConstants` prepares these tensors plus clamp bounds, gate
+constants and immutable zero initial state. `delta_layer_tenferro_cached`
+retains a single constants entry in `GatedDeltaWorkspace`, replacing it when
+configuration, sequence length or eager runtime changes. Jeff's TensorNative
+forward uses this entry point, sharing matching constants across layers and
+requests. Each request starts from the immutable zero tensor and produces new
+state tensors, so cache reuse does not continue a previous request's scan.
+The raw convolution/native chunked CUDA workspace also retains these constants
+and completes projections through `delta_layer_from_projected_with_constants`.
+Convenience entry points still prepare fresh constants. The cache is bounded
+to the most recent configuration/length/runtime rather than accumulating shapes.
+Native regression tests check different inputs, repeated requests, changed
+epsilon/length/runtime, allocation reuse and retained prior outputs against the
+CPU oracle. Cross-request plan caching and measured CUDA performance remain pending.
 
 `cuda::CudaStageRun` is a raw-session-scoped pending owner. Its unsafe
 `enqueue` takes the module, eight input tensors and three workspace tensors

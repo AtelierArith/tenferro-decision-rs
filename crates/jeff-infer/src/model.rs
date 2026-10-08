@@ -28,7 +28,7 @@ use tenferro_ext::{
 };
 use tenferro_gated_delta::{
     EagerSessionGatedDeltaExt, GatedDeltaConfig, GatedDeltaOp, GatedDeltaWeights,
-    GatedDeltaWorkspace, delta_layer_recurrent, delta_layer_tenferro_prepared_mask,
+    GatedDeltaWorkspace, delta_layer_recurrent, delta_layer_tenferro_cached,
     prepare_kernel_weights, prepare_tensor_weights,
 };
 use tenferro_infer::{TensorCache, activation, embedding, norm, rope};
@@ -680,7 +680,7 @@ pub fn forward_tenferro_cached(
 /// [`forward_tenferro_cached`] with an explicit [`DeltaKernel`].
 #[allow(clippy::too_many_arguments)]
 pub fn forward_tenferro_cached_kernel(
-    _workspace: &mut GatedDeltaWorkspace,
+    workspace: &mut GatedDeltaWorkspace,
     cache: &mut TensorCache,
     session: &mut EagerSession<'_>,
     cfg: &JeffConfig,
@@ -729,12 +729,13 @@ pub fn forward_tenferro_cached_kernel(
                     // The chunked kernel is written for `(hidden, length)`.
                     let normalized_t = session.transpose(&normalized, &[1, 0])?;
                     let tensor_weights = prepare_tensor_weights(session, config, weights, cache)?;
-                    let mixed_t = delta_layer_tenferro_prepared_mask(
+                    let mixed_t = delta_layer_tenferro_cached(
                         session,
                         config,
                         &tensor_weights,
                         &normalized_t,
                         &mask_t,
+                        workspace,
                     )?;
                     session.transpose(&mixed_t, &[1, 0])?
                 }

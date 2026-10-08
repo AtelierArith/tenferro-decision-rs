@@ -9,8 +9,9 @@ use crate::{
     GatedDeltaConfig, GatedDeltaTensorWeights, ProjectedDeltaTensors,
     cuda::{ConvGeometry, CudaKernels},
     cuda_layer::same_raw_weights,
-    delta_layer_from_projected,
+    delta_layer_from_projected_with_constants,
     layer::invalid_weights,
+    prepare_native_constants,
     tensor_layer::linear_col,
 };
 
@@ -19,6 +20,7 @@ pub struct CudaChunkedWorkspace {
     convolved: Tensor,
     weight: TypedTensor<f32>,
     source: EagerTensor,
+    constants: crate::NativeDeltaConstants,
 }
 
 // Never escapes this function's admitted eager scope while work is pending.
@@ -155,8 +157,13 @@ pub fn delta_layer_cuda_chunked_cached(
                 convolved,
                 weight,
                 source: weights.conv.clone(),
+                constants: prepare_native_constants(session, cfg, length)?,
             });
         }
+    }
+    let workspace = pending.workspace.as_mut().expect("owned workspace");
+    if !workspace.constants.matches(cfg, length, x) {
+        workspace.constants = prepare_native_constants(session, cfg, length)?;
     }
     let launched = with_cuda_exec_session(session.backend_session(), |cuda| {
         cuda.with_raw("cuda_chunked_convolution", |raw| {
@@ -195,7 +202,7 @@ pub fn delta_layer_cuda_chunked_cached(
             ))?;
         let mixed = session.constant_from(mixed)?;
         let mixed = session.transpose(&mixed, &[1, 0])?;
-        delta_layer_from_projected(
+        delta_layer_from_projected_with_constants(
             session,
             cfg,
             weights,
@@ -205,6 +212,11 @@ pub fn delta_layer_cuda_chunked_cached(
                 a: &a,
                 b: &b,
             },
+            &pending
+                .workspace
+                .as_ref()
+                .expect("owned workspace")
+                .constants,
         )
     })();
     let synchronized = with_cuda_exec_session(session.backend_session(), |cuda| {
