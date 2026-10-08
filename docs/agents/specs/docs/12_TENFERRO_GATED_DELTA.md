@@ -132,8 +132,15 @@ pub fn gated_delta<'a>(
 ) -> Result<Tensor>;     // (hidden, L)
 ```
 
-`resolve_algorithm(config, backend_caps) -> Algorithm` is a pure function; the
+`resolve_algorithm(config, choice, backend_caps) -> Result<Algorithm>` is a pure function; the
 resolved value is frozen into the plan and the extension-op identity.
+`GatedDeltaPlan::resolve` also returns `Result`. Until CUDA execution is
+implemented, a declared CUDA capability returns `UnsupportedConfig`, including
+when CPU capability is also declared; no algorithm override silently selects
+the host path. A backend with neither capability is rejected as well. Callers
+choosing CPU explicitly use `BackendCaps::cpu()` or `cpu_simd()`.
+`GatedDeltaPlan::from_config` remains the infallible convenience constructor
+for an explicitly selected CPU formulation.
 
 ---
 
@@ -144,6 +151,9 @@ optimized path MAY choose recurrent or chunked; selection MUST be deterministic
 for the same model/config/runtime.
 
 Proposed policy:
+
+The CUDA row is the target policy; current CUDA requests fail with the typed
+error described above.
 
 | Backend | `Auto` default | Override |
 |---|---|---|

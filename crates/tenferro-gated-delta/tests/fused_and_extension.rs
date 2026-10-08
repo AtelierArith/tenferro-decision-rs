@@ -98,7 +98,7 @@ fn direct_entry_dispatches_on_plan() {
         AlgorithmChoice::Recurrent,
         AlgorithmChoice::Chunked,
     ] {
-        let plan = GatedDeltaPlan::resolve(&cfg, choice, BackendCaps::cpu(), mask.len());
+        let plan = GatedDeltaPlan::resolve(&cfg, choice, BackendCaps::cpu(), mask.len()).unwrap();
         let out = runtime
             .with_eager_session(|session| gated_delta(session, &cfg, &w, &x, &mask, &plan, &mut ws))
             .unwrap()

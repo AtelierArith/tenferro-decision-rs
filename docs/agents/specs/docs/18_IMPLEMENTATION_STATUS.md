@@ -243,6 +243,10 @@ bundled webpki roots).
   (`Auto`/`Reference`/`Recurrent`/`Chunked`), deterministic `resolve_algorithm`
   from config + `BackendCaps` (never input-dependent), `GatedDeltaPlan`, and
   `GatedDeltaWorkspace`. The `gated_delta` direct entry dispatches on the plan.
+  Plan resolution rejects declared CUDA and unavailable backends with
+  `UnsupportedConfig` rather than selecting a CPU fallback. `resolve_algorithm`
+  and `GatedDeltaPlan::resolve` return `Result`; explicit CPU `from_config`
+  remains infallible.
 - `GatedDelta` extension op (`extension`): `ExtensionOp` +
   `define_extension_runtime!` (CPU session route), descriptor fields for the
   layer config, `x`/`mask`/nine weight tensors as inputs, and an

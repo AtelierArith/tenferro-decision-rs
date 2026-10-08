@@ -7,6 +7,7 @@
 //! runtime load or input values — so runs are reproducible.
 
 use crate::config::{Algorithm, GatedDeltaConfig};
+use decision_core::{DecisionError, Result};
 
 /// Declared backend capability used by [`resolve_algorithm`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -67,29 +68,35 @@ impl AlgorithmChoice {
 ///
 /// The CPU portable default is the chunked formulation; the recurrent kernel is
 /// selected when the backend declares SIMD support and `key_dim` is small
-/// (matching the design table). CUDA is not implemented at this revision, so a
-/// CUDA-capable backend still resolves to a CPU formulation rather than failing.
+/// (matching the design table). CUDA execution is not implemented, so declaring
+/// CUDA returns a typed error, even when CPU capability is also present.
 pub fn resolve_algorithm(
     config: &GatedDeltaConfig,
     choice: AlgorithmChoice,
     caps: BackendCaps,
-) -> Algorithm {
-    match choice {
+) -> Result<Algorithm> {
+    if caps.cuda {
+        return Err(DecisionError::unsupported(
+            "GatedDelta CUDA execution is not implemented; CPU fallback is disabled",
+        ));
+    }
+    if !caps.cpu {
+        return Err(DecisionError::unsupported(
+            "GatedDelta requires an available execution backend",
+        ));
+    }
+    Ok(match choice {
         AlgorithmChoice::Reference => Algorithm::Reference,
         AlgorithmChoice::Recurrent => Algorithm::Recurrent,
         AlgorithmChoice::Chunked => Algorithm::Chunked,
         AlgorithmChoice::Auto => {
-            if !caps.cpu {
-                // CUDA-only backends fall back to the portable chunked CPU path
-                // until a device kernel exists.
-                Algorithm::Chunked
-            } else if caps.simd && config.key_dim <= 256 {
+            if caps.simd && config.key_dim <= 256 {
                 Algorithm::Recurrent
             } else {
                 Algorithm::Chunked
             }
         }
-    }
+    })
 }
 
 /// Frozen execution plan: resolved algorithm, chunk size, and the sequence
@@ -108,12 +115,12 @@ impl GatedDeltaPlan {
         choice: AlgorithmChoice,
         caps: BackendCaps,
         sequence_length: usize,
-    ) -> Self {
-        Self {
-            algorithm: resolve_algorithm(config, choice, caps),
+    ) -> Result<Self> {
+        Ok(Self {
+            algorithm: resolve_algorithm(config, choice, caps)?,
             chunk_size: config.chunk_size,
             sequence_length,
-        }
+        })
     }
 
     /// Resolve a plan from the config's explicit algorithm.
@@ -124,6 +131,7 @@ impl GatedDeltaPlan {
             BackendCaps::cpu(),
             sequence_length,
         )
+        .expect("the explicitly selected CPU backend supports every CPU formulation")
     }
 
     /// The resolved formulation.
@@ -164,7 +172,7 @@ mod tests {
     #[test]
     fn auto_prefers_recurrent_for_small_key_dim_with_simd() {
         assert_eq!(
-            resolve_algorithm(&config(64), AlgorithmChoice::Auto, BackendCaps::cpu_simd()),
+            resolve_algorithm(&config(64), AlgorithmChoice::Auto, BackendCaps::cpu_simd()).unwrap(),
             Algorithm::Recurrent
         );
     }
@@ -172,7 +180,7 @@ mod tests {
     #[test]
     fn auto_is_chunked_without_simd() {
         assert_eq!(
-            resolve_algorithm(&config(64), AlgorithmChoice::Auto, BackendCaps::cpu()),
+            resolve_algorithm(&config(64), AlgorithmChoice::Auto, BackendCaps::cpu()).unwrap(),
             Algorithm::Chunked
         );
     }
@@ -180,7 +188,8 @@ mod tests {
     #[test]
     fn auto_is_chunked_for_large_key_dim() {
         assert_eq!(
-            resolve_algorithm(&config(512), AlgorithmChoice::Auto, BackendCaps::cpu_simd()),
+            resolve_algorithm(&config(512), AlgorithmChoice::Auto, BackendCaps::cpu_simd())
+                .unwrap(),
             Algorithm::Chunked
         );
     }
@@ -192,7 +201,8 @@ mod tests {
                 &config(64),
                 AlgorithmChoice::Reference,
                 BackendCaps::cpu_simd()
-            ),
+            )
+            .unwrap(),
             Algorithm::Reference
         );
     }
@@ -201,10 +211,45 @@ mod tests {
     fn resolution_is_deterministic() {
         let cfg = config(64);
         let first =
-            GatedDeltaPlan::resolve(&cfg, AlgorithmChoice::Auto, BackendCaps::cpu_simd(), 128);
+            GatedDeltaPlan::resolve(&cfg, AlgorithmChoice::Auto, BackendCaps::cpu_simd(), 128)
+                .unwrap();
         let second =
-            GatedDeltaPlan::resolve(&cfg, AlgorithmChoice::Auto, BackendCaps::cpu_simd(), 128);
+            GatedDeltaPlan::resolve(&cfg, AlgorithmChoice::Auto, BackendCaps::cpu_simd(), 128)
+                .unwrap();
         assert_eq!(first, second);
         assert_eq!(first.sequence_length(), 128);
+    }
+
+    #[test]
+    fn unsupported_backends_never_select_a_cpu_plan() {
+        for caps in [
+            BackendCaps {
+                cpu: false,
+                cuda: true,
+                simd: false,
+            },
+            BackendCaps {
+                cpu: true,
+                cuda: true,
+                simd: true,
+            },
+            BackendCaps {
+                cpu: false,
+                cuda: false,
+                simd: false,
+            },
+        ] {
+            for choice in [
+                AlgorithmChoice::Auto,
+                AlgorithmChoice::Reference,
+                AlgorithmChoice::Recurrent,
+                AlgorithmChoice::Chunked,
+            ] {
+                assert!(matches!(
+                    GatedDeltaPlan::resolve(&config(64), choice, caps, 65),
+                    Err(DecisionError::UnsupportedConfig { .. })
+                ));
+            }
+        }
     }
 }
