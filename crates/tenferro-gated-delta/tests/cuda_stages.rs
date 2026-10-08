@@ -652,7 +652,7 @@ fn full_layer_gpu_parity(raw_recurrent: bool) {
                     })
                     .collect();
                 let expected = delta_layer_reference(&cfg, &weights, &x, &mask).unwrap();
-                let result_length = if raw_recurrent { 2 * length } else { length };
+                let result_length = if raw_recurrent { 3 * length } else { length };
                 let expected = if raw_recurrent {
                     let first_x: Vec<_> = x.iter().map(|v| v * 0.5).collect();
                     let first = delta_layer_reference(&cfg, &weights, &first_x, &mask).unwrap();
@@ -660,8 +660,13 @@ fn full_layer_gpu_parity(raw_recurrent: bool) {
                         .flat_map(|h| {
                             first[h * length..(h + 1) * length]
                                 .iter()
-                                .chain(&expected[h * length..(h + 1) * length])
                                 .copied()
+                                .chain(expected[h * length..(h + 1) * length].iter().copied())
+                                .chain(
+                                    expected[h * length..(h + 1) * length]
+                                        .iter()
+                                        .map(|v| 2.0 * v),
+                                )
                         })
                         .collect::<Vec<_>>()
                 } else {
@@ -696,7 +701,7 @@ fn full_layer_gpu_parity(raw_recurrent: bool) {
                             let (kernels, workspace, first) = delta_layer_cuda_recurrent_cached(
                                 session, &cfg, &prepared, &first_x, &mask, kernels, None,
                             )?;
-                            let (_, _, result) = delta_layer_cuda_recurrent_cached(
+                            let (kernels, workspace, result) = delta_layer_cuda_recurrent_cached(
                                 session,
                                 &cfg,
                                 &prepared,
@@ -705,9 +710,20 @@ fn full_layer_gpu_parity(raw_recurrent: bool) {
                                 kernels,
                                 Some(workspace),
                             )?;
-                            // Read both results only after reuse: the first output
-                            // must not alias the workspace overwritten by the second.
-                            session.concatenate(&[&first, &result], 1)?
+                            let mut changed_weights = prepared.clone();
+                            changed_weights.norm = session.scale_real(&prepared.norm, 2.0)?;
+                            let (_, _, changed) = delta_layer_cuda_recurrent_cached(
+                                session,
+                                &cfg,
+                                &changed_weights,
+                                &x,
+                                &mask,
+                                kernels,
+                                Some(workspace),
+                            )?;
+                            // Read prior results after reuse and replacement: cached
+                            // weights must refresh, and previous outputs must remain independent.
+                            session.concatenate(&[&first, &result, &changed], 1)?
                         } else {
                             delta_layer_tenferro_prepared_mask(session, &cfg, &prepared, &x, &mask)?
                         };

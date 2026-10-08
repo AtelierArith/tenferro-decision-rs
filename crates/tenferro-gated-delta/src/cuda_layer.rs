@@ -5,11 +5,11 @@
 
 use tenferro_ad::{DType, EagerSession, EagerTensor, Result};
 use tenferro_gpu::cuda::with_cuda_exec_session;
-use tenferro_tensor::{Tensor, TensorRead, TypedTensor};
+use tenferro_tensor::{Tensor, TensorRead, TensorView, TypedTensor};
 
 use crate::{
     GatedDeltaConfig, GatedDeltaTensorWeights,
-    cuda::{CudaKernels, OwnedStageInputs, RecurrentGeometry, StageBuffers},
+    cuda::{CudaKernels, RecurrentGeometry, StageBuffers},
     layer::invalid_weights,
     tensor_layer::linear_col,
 };
@@ -22,6 +22,43 @@ pub struct CudaRecurrentWorkspace {
     convolved: TypedTensor<f32>,
     scanned: TypedTensor<f32>,
     output: Tensor,
+    weights: RawWeights,
+}
+
+struct RawWeights {
+    // Retain sources as well as copies: allocation identities cannot be recycled.
+    sources: [EagerTensor; 4],
+    tensors: [TypedTensor<f32>; 4],
+}
+
+fn same_raw_weights(previous: &[EagerTensor; 4], current: [&EagerTensor; 4]) -> Result<bool> {
+    for (previous, current) in previous.iter().zip(current) {
+        if previous.ctx_id() != current.ctx_id() {
+            return Ok(false);
+        }
+        let previous = previous.value()?;
+        let current = current.value()?;
+        let (TensorView::F32(previous), TensorView::F32(current)) =
+            (previous.as_tensor_view(), current.as_tensor_view())
+        else {
+            return Ok(false);
+        };
+        let (Some(previous_buffer), Some(current_buffer)) =
+            (previous.backend_buffer(), current.backend_buffer())
+        else {
+            return Ok(false);
+        };
+        if previous_buffer.allocation_id().is_none()
+            || previous_buffer.allocation_id() != current_buffer.allocation_id()
+            || previous_buffer.allocation_domain() != current_buffer.allocation_domain()
+            || previous.shape() != current.shape()
+            || previous.strides() != current.strides()
+            || previous.offset() != current.offset()
+        {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 // Local to this function's admitted eager scope: the current execution stream
@@ -30,7 +67,7 @@ pub struct CudaRecurrentWorkspace {
 struct PendingLayer {
     runtime: tenferro_gpu::cuda::CudaRuntime,
     kernels: Option<CudaKernels>,
-    inputs: Option<OwnedStageInputs>,
+    inputs: Option<[TypedTensor<f32>; 4]>,
     workspace: Option<CudaRecurrentWorkspace>,
     completed: bool,
 }
@@ -50,8 +87,8 @@ impl Drop for PendingLayer {
 /// `x` is `[hidden, length]`, `mask` is `[length]`. The returned kernel owner
 /// can be reused within the admitted eager callback (it is naturally !Send).
 /// No tensors are downloaded. This prototype makes device copies of raw-stage
-/// operands and allocates workspaces per call; persistent workspace caching is
-/// still required. It retains the raw operands through native readout and
+/// projected operands and allocates a workspace per convenience call. The
+/// cached variant retains raw weight copies and scratch buffers. It retains the raw operands through native readout and
 /// synchronizes once before returning completed resources.
 ///
 /// This explicit entry point does not enable CUDA in normal plan resolution;
@@ -73,7 +110,8 @@ pub fn delta_layer_cuda_recurrent(
 ///
 /// Pass `None` to allocate once, then retain the returned workspace and module
 /// within the admitted callback. The workspace must match shape/runtime. Raw
-/// operands still use device copies; completion is synchronized once after
+/// projected operands still use device copies; raw weight copies are cached
+/// using allocation identity and view metadata. Completion is synchronized once after
 /// native readout. The output is copied on device before eager registration, so a
 /// later workspace reuse cannot overwrite the returned tensor.
 pub fn delta_layer_cuda_recurrent_cached(
@@ -151,22 +189,36 @@ pub fn delta_layer_cuda_recurrent_cached(
     let z = project(&weights.z)?;
     let a = project(&weights.a)?;
     let b = project(&weights.b)?;
-    let conv = session
-        .duplicate_value(&weights.conv)?
-        .into_typed::<f32>()
-        .map_err(|failure| failure.into_parts().1)?;
-    let decay = session
-        .duplicate_value(&weights.a_decay)?
-        .into_typed::<f32>()
-        .map_err(|failure| failure.into_parts().1)?;
-    let bias = session
-        .duplicate_value(&weights.dt_bias)?
-        .into_typed::<f32>()
-        .map_err(|failure| failure.into_parts().1)?;
-    let norm = session
-        .duplicate_value(&weights.norm)?
-        .into_typed::<f32>()
-        .map_err(|failure| failure.into_parts().1)?;
+    let sources = [
+        &weights.conv,
+        &weights.a_decay,
+        &weights.dt_bias,
+        &weights.norm,
+    ];
+    let reuse_weights = if let Some(workspace) = &workspace {
+        same_raw_weights(&workspace.weights.sources, sources)?
+    } else {
+        false
+    };
+    let mut new_weights = if reuse_weights {
+        None
+    } else {
+        let mut copy = |tensor| -> Result<TypedTensor<f32>> {
+            Ok(session
+                .duplicate_value(tensor)?
+                .into_typed::<f32>()
+                .map_err(|failure| failure.into_parts().1)?)
+        };
+        Some(RawWeights {
+            sources: sources.map(EagerTensor::clone),
+            tensors: [
+                copy(sources[0])?,
+                copy(sources[1])?,
+                copy(sources[2])?,
+                copy(sources[3])?,
+            ],
+        })
+    };
     let channels = 2 * cfg.key_heads * cfg.key_dim + cfg.value_heads * cfg.value_dim;
     let width = cfg.value_heads * cfg.value_dim;
     let runtime = with_cuda_exec_session(session.backend_session(), |cuda| cuda.runtime().clone())
@@ -174,7 +226,7 @@ pub fn delta_layer_cuda_recurrent_cached(
     let mut pending = PendingLayer {
         runtime,
         kernels: Some(kernels),
-        inputs: Some([mixed, conv, a, b, decay, bias, z, norm]),
+        inputs: Some([mixed, a, b, z]),
         workspace,
         completed: false,
     };
@@ -186,17 +238,21 @@ pub fn delta_layer_cuda_recurrent_cached(
                         convolved: raw.alloc_output::<f32>(&[*length, channels])?,
                         scanned: raw.alloc_output::<f32>(&[*length, width])?,
                         output: Tensor::from_typed(raw.alloc_output::<f32>(&[*length, width])?),
+                        weights: new_weights.take().expect("prepared raw weights"),
                     })
                 })
             })
             .expect("CUDA session checked above")?,
         );
     }
+    if let Some(weights) = new_weights {
+        pending.workspace.as_mut().expect("owned workspace").weights = weights;
+    }
     let launched = with_cuda_exec_session(session.backend_session(), |cuda| {
         cuda.with_raw("cuda_recurrent_layer", |raw| {
-            let [mixed_input, conv_weight, a, b, a_decay, dt_bias, z, norm] =
-                pending.inputs.as_ref().expect("owned inputs");
+            let [mixed_input, a, b, z] = pending.inputs.as_ref().expect("owned inputs");
             let workspace = pending.workspace.as_mut().expect("owned workspace");
+            let [conv_weight, a_decay, dt_bias, norm] = &workspace.weights.tensors;
             // SAFETY: operand copies and private workspace buffers are distinct;
             // pending owns all buffers/module before enqueue and retains them
             // through the final native-readout barrier, including errors/unwind.

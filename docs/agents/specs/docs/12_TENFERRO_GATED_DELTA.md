@@ -386,6 +386,16 @@ compares both outputs after reuse. This implements scratch-buffer reuse for
 matching shapes/runtime inside the admitted callback; raw operand copies,
 per-layer completion and production cache integration remain.
 
+The cached workspace also owns the raw convolution, decay, bias and norm
+weight copies. Retained eager sources prevent allocation-identity recycling;
+reuse compares source runtime, backend allocation identity, shape, strides and
+offset without reading device values. Changed sources refresh these copies.
+Only the four projected request operands are copied each execution. The raw
+full-layer hardware gate additionally changes norm weights on a third call and
+compares all three outputs after reuse/replacement, including prior output
+independence. Production scheduling/dispatch and actual hardware parity remain
+pending.
+
 `cuda::CudaStageRun` is a raw-session-scoped pending owner. Its unsafe
 `enqueue` takes the module, eight input tensors and three workspace tensors
 before launch; callers still guarantee disjoint allocations and no conflicting
