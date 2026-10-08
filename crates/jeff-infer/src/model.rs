@@ -28,7 +28,7 @@ use tenferro_ext::{
 };
 use tenferro_gated_delta::{
     EagerSessionGatedDeltaExt, GatedDeltaConfig, GatedDeltaOp, GatedDeltaWeights,
-    GatedDeltaWorkspace, delta_layer_recurrent, delta_layer_tenferro_native,
+    GatedDeltaWorkspace, delta_layer_recurrent, delta_layer_tenferro_prepared_mask,
     prepare_kernel_weights, prepare_tensor_weights,
 };
 use tenferro_infer::{TensorCache, activation, embedding, norm, rope};
@@ -709,6 +709,11 @@ pub fn forward_tenferro_cached_kernel(
         ids.to_vec(),
     )?)?;
     let mut hidden = embedding::embedding(session, &table, &ids_t)?; // (length, hidden)
+    // Share the request mask across all Delta layers and both formulations.
+    let mask_t = session.constant_from(tenferro_ad::Tensor::from_vec_col_major(
+        vec![length],
+        mask.to_vec(),
+    )?)?;
 
     for layer in &weights.layers {
         let input_norm = cache.col(session, vec![cfg.hidden, 1], &layer.input_norm)?;
@@ -724,22 +729,18 @@ pub fn forward_tenferro_cached_kernel(
                     // The chunked kernel is written for `(hidden, length)`.
                     let normalized_t = session.transpose(&normalized, &[1, 0])?;
                     let tensor_weights = prepare_tensor_weights(session, config, weights, cache)?;
-                    let mixed_t = delta_layer_tenferro_native(
+                    let mixed_t = delta_layer_tenferro_prepared_mask(
                         session,
                         config,
                         &tensor_weights,
                         &normalized_t,
-                        mask,
+                        &mask_t,
                     )?;
                     session.transpose(&mixed_t, &[1, 0])?
                 }
                 DeltaKernel::HostRecurrent => {
                     let kernel_weights = prepare_kernel_weights(session, config, weights, cache)?;
                     let op = GatedDeltaOp::from_config(config);
-                    let mask_t = session.constant_from(tenferro_ad::Tensor::from_vec_col_major(
-                        vec![length],
-                        mask.to_vec(),
-                    )?)?;
                     session.gated_delta(
                         op,
                         &[
