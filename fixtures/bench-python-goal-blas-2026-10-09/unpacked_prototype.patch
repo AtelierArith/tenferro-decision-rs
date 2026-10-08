@@ -1,0 +1,58 @@
+diff --git a/crates/cpu-kernels/src/lib.rs b/crates/cpu-kernels/src/lib.rs
+index f3b6ed8..5bd0a62 100644
+--- a/crates/cpu-kernels/src/lib.rs
++++ b/crates/cpu-kernels/src/lib.rs
+@@ -11,6 +11,7 @@
+ #![allow(clippy::approx_constant, clippy::excessive_precision)]
+ 
+ use rayon::prelude::*;
++mod mkl_diagnostic;
+ 
+ /// Below this many multiply-adds the threading overhead is not worth it.
+ const PARALLEL_THRESHOLD: usize = 1 << 18;
+@@ -141,6 +142,9 @@ pub fn input_mul_weight_transpose_add_into(
+     if rows == 0 || out_dim == 0 || in_dim == 0 {
+         return;
+     }
++    if mkl_diagnostic::run(x, rows, in_dim, weight, out_dim, y) {
++        return;
++    }
+     // y ← x · weightᵀ + y. `weightᵀ` is `(in_dim, out_dim)` with row stride 1
+     // (the `in_dim` axis of the row-major `(out_dim, in_dim)` storage).
+     #[cfg(feature = "openblas")]
+diff --git a/crates/cpu-kernels/src/mkl_diagnostic.rs b/crates/cpu-kernels/src/mkl_diagnostic.rs
+new file mode 100644
+index 0000000..f12cc4e
+--- /dev/null
++++ b/crates/cpu-kernels/src/mkl_diagnostic.rs
+@@ -0,0 +1,30 @@
++//! Temporary diagnostic provider; not a production API.
++use std::ffi::{CString, c_char, c_void};
++use std::sync::OnceLock;
++#[link(name = "dl")]
++unsafe extern "C" {
++    fn dlopen(name: *const c_char, flags: i32) -> *mut c_void;
++    fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void;
++}
++type Sgemm = unsafe extern "C" fn(*const c_char,*const c_char,*const i32,*const i32,*const i32,*const f32,*const f32,*const i32,*const f32,*const i32,*const f32,*mut f32,*const i32);
++type Threads = unsafe extern "C" fn(i32) -> i32;
++struct Provider { gemm: Sgemm, threads: Threads }
++static PROVIDER: OnceLock<Option<Provider>> = OnceLock::new();
++pub fn run(x: &[f32], rows: usize, input: usize, weight: &[f32], output: usize, y: &mut [f32]) -> bool {
++    let provider = PROVIDER.get_or_init(|| {
++        let path = CString::new(std::env::var("LAYA_MKL_DIAGNOSTIC_LIBRARY").ok()?).unwrap();
++        let handle = unsafe { dlopen(path.as_ptr(), 2) };
++        assert!(!handle.is_null(), "unable to load diagnostic MKL library");
++        let symbol = |name: &str| { let name=CString::new(name).unwrap(); let pointer=unsafe { dlsym(handle,name.as_ptr()) }; assert!(!pointer.is_null()); pointer };
++        // The library is retained for the lifetime of this process.
++        Some(Provider { gemm: unsafe { std::mem::transmute(symbol("sgemm_")) }, threads: unsafe { std::mem::transmute(symbol("MKL_Set_Num_Threads_Local")) } })
++    });
++    let Some(provider) = provider else {return false;};
++    assert!([rows,input,output].iter().all(|n| *n<=i32::MAX as usize));
++    unsafe {
++        let previous = (provider.threads)(rayon::current_num_threads() as i32);
++        (provider.gemm)(c"T".as_ptr(),c"N".as_ptr(),&(output as i32),&(rows as i32),&(input as i32),&1.0,weight.as_ptr(),&(input as i32),x.as_ptr(),&(input as i32),&1.0,y.as_mut_ptr(),&(output as i32));
++        (provider.threads)(previous);
++    }
++    true
++}

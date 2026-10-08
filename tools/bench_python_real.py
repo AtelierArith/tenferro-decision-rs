@@ -93,6 +93,7 @@ def main():
                                     ms_median=statistics.median(samples), ms_min=min(samples),
                                     ms_mean=statistics.mean(samples), iterations=args.iters,
                                     samples_ms=samples, logits=outputs[0].tolist(),
+                                    action_logits=outputs[1].tolist() if args.model == "laya" else None,
                                     max_reference_logit_error=error))
         revision = subprocess.check_output(["git", "-C", str(source), "rev-parse", "HEAD"],
                                            text=True).strip()

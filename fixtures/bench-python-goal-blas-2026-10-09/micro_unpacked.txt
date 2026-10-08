@@ -1,0 +1,12 @@
+rows=8 in=1024 out=1024 baseline_ms=0.1429 mkl_ms=0.0840 max_error=0.00000024586916
+rows=8 in=1024 out=3072 baseline_ms=0.5508 mkl_ms=0.5211 max_error=0.00000024586916
+rows=8 in=1024 out=5248 baseline_ms=1.0899 mkl_ms=1.4182 max_error=0.00000024586916
+rows=8 in=2624 out=1024 baseline_ms=0.2883 mkl_ms=0.2176 max_error=0.0000003874302
+rows=16 in=1024 out=1024 baseline_ms=0.2713 mkl_ms=0.1987 max_error=0.00000024586916
+rows=16 in=1024 out=3072 baseline_ms=0.5271 mkl_ms=0.5951 max_error=0.00000024586916
+rows=16 in=1024 out=5248 baseline_ms=0.8636 mkl_ms=1.3750 max_error=0.00000024586916
+rows=16 in=2624 out=1024 baseline_ms=0.2858 mkl_ms=0.1866 max_error=0.0000003874302
+rows=64 in=1024 out=1024 baseline_ms=0.4238 mkl_ms=0.2074 max_error=0.00000028871
+rows=64 in=1024 out=3072 baseline_ms=1.0324 mkl_ms=1.1358 max_error=0.00000028871
+rows=64 in=1024 out=5248 baseline_ms=1.6352 mkl_ms=2.5476 max_error=0.00000028871
+rows=64 in=2624 out=1024 baseline_ms=0.7952 mkl_ms=0.4772 max_error=0.00000043213367

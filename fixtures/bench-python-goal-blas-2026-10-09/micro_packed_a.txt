@@ -1,0 +1,24 @@
+rows=8 in=1024 out=1024 baseline_ms=0.1871 mkl_ms=0.1546 max_error=0.00000024586916
+packed_ms=0.0853 pack_ms=1.7065 packed_bytes=9506944 packed_error=0.00000024586916
+rows=8 in=1024 out=3072 baseline_ms=0.5516 mkl_ms=0.6346 max_error=0.00000024586916
+packed_ms=0.3761 pack_ms=1.3739 packed_bytes=18944128 packed_error=0.00000024586916
+rows=8 in=1024 out=5248 baseline_ms=0.8373 mkl_ms=1.3769 max_error=0.00000024586916
+packed_ms=0.8247 pack_ms=2.3690 packed_bytes=30740608 packed_error=0.00000024586916
+rows=8 in=2624 out=1024 baseline_ms=0.3038 mkl_ms=0.2094 max_error=0.0000003874302
+packed_ms=0.1840 pack_ms=0.5283 packed_bytes=18944128 packed_error=0.0000003874302
+rows=16 in=1024 out=1024 baseline_ms=0.1959 mkl_ms=0.0958 max_error=0.00000024586916
+packed_ms=0.0842 pack_ms=0.1945 packed_bytes=9506944 packed_error=0.00000024586916
+rows=16 in=1024 out=3072 baseline_ms=0.4970 mkl_ms=0.5372 max_error=0.00000024586916
+packed_ms=0.3516 pack_ms=1.1995 packed_bytes=18944128 packed_error=0.00000024586916
+rows=16 in=1024 out=5248 baseline_ms=1.0804 mkl_ms=1.5454 max_error=0.00000024586916
+packed_ms=0.9665 pack_ms=2.5628 packed_bytes=30740608 packed_error=0.00000024586916
+rows=16 in=2624 out=1024 baseline_ms=0.3540 mkl_ms=0.2885 max_error=0.0000003874302
+packed_ms=0.3197 pack_ms=0.5260 packed_bytes=18944128 packed_error=0.0000003874302
+rows=64 in=1024 out=1024 baseline_ms=0.4392 mkl_ms=0.2150 max_error=0.00000028871
+packed_ms=0.2015 pack_ms=0.1864 packed_bytes=9506944 packed_error=0.00000028871
+rows=64 in=1024 out=3072 baseline_ms=0.9165 mkl_ms=0.8617 max_error=0.00000028871
+packed_ms=0.7747 pack_ms=1.1257 packed_bytes=18944128 packed_error=0.00000028871
+rows=64 in=1024 out=5248 baseline_ms=1.8839 mkl_ms=2.5446 max_error=0.00000028871
+packed_ms=1.7555 pack_ms=2.4083 packed_bytes=30740608 packed_error=0.00000028871
+rows=64 in=2624 out=1024 baseline_ms=0.8463 mkl_ms=0.7164 max_error=0.00000043213367
+packed_ms=0.5919 pack_ms=0.5327 packed_bytes=18944128 packed_error=0.00000043213367

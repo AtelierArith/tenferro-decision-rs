@@ -92,9 +92,9 @@ fn main() {
             hs.push(t.elapsed().as_secs_f64() * 1000.0);
         }
 
-        let run_te = |cache: &mut TensorCache| -> f64 {
+        let run_te = |cache: &mut TensorCache| {
             let t = Instant::now();
-            let _ = runtime
+            let output = runtime
                 .with_eager_session(|session| {
                     forward_tenferro_cached(
                         session,
@@ -111,20 +111,55 @@ fn main() {
                 })
                 .unwrap()
                 .unwrap();
-            t.elapsed().as_secs_f64() * 1000.0
+            (t.elapsed().as_secs_f64() * 1000.0, output)
         };
         for _ in 0..warmup {
             let _ = run_te(&mut cache);
         }
         let mut ts = Vec::new();
+        let mut native_output = None;
         for _ in 0..iters {
-            ts.push(run_te(&mut cache));
+            let (elapsed, output) = run_te(&mut cache);
+            ts.push(elapsed);
+            native_output = Some(output);
+        }
+        let (logits, action) = native_output.expect("at least one measured forward");
+        let reference = forward_reference(
+            &checkpoint.encoder,
+            &checkpoint.agent,
+            &checkpoint.weights,
+            &ids,
+            &mask,
+            &marker_pos,
+            &marker_mask,
+            &qtype,
+        )
+        .unwrap();
+        assert_eq!(logits.len(), reference.0.len());
+        assert_eq!(action.len(), reference.1.len());
+        let mut max_error = 0.0f32;
+        for (actual, expected) in logits
+            .iter()
+            .chain(&action)
+            .zip(reference.0.iter().chain(&reference.1))
+        {
+            assert!(actual.is_finite() && expected.is_finite());
+            let error = (actual - expected).abs();
+            assert!(
+                error <= 2e-3 + expected.abs() * 2e-5,
+                "output difference {error}"
+            );
+            max_error = max_error.max(error);
         }
 
         rows.push(json!({
             "length": length, "batch": batch,
-            "host_ms": median(hs),
-            "tenferro_ms": median(ts),
+            "host_ms": median(hs.clone()),
+            "tenferro_ms": median(ts.clone()),
+            "host_samples_ms": hs, "tenferro_samples_ms": ts,
+            "logits": logits.chunks(marker_pos.len() / batch).map(|row| row.to_vec()).collect::<Vec<_>>(),
+            "action_logits": action.chunks(checkpoint.agent.action_count()).map(|row| row.to_vec()).collect::<Vec<_>>(),
+            "max_host_reference_output_error": max_error,
         }));
     }
 

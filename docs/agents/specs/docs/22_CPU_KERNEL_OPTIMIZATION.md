@@ -536,3 +536,45 @@ computation, with checkpoint loading excluded. Outputs were identical.
 The production prototype was restored rather than adopting that startup cost
 for inconclusive warm gains. Exact prototype and measurement artifacts are in
 [`bench-prepared-weight-layout-2026-10-09`](../../../../fixtures/bench-prepared-weight-layout-2026-10-09).
+
+
+## Fused projection and GeGLU (2026-10-09)
+
+`tenferro-ext::GemmGegluOp` combines the MLP up projection, optional bias
+and exact GeGLU in one eager CPU operation. It calls the existing library
+GEMM and `cpu-kernels` activation, so the arithmetic is unchanged. Activations
+keep their feature-first trailing axes without separate flatten/restore eager
+operations. The expanded projection stays in one runtime-local scratch buffer,
+with retained capacity reported to the extension cache. Each returned tensor
+owns its output storage; later calls can resize and overwrite scratch safely.
+Laya selects this operation at 16 or more trailing columns. Shorter inputs
+retain the original GEMM/GeGLU sequence; other backends retain native composition.
+
+Production checkpoint, F32, eight Rayon threads, five warmups per mode,
+15 alternating pairs, sequential benchmark processes:
+
+| L64 B1 | separate ops | fused ops |
+|---|---:|---:|
+| initial pair run | 186.823 ms | 178.587 ms |
+| repeat | 186.063 ms | 179.501 ms |
+| cache + short-input threshold | 180.471 ms | 178.518 ms |
+
+All paired logit/action differences were zero. Short inputs use identical
+operations in the last run; their timing differences are variation. The final
+cache/threshold result is smaller than the initial 3.5–4.4% improvement, so do
+not attribute the initial gain to scratch caching. Tests compare separate and
+fused operations bit-for-bit across strides, batches, optional bias and irregular
+sizes, reject dtype/shape errors, and retain old outputs across scratch growth
+and changed inputs. The final cached implementation passed the actual Julia
+production question/action reference and the full workspace tests. Workspace
+formatting, all-target Clippy with warnings denied, and CUDA-feature Clippy
+also passed. Raw samples and a replay patch against `8ca8b81` are in
+[`bench-fused-mlp-2026-10-09`](../../../../fixtures/bench-fused-mlp-2026-10-09).
+
+A separate diagnostic replaced projection GEMM with the MKL library bundled
+with PyTorch 2.14.1 (MKL 2024.2). It made production Laya slower: L8 approximately
+99.5→118.6 ms and L64 185.6→194.9 ms. It was rejected and removed. Synthetic
+MKL packed-weight tests showed mixed gains; they do not establish a model-level
+speedup. The library remains a diagnostic dependency only. Source patches,
+synthetic checks and fresh Python/native baseline records are in
+[`bench-python-goal-blas-2026-10-09`](../../../../fixtures/bench-python-goal-blas-2026-10-09).

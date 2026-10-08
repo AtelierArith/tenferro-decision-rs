@@ -19,6 +19,7 @@ mod gated_silu;
 mod geglu;
 mod gemm;
 mod gemm_bias;
+mod gemm_geglu;
 mod jeff_attention;
 mod laya_attention;
 mod layernorm;
@@ -30,6 +31,7 @@ pub use gated_silu::{EagerSessionGatedSiluExt, GATED_SILU_FAMILY_ID, GatedSiluOp
 pub use geglu::{EagerSessionGegluExt, GEGLU_FAMILY_ID, GegluOp};
 pub use gemm::{EagerSessionGemmExt, GEMM_FAMILY_ID, GemmOp};
 pub use gemm_bias::{EagerSessionGemmBiasExt, GEMM_BIAS_FAMILY_ID, GemmBiasOp};
+pub use gemm_geglu::{EagerSessionGemmGegluExt, GEMM_GEGLU_FAMILY_ID, GemmGegluOp};
 pub use jeff_attention::{
     EagerSessionJeffAttentionExt, JEFF_FULL_ATTENTION_FAMILY_ID, JeffFullAttentionOp,
 };

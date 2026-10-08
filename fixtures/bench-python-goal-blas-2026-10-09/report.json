@@ -1,0 +1,11 @@
+{
+  "base_revision": "8ca8b810c5536166d889a933924020a5c0e5ada1",
+  "decision": "Reject unpacked MKL provider; packed microbenchmarks show mixed gains and have not established whole-model speed or parity. Continue with fused MLP eager operation.",
+  "library": "PyTorch-bundled MKL 2024.2; diagnostic only, not a production dependency",
+  "threads": 8,
+  "micro": "5 warmups,15 measured calls per mode, alternating order, synthetic F32 matrices. OMP_WAIT_POLICY=PASSIVE on repeat/packed tests.",
+  "model": "5 warmups,15 measured calls; original upstream Python, Rust production cached-tenferro and rejected unpacked provider; sequential processes, actual checkpoint.",
+  "accuracy": "Synthetic GEMM max absolute errors below 5e-7. Full-model diagnostic parity is not established for the rejected provider.",
+  "api_reference": "https://www.intel.com/content/www/us/en/docs/onemkl/developer-reference-c/2024-2/cblas-gemm-compute-002.html",
+  "reproduce": "Apply unpacked_prototype.patch at base revision; point LAYA_MKL_DIAGNOSTIC_LIBRARY to a compatible supplied library, set its dependency search path, RAYON_NUM_THREADS=8 and OMP_WAIT_POLICY=PASSIVE. Run bench_laya_tenferro_gap with local checkpoint, warmup5, iterations15. Library/checkpoint paths are deliberately omitted."
+}

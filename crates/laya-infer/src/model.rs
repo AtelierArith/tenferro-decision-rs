@@ -34,7 +34,7 @@ use decision_core::{DecisionError, Result};
 use tenferro_ad::{DotGeneralConfig, EagerSession, EagerTensor, GatherConfig, SliceConfig, Tensor};
 use tenferro_ext::{
     EagerSessionErfExt, EagerSessionGegluExt, EagerSessionGemmBiasExt, EagerSessionGemmExt,
-    EagerSessionLayaAttentionExt, EagerSessionLayerNormExt,
+    EagerSessionGemmGegluExt, EagerSessionLayaAttentionExt, EagerSessionLayerNormExt,
 };
 use tenferro_infer::{attention, norm, rope};
 
@@ -1271,17 +1271,30 @@ fn encoder_tensor(
         let z = session.add(&x, &attended)?;
 
         let hn = layer_norm_feature_first(session, cache, &z, &layer.mlp_norm, d, eps)?;
-        let u = linear_feature_first(session, cache, &hn, &layer.wi, 2 * intermediate)?;
-        let g = if u.dtype() == tenferro_tensor::DType::F32
+        let g = if hn.dtype() == tenferro_tensor::DType::F32
             && tenferro_ext::cpu_extensions_supported(session)
+            && hn.shape()[1..].iter().product::<usize>() >= 16
         {
-            // Fused `gelu(value) * gate` in one `cpu-kernels` pass.
-            session.geglu(&u, intermediate)?
+            let weight = cache.col_major(session, vec![d, 2 * intermediate], &layer.wi.weight)?;
+            let bias = layer
+                .wi
+                .bias
+                .as_ref()
+                .map(|bias| cache.col_major(session, vec![2 * intermediate], bias))
+                .transpose()?;
+            session.gemm_geglu(&hn, &weight, bias.as_ref(), intermediate)?
         } else {
-            let value = slice_axis(session, &u, 0, 0, intermediate)?;
-            let gate = slice_axis(session, &u, 0, intermediate, intermediate)?;
-            let activated = gelu_erf_cached(session, cache, &value)?;
-            session.mul(&activated, &gate)?
+            let u = linear_feature_first(session, cache, &hn, &layer.wi, 2 * intermediate)?;
+            if u.dtype() == tenferro_tensor::DType::F32
+                && tenferro_ext::cpu_extensions_supported(session)
+            {
+                session.geglu(&u, intermediate)?
+            } else {
+                let value = slice_axis(session, &u, 0, 0, intermediate)?;
+                let gate = slice_axis(session, &u, 0, intermediate, intermediate)?;
+                let activated = gelu_erf_cached(session, cache, &value)?;
+                session.mul(&activated, &gate)?
+            }
         };
         let down = linear_feature_first(session, cache, &g, &layer.wo_mlp, d)?;
         x = session.add(&z, &down)?;

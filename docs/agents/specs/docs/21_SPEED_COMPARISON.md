@@ -372,3 +372,18 @@ question/action parity test passed. See
 rules, numerical differences and replayable records. A prepared weight layout
 experiment was rejected because warm gains were small or mixed and startup
 became slower; its source prototype is retained only as a diagnostic artifact.
+
+
+### Fresh Python speed target (2026-10-09)
+
+With five warmups and 15 measured forwards, sequential processes and eight
+threads, the original Python Laya measured 87.2 ms at L8 B1, 134.5 ms at L64 B1
+and 134.6 ms at L8 B8. The production cached-tenferro baseline measured
+99.5/185.6/183.4 ms respectively. This is a comparison with the production path;
+the faster short-sequence host oracle is not used to claim a production win.
+The fused MLP operation above reduces L64 to approximately 178.5–179.5 ms in
+paired measurements, but the Python target remains unmet. Benchmark tooling
+now records native raw samples and both marker/action outputs, and validates
+all measured native shapes against the host oracle. Python records action
+outputs as well as marker logits. See the new fixture directories linked in
+`22_CPU_KERNEL_OPTIMIZATION.md` for source, accuracy and measurement limits.
