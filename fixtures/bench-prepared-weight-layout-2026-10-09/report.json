@@ -1,0 +1,25 @@
+{
+  "base_revision": "e1f98c4957994ca79359f8201dae87a3457460b7",
+  "checkpoint": {
+    "model": "convaiinnovations/laya",
+    "revision": "7b928d828b7b0e022f929d9bd2e44165aa270148"
+  },
+  "dtype": "F32",
+  "backend": "CPU",
+  "provider": "matrixmultiply",
+  "profile": "release",
+  "rayon_threads": 8,
+  "decision": "Rejected for the default path; prototype source restored.",
+  "reason": "Paired warmed gains of 0\u20134% do not compensate roughly one additional second preparing the weight layout on the first forward.",
+  "production_parity": {
+    "test": "bundled_questions_match_julia_collate_predict_and_action",
+    "passed": 1,
+    "failed": 0,
+    "elapsed_seconds": 13.45,
+    "checkpoint_skipped": false
+  },
+  "paired_coverage": "15 alternating pairs per shape, two independent runs; max absolute logits/action difference zero in every shape.",
+  "limitations": "Both layouts share one cache and are held concurrently in the paired process. First-forward values include cache setup and model computation, exclude checkpoint loading, and run natural before prepared. Sequential reports alone do not isolate variation. Microbenchmarks reuse synthetic weights and do not reproduce full-model memory traffic.",
+  "reproduce_micro": "Copy microbenchmark.rs to crates/cpu-kernels/examples/bench_weight_layout.rs; RAYON_NUM_THREADS=8 cargo run --offline --release -p cpu-kernels --example bench_weight_layout",
+  "reproduce_paired": "Apply prototype.patch on the base revision; RAYON_NUM_THREADS=8 cargo run --offline --release -p laya-infer --example bench_paired_weight_layout -- CHECKPOINT_DIRECTORY"
+}

@@ -1,0 +1,468 @@
+diff --git a/crates/cpu-kernels/src/lib.rs b/crates/cpu-kernels/src/lib.rs
+index 06d308a..05f204a 100644
+--- a/crates/cpu-kernels/src/lib.rs
++++ b/crates/cpu-kernels/src/lib.rs
+@@ -134,6 +134,31 @@ pub fn input_mul_weight_transpose_add_into(
+     weight: &[f32],
+     out_dim: usize,
+     y: &mut [f32],
++) {
++    input_mul_weight_layout_add_into(x, rows, in_dim, weight, out_dim, y, false);
++}
++
++/// `y += x · weight`, all row-major, with `weight (in_dim, out_dim)`.
++/// This accepts a weight layout prepared once by the model's tensor cache.
++pub fn input_mul_weight_add_into(
++    x: &[f32],
++    rows: usize,
++    in_dim: usize,
++    weight: &[f32],
++    out_dim: usize,
++    y: &mut [f32],
++) {
++    input_mul_weight_layout_add_into(x, rows, in_dim, weight, out_dim, y, true);
++}
++
++fn input_mul_weight_layout_add_into(
++    x: &[f32],
++    rows: usize,
++    in_dim: usize,
++    weight: &[f32],
++    out_dim: usize,
++    y: &mut [f32],
++    prepared: bool,
+ ) {
+     assert_eq!(x.len(), rows * in_dim);
+     assert_eq!(weight.len(), out_dim * in_dim);
+@@ -175,7 +200,7 @@ pub fn input_mul_weight_transpose_add_into(
+             cblas_sgemm(
+                 101,
+                 111,
+-                112,
++                if prepared { 111 } else { 112 },
+                 rows as i32,
+                 out_dim as i32,
+                 in_dim as i32,
+@@ -183,7 +208,11 @@ pub fn input_mul_weight_transpose_add_into(
+                 x.as_ptr(),
+                 in_dim as i32,
+                 weight.as_ptr(),
+-                in_dim as i32,
++                if prepared {
++                    out_dim as i32
++                } else {
++                    in_dim as i32
++                },
+                 1.0,
+                 y.as_mut_ptr(),
+                 out_dim as i32,
+@@ -191,6 +220,8 @@ pub fn input_mul_weight_transpose_add_into(
+         }
+         return;
+     }
++    let weight_row_stride = if prepared { out_dim as isize } else { 1 };
++    let weight_col_stride = if prepared { 1 } else { in_dim as isize };
+     let work = rows.saturating_mul(in_dim).saturating_mul(out_dim);
+     if work >= PARALLEL_THRESHOLD && out_dim > 1 {
+         // Block over the large `out_dim` axis (columns of `y`) so the rayon
+@@ -211,7 +242,7 @@ pub fn input_mul_weight_transpose_add_into(
+             // output.
+             unsafe {
+                 let x_ptr = x_addr as *const f32;
+-                let w_ptr = (w_addr as *const f32).add(o0 * in_dim);
++                let w_ptr = (w_addr as *const f32).add(o0 * weight_col_stride as usize);
+                 let y_ptr = (y_addr as *mut f32).add(o0);
+                 matrixmultiply::sgemm(
+                     rows,
+@@ -222,8 +253,8 @@ pub fn input_mul_weight_transpose_add_into(
+                     in_dim as isize,
+                     1,
+                     w_ptr,
+-                    1,
+-                    in_dim as isize,
++                    weight_row_stride,
++                    weight_col_stride,
+                     1.0,
+                     y_ptr,
+                     out_dim as isize,
+@@ -242,8 +273,8 @@ pub fn input_mul_weight_transpose_add_into(
+                 in_dim as isize,
+                 1,
+                 weight.as_ptr(),
+-                1,
+-                in_dim as isize,
++                weight_row_stride,
++                weight_col_stride,
+                 1.0,
+                 y.as_mut_ptr(),
+                 out_dim as isize,
+diff --git a/crates/laya-infer/src/model.rs b/crates/laya-infer/src/model.rs
+index 9bc1680..cd88754 100644
+--- a/crates/laya-infer/src/model.rs
++++ b/crates/laya-infer/src/model.rs
+@@ -34,7 +34,7 @@ use decision_core::{DecisionError, Result};
+ use tenferro_ad::{DotGeneralConfig, EagerSession, EagerTensor, GatherConfig, SliceConfig, Tensor};
+ use tenferro_ext::{
+     EagerSessionErfExt, EagerSessionGegluExt, EagerSessionGemmBiasExt, EagerSessionGemmExt,
+-    EagerSessionLayaAttentionExt, EagerSessionLayerNormExt,
++    EagerSessionLayaAttentionExt, EagerSessionLayerNormExt, EagerSessionPreparedGemmExt,
+ };
+ use tenferro_infer::{attention, norm, rope};
+ 
+@@ -1091,6 +1091,9 @@ fn gelu_erf_cached(
+ }
+ 
+ /// Linear over axis 0 of an activation `(in, ...)`, returning `(out, ...)`.
++pub static PREPARED_GEMM_DIAGNOSTIC: std::sync::atomic::AtomicBool =
++    std::sync::atomic::AtomicBool::new(false);
++
+ fn linear_feature_first(
+     session: &mut EagerSession<'_>,
+     cache: &mut TensorCache,
+@@ -1106,19 +1109,23 @@ fn linear_feature_first(
+     // forward reaches the same host GEMM as `forward_reference` (the eager
+     // `dot_general` uses faer and pays per-call analysis/allocation instead).
+     if x.dtype() == tenferro_tensor::DType::F32 && tenferro_ext::cpu_extensions_supported(session) {
+-        let weight = cache.col_major(session, vec![in_dim, out_dim], &linear.weight)?;
+         let trailing = x.shape()[1..].to_vec();
+         let rest: usize = trailing.iter().product();
+         let x2 = session.reshape(x, vec![in_dim, rest])?;
+-        // Fold the `(out,)` bias into the GEMM so it is one op instead of a
+-        // reshape + broadcast + add over the full activation.
+-        let y2 = match &linear.bias {
+-            Some(bias) => {
+-                let bias = cache.col_major(session, vec![out_dim], bias)?;
+-                session.gemm_bias(&x2, &weight, &bias)?
++        let bias = match &linear.bias {
++            Some(bias) => Some(cache.col_major(session, vec![out_dim], bias)?),
++            None => None,
++        };
++        let y2 = if PREPARED_GEMM_DIAGNOSTIC.load(std::sync::atomic::Ordering::Relaxed) {
++            let weight = cache.col(session, vec![out_dim, in_dim], &linear.weight)?;
++            session.prepared_gemm(&x2, &weight, bias.as_ref())?
++        } else {
++            let weight = cache.col_major(session, vec![in_dim, out_dim], &linear.weight)?;
++            match &bias {
++                Some(bias) => session.gemm_bias(&x2, &weight, bias)?,
++                None => session.gemm(&x2, &weight)?,
+             }
+-            None => session.gemm(&x2, &weight)?,
+-        }; // (out_dim, rest)
++        };
+         let mut out_shape = vec![out_dim];
+         out_shape.extend_from_slice(&trailing);
+         return session.reshape(&y2, out_shape);
+diff --git a/crates/tenferro-ext/src/lib.rs b/crates/tenferro-ext/src/lib.rs
+index dfff0fb..71df4d0 100644
+--- a/crates/tenferro-ext/src/lib.rs
++++ b/crates/tenferro-ext/src/lib.rs
+@@ -24,6 +24,7 @@ mod laya_attention;
+ mod layernorm;
+ mod linear;
+ mod native_erf;
++mod prepared_gemm;
+ mod rms_norm;
+ 
+ pub use gated_silu::{EagerSessionGatedSiluExt, GATED_SILU_FAMILY_ID, GatedSiluOp};
+@@ -42,6 +43,7 @@ pub use native_erf::{
+     erf_tensor_native, erf_tensor_native_cached, gelu_erf_tensor_native,
+     gelu_erf_tensor_native_cached,
+ };
++pub use prepared_gemm::{EagerSessionPreparedGemmExt, PREPARED_GEMM_FAMILY_ID, PreparedGemmOp};
+ pub use rms_norm::{EagerSessionRmsNormExt, RMS_NORM_FAMILY_ID, RmsNormLastOp};
+ 
+ use std::any::Any;
+diff --git a/crates/tenferro-ext/src/prepared_gemm.rs b/crates/tenferro-ext/src/prepared_gemm.rs
+new file mode 100644
+index 0000000..06ea14c
+--- /dev/null
++++ b/crates/tenferro-ext/src/prepared_gemm.rs
+@@ -0,0 +1,184 @@
++//! CPU GEMM with a column-major `(out, in)` prepared weight tensor.
++use std::{any::Any, hash::Hasher, sync::Arc};
++use tenferro_ad::extension::{
++    EagerExtensionTarget, apply_eager_with_targeted_extension_in_session,
++};
++use tenferro_ad::{EagerSession, EagerTensor};
++use tenferro_cpu::CpuBackend;
++use tenferro_runtime::extension::{
++    ExtensionOp, ExtensionShapeContext, SymDim, define_extension_runtime,
++};
++use tenferro_runtime::{ErrorPhase, ExtensionModule};
++use tenferro_tensor::{BackendSession, DType, Tensor, TensorBackend, TensorRead};
++
++/// Prepared CPU projection family, with optional fused bias.
++pub const PREPARED_GEMM_FAMILY_ID: &str = "tenferro-decision.prepared-gemm.v1";
++
++/// `W · x` with prepared `(out, in)` weights and `(in, length)` activations.
++#[derive(Clone, Debug)]
++pub struct PreparedGemmOp {
++    biased: bool,
++}
++
++fn error(field: &'static str, message: impl Into<String>) -> tenferro_tensor::Error {
++    tenferro_tensor::Error::invalid_argument("tenferro-ext::prepared_gemm", field, message)
++}
++
++impl ExtensionOp for PreparedGemmOp {
++    fn family_id(&self) -> &'static str {
++        PREPARED_GEMM_FAMILY_ID
++    }
++    fn payload_hash(&self, hasher: &mut dyn Hasher) {
++        hasher.write_u8(self.biased as u8);
++    }
++    fn payload_eq(&self, other: &dyn ExtensionOp) -> bool {
++        other
++            .as_any()
++            .downcast_ref::<Self>()
++            .is_some_and(|other| other.biased == self.biased)
++    }
++    fn clone_arc(&self) -> Arc<dyn ExtensionOp> {
++        Arc::new(self.clone())
++    }
++    fn as_any(&self) -> &dyn Any {
++        self
++    }
++    fn input_count(&self) -> usize {
++        if self.biased { 3 } else { 2 }
++    }
++    fn output_count(&self) -> usize {
++        1
++    }
++    fn infer_output_meta(
++        &self,
++        ctx: &mut ExtensionShapeContext<'_>,
++    ) -> tenferro_tensor::Result<Vec<(DType, Vec<SymDim>)>> {
++        let x = ctx.input_shape(0)?.to_vec();
++        let w = ctx.input_shape(1)?.to_vec();
++        if x.len() != 2 || w.len() != 2 {
++            return Err(error("shape", "expected rank-two x and weight"));
++        }
++        ctx.require_equal(x[0].clone(), w[1].clone())?;
++        if self.biased {
++            let bias = ctx.input_shape(2)?.to_vec();
++            if bias.len() != 1 {
++                return Err(error("bias", "expected rank-one bias"));
++            }
++            ctx.require_equal(bias[0].clone(), w[0].clone())?;
++        }
++        Ok(vec![(
++            ctx.input_dtype(0)?,
++            vec![w[0].clone(), x[1].clone()],
++        )])
++    }
++}
++
++fn execute(
++    op: &PreparedGemmOp,
++    session: &mut dyn BackendSession,
++    _caches: &mut tenferro_runtime::ExtensionCacheStore,
++    inputs: &[TensorRead<'_>],
++) -> tenferro_tensor::Result<Vec<Tensor>> {
++    if inputs.len() != op.input_count() {
++        return Err(error("inputs", "unexpected input count"));
++    }
++    let x = inputs[0].shape();
++    let w = inputs[1].shape();
++    if x.len() != 2 || w.len() != 2 || x[0] != w[1] {
++        return Err(error("shape", "incompatible projection shapes"));
++    }
++    let (inner, length, out) = (x[0], x[1], w[0]);
++    if op.biased && inputs[2].shape() != [out] {
++        return Err(error("bias", "expected (out,) bias"));
++    }
++    let stored: Vec<Option<Tensor>> = inputs
++        .iter()
++        .map(|input| {
++            if input.as_slice::<f32>().is_ok() {
++                Ok(None)
++            } else {
++                session.to_contiguous_read(input.clone()).map(Some)
++            }
++        })
++        .collect::<tenferro_tensor::Result<_>>()?;
++    let data: Vec<&[f32]> = inputs
++        .iter()
++        .zip(&stored)
++        .map(|(input, stored)| match stored {
++            Some(tensor) => tensor.as_slice::<f32>(),
++            None => input.as_slice::<f32>(),
++        })
++        .collect::<tenferro_tensor::Result<_>>()?;
++    let size = out
++        .checked_mul(length)
++        .ok_or_else(|| error("shape", "output size overflow"))?;
++    let mut y = vec![0.0f32; size];
++    if op.biased && out > 0 {
++        for row in y.chunks_mut(out) {
++            row.copy_from_slice(data[2]);
++        }
++    }
++    cpu_kernels::input_mul_weight_add_into(data[0], length, inner, data[1], out, &mut y);
++    Ok(vec![Tensor::from_vec_col_major(vec![out, length], y)?])
++}
++
++fn supported<B: TensorBackend + 'static>(_op: &PreparedGemmOp) -> bool {
++    std::any::TypeId::of::<B>() == std::any::TypeId::of::<CpuBackend>()
++}
++define_extension_runtime! {
++    runtime = PreparedGemmRuntime,
++    family_id = PREPARED_GEMM_FAMILY_ID,
++    op_type = PreparedGemmOp,
++    execute_in_session = execute,
++    session_supported = supported,
++    backend_bound = TensorBackend,
++}
++fn module(target: EagerExtensionTarget) -> tenferro_runtime::Result<Arc<dyn ExtensionModule>> {
++    extension_module::<CpuBackend>(target.engine_id).map_err(|source| {
++        tenferro_runtime::Error::runtime_state_source(
++            "tenferro-ext::prepared_gemm",
++            ErrorPhase::Execution,
++            source,
++        )
++    })
++}
++
++/// Projection methods accepting cached `(out, in)` CPU weight tensors.
++pub trait EagerSessionPreparedGemmExt {
++    /// `W · x`, optionally adding an `(out,)` bias in the GEMM.
++    fn prepared_gemm(
++        &mut self,
++        x: &EagerTensor,
++        weight: &EagerTensor,
++        bias: Option<&EagerTensor>,
++    ) -> tenferro_ad::Result<EagerTensor>;
++}
++impl EagerSessionPreparedGemmExt for EagerSession<'_> {
++    fn prepared_gemm(
++        &mut self,
++        x: &EagerTensor,
++        weight: &EagerTensor,
++        bias: Option<&EagerTensor>,
++    ) -> tenferro_ad::Result<EagerTensor> {
++        let mut inputs = vec![x, weight];
++        if let Some(bias) = bias {
++            inputs.push(bias);
++        }
++        let mut outputs = apply_eager_with_targeted_extension_in_session(
++            self,
++            Arc::new(PreparedGemmOp {
++                biased: bias.is_some(),
++            }),
++            &inputs,
++            module,
++        )?
++        .into_iter();
++        match (outputs.next(), outputs.next()) {
++            (Some(output), None) => Ok(output),
++            _ => Err(tenferro_ad::Error::TensorRuntime(error(
++                "outputs",
++                "expected one output",
++            ))),
++        }
++    }
++}
+diff --git a/crates/laya-infer/examples/bench_paired_weight_layout.rs b/crates/laya-infer/examples/bench_paired_weight_layout.rs
+new file mode 100644
+index 0000000..512923e
+--- /dev/null
++++ b/crates/laya-infer/examples/bench_paired_weight_layout.rs
+@@ -0,0 +1,98 @@
++use laya_infer::{
++    checkpoint::load_checkpoint,
++    model::{PREPARED_GEMM_DIAGNOSTIC, TensorCache, forward_tenferro_cached},
++};
++use serde_json::json;
++use std::{sync::atomic::Ordering, time::Instant};
++use tenferro_ad::EagerRuntime;
++use tenferro_cpu::CpuBackend;
++
++fn median(xs: &[f64]) -> f64 {
++    let mut xs = xs.to_vec();
++    xs.sort_by(f64::total_cmp);
++    xs[xs.len() / 2]
++}
++fn main() {
++    let args: Vec<String> = std::env::args().collect();
++    let checkpoint = load_checkpoint(args.get(1).expect("checkpoint directory")).unwrap();
++    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
++    let mut cache = TensorCache::new();
++    let mut results = Vec::new();
++    for (length, batch) in [(8usize, 1usize), (16, 1), (64, 1), (8, 8)] {
++        let base = [2, 100, 1000, 2000, 3000, 4000, 5, 3];
++        let ids: Vec<i64> = (0..length * batch)
++            .map(|i| base[(i % length) % 8])
++            .collect();
++        let mask = vec![true; length * batch];
++        let positions: Vec<i64> = (0..batch).flat_map(|_| [1, 3, 5]).collect();
++        let marker_mask = vec![true; 3 * batch];
++        let qtype = vec![0i64; batch];
++        let run = |cache: &mut TensorCache, prepared| {
++            PREPARED_GEMM_DIAGNOSTIC.store(prepared, Ordering::Relaxed);
++            let begin = Instant::now();
++            let output = runtime
++                .with_eager_session(|session| {
++                    forward_tenferro_cached(
++                        session,
++                        cache,
++                        &checkpoint.encoder,
++                        &checkpoint.agent,
++                        &checkpoint.weights,
++                        &ids,
++                        &mask,
++                        &positions,
++                        &marker_mask,
++                        &qtype,
++                    )
++                })
++                .unwrap()
++                .unwrap();
++            (begin.elapsed().as_secs_f64() * 1000.0, output)
++        };
++        let mut natural_warmup = Vec::new();
++        let mut prepared_warmup = Vec::new();
++        for _ in 0..2 {
++            natural_warmup.push(run(&mut cache, false).0);
++            prepared_warmup.push(run(&mut cache, true).0);
++        }
++        let mut natural = Vec::new();
++        let mut prepared = Vec::new();
++        let mut max_error = 0.0f32;
++        for pair in 0..15 {
++            let (old, new) = if pair % 2 == 0 {
++                let old = run(&mut cache, false);
++                (old, run(&mut cache, true))
++            } else {
++                let new = run(&mut cache, true);
++                (run(&mut cache, false), new)
++            };
++            natural.push(old.0);
++            prepared.push(new.0);
++            for (a, b) in old
++                .1
++                .0
++                .iter()
++                .chain(&old.1.1)
++                .zip(new.1.0.iter().chain(&new.1.1))
++            {
++                max_error = max_error.max((a - b).abs());
++                assert!(a.is_finite() && b.is_finite());
++                assert!((a - b).abs() <= 1e-6 * (1.0 + a.abs()));
++            }
++        }
++        results.push(
++            json!({"length":length,"batch":batch,"natural_ms":median(&natural),
++            "prepared_ms":median(&prepared),"max_abs_output_error":max_error,
++            "natural_samples_ms":natural,"prepared_samples_ms":prepared,"natural_warmup_ms":natural_warmup,"prepared_warmup_ms":prepared_warmup}),
++        );
++    }
++    let mut metadata = bench_suite::BenchMetadata::capture();
++    metadata.profile = Some("release".into());
++    let metadata: serde_json::Value = serde_json::from_str(&metadata.to_json()).unwrap();
++    println!(
++        "{}",
++        serde_json::to_string_pretty(&json!({"metadata":metadata,"warmup_per_layout":2,
++        "paired_iterations":15,"rayon_threads":rayon::current_num_threads(),"rows":results}))
++        .unwrap()
++    );
++}

@@ -334,3 +334,41 @@ fn padded_markers_are_masked() {
     assert_eq!(logits[k - 1], -1.0e4);
     assert!(logits[0] > -1.0e4 && logits[1] > -1.0e4);
 }
+
+#[test]
+fn encoder_attention_gemm_tiles_match_host_with_sparse_masks_and_padding() {
+    let mut cfg = encoder_config();
+    cfg.max_position_embeddings = 256;
+    let mut rng = Lcg(67);
+    let weights = encoder_weights(&cfg, &mut rng);
+    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    for local_attention in [2usize, 128] {
+        let mut cfg = cfg.clone();
+        cfg.local_attention = local_attention;
+        for length in [31usize, 32, 33, 63, 64, 65, 127, 129] {
+            for sparse in [false, true] {
+                let (ids, mut mask) = encoder_batch(length, 2);
+                if sparse {
+                    for (index, valid) in mask.iter_mut().enumerate() {
+                        *valid = index % length == 0 || index % length == length - 1;
+                    }
+                }
+                let expected = forward_encoder_reference(&cfg, &weights, &ids, &mask, 2).unwrap();
+                let actual = runtime
+                    .with_eager_session(|session| {
+                        forward_encoder_tenferro(session, &cfg, &weights, &ids, &mask, 2)
+                    })
+                    .unwrap()
+                    .unwrap();
+                assert!(
+                    actual
+                        .iter()
+                        .chain(&expected)
+                        .all(|value| value.is_finite())
+                );
+                let error = max_abs_diff(&actual, &expected);
+                assert!(error <= 3e-5, "length={length}: max difference {error}");
+            }
+        }
+    }
+}

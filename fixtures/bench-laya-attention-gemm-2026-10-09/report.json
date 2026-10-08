@@ -1,0 +1,25 @@
+{
+  "base_revision": "e1f98c4957994ca79359f8201dae87a3457460b7",
+  "checkpoint": {
+    "model": "convaiinnovations/laya",
+    "revision": "7b928d828b7b0e022f929d9bd2e44165aa270148"
+  },
+  "dtype": "F32",
+  "backend": "CPU",
+  "provider": "matrixmultiply",
+  "profile": "release",
+  "rayon_threads": 8,
+  "decision": "Adopt tiled library GEMM inside the existing CPU attention extension. No prepared weight layout or public diagnostic switch is retained.",
+  "policy": "Length >=32; at least half of each query tile/key-span rectangle is allowed by the mask; V finite. Other cases retain scalar contractions. Query tiles <=64; key spans shared across heads; scratch bounded by tile*max_span.",
+  "paired_accuracy": "Maximum absolute logits/action difference 0.00048828125 at L64; zero at other shapes. Per-output tolerance is the existing production criterion 2e-3 + abs(reference)*2e-5.",
+  "limitations": "CPU evidence only. Short-sequence timings use identical contraction algorithms, so their differences are run variation. No concurrent benchmark reports are included. Micro inputs are synthetic and have holes and full/1-token/64-token masks; the model pairs use production weights and benchmark inputs.",
+  "reproduce_micro": "Copy microbenchmark.rs into crates/cpu-kernels/examples/bench_attention_gemm.rs on the final implementation; RAYON_NUM_THREADS=8 cargo run --offline --release -p cpu-kernels --example bench_attention_gemm",
+  "reproduce_paired": "Apply diagnostic.patch on the base revision; RAYON_NUM_THREADS=8 cargo run --offline --release -p laya-infer --example bench_paired_attention_gemm -- CHECKPOINT_DIRECTORY",
+  "production_validation": {
+    "test": "laya-infer production_answers bundled_questions_match_julia_collate_predict_and_action",
+    "result": "passed",
+    "tests": 1,
+    "seconds": 11.36,
+    "checkpoint_present": true
+  }
+}

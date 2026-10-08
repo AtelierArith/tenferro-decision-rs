@@ -782,10 +782,18 @@ pub fn laya_attention_block_into(
     rope_base: f32,
     out: &mut [f32],
 ) {
-    let n = d * length * batch;
-    debug_assert_eq!(qkv.len(), 3 * n);
-    debug_assert_eq!(out.len(), n);
-    debug_assert_eq!(keep.len(), length * length * batch);
+    let n = d
+        .checked_mul(length)
+        .and_then(|n| n.checked_mul(batch))
+        .expect("attention dimensions overflow");
+    let qkv_size = n.checked_mul(3).expect("attention dimensions overflow");
+    let mask_size = length
+        .checked_mul(length)
+        .and_then(|n| n.checked_mul(batch))
+        .expect("attention mask dimensions overflow");
+    assert_eq!(qkv.len(), qkv_size, "qkv length");
+    assert_eq!(out.len(), n, "output length");
+    assert_eq!(keep.len(), mask_size, "mask length");
     if n == 0 || heads == 0 || d % heads != 0 {
         return;
     }
@@ -808,6 +816,65 @@ pub fn laya_attention_block_into(
             }
         }
     }
+
+    // Share the union of each query tile's allowed key span across heads.
+    // Sliding masks then avoid a dense contraction over unrelated keys.
+    let tile = 64.min(length);
+    let tiles = length.div_ceil(tile);
+    let use_gemm = length >= 32;
+    let key_ranges: Vec<(usize, usize, usize)> = if use_gemm {
+        (0..batch)
+            .flat_map(|b| {
+                (0..length).step_by(tile).map(move |start| {
+                    let end = (start + tile).min(length);
+                    let mut first = length;
+                    let mut last = 0;
+                    let mut allowed = 0;
+                    for key in 0..length {
+                        let column = length * (key + length * b);
+                        let active = keep[column + start..column + end]
+                            .iter()
+                            .filter(|value| **value)
+                            .count();
+                        if active > 0 {
+                            first = first.min(key);
+                            last = key + 1;
+                            allowed += active;
+                        }
+                    }
+                    if first == length {
+                        (0, 0, 0)
+                    } else {
+                        (first, last, allowed)
+                    }
+                })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+    let max_keys = key_ranges
+        .iter()
+        .map(|(first, last, _)| last - first)
+        .max()
+        .unwrap_or(0);
+
+    let dense_batches: Vec<bool> = if use_gemm {
+        key_ranges
+            .chunks(tiles)
+            .map(|ranges| {
+                ranges
+                    .iter()
+                    .enumerate()
+                    .all(|(index, (first, last, allowed))| {
+                        let queries = (length - index * tile).min(tile);
+                        *allowed >= (queries * (last - first)).div_ceil(2)
+                    })
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
 
     let qkv_addr = qkv.as_ptr() as usize;
     let keep_addr = keep.as_ptr() as usize;
@@ -856,6 +923,102 @@ pub fn laya_attention_block_into(
                         k[row + i + half] = a * s + bb * c;
                     }
                 }
+            }
+            // For longer sequences, use library GEMM for QKᵀ and PV. Query
+            // tiles bound scratch at O(64 * length), rather than length².
+            // A nonfinite V needs the scalar path: masked zero probabilities
+            // must not turn excluded NaNs/infinities into 0 * NaN in dense PV.
+            if use_gemm && dense_batches[b] && v.iter().all(|value| value.is_finite()) {
+                let score_size = tile
+                    .checked_mul(max_keys)
+                    .expect("attention workspace overflow");
+                let mut probabilities = vec![0.0f32; score_size];
+                let mut mixed = vec![0.0f32; tile * hd];
+                for (index, start) in (0..length).step_by(tile).enumerate() {
+                    let queries = (length - start).min(tile);
+                    let (key_start, key_end, _) = key_ranges[b * tiles + index];
+                    let keys = key_end - key_start;
+                    if keys == 0 {
+                        // Match the scalar path's all-masked softmax semantics.
+                        for local in 0..queries {
+                            let destination = feat + d * (start + local + length * b);
+                            for i in 0..hd {
+                                *out.add(destination + i) = f32::NAN;
+                            }
+                        }
+                        continue;
+                    }
+                    // The outer Rayon task owns this head; these SGEMMs are
+                    // single-threaded, with disjoint owned scratch matrices.
+                    matrixmultiply::sgemm(
+                        queries,
+                        hd,
+                        keys,
+                        1.0,
+                        q.as_ptr().add(start * hd),
+                        hd as isize,
+                        1,
+                        k.as_ptr().add(key_start * hd),
+                        1,
+                        hd as isize,
+                        0.0,
+                        probabilities.as_mut_ptr(),
+                        keys as isize,
+                        1,
+                    );
+                    for local in 0..queries {
+                        let query = start + local;
+                        let row = &mut probabilities[local * keys..(local + 1) * keys];
+                        let mut max = f32::NEG_INFINITY;
+                        for (key, value) in row.iter_mut().enumerate() {
+                            *value = if *keep.add(query + length * (key_start + key + length * b)) {
+                                *value * scale
+                            } else {
+                                f32::NEG_INFINITY
+                            };
+                            if *value > max {
+                                max = *value;
+                            }
+                        }
+                        let mut sum = 0.0f32;
+                        for value in row.iter_mut() {
+                            *value = if value.is_finite() {
+                                (*value - max).exp()
+                            } else {
+                                0.0
+                            };
+                            sum += *value;
+                        }
+                        for value in row {
+                            *value /= sum;
+                        }
+                    }
+                    matrixmultiply::sgemm(
+                        queries,
+                        keys,
+                        hd,
+                        1.0,
+                        probabilities.as_ptr(),
+                        keys as isize,
+                        1,
+                        v.as_ptr().add(key_start * hd),
+                        hd as isize,
+                        1,
+                        0.0,
+                        mixed.as_mut_ptr(),
+                        hd as isize,
+                        1,
+                    );
+                    for local in 0..queries {
+                        let destination = feat + d * (start + local + length * b);
+                        std::ptr::copy_nonoverlapping(
+                            mixed.as_ptr().add(local * hd),
+                            out.add(destination),
+                            hd,
+                        );
+                    }
+                }
+                return;
             }
             // masked scaled dot-product attention for this head
             let mut probs = vec![0.0f32; length];
@@ -948,6 +1111,53 @@ mod tests {
                             .map(|i| x[row * in_dim + i] * weight[column * in_dim + i])
                             .sum::<f32>();
                     assert!((output[row * out_dim + column] - expected).abs() < 1e-5);
+                }
+            }
+        }
+    }
+
+    #[test]
+    #[should_panic(expected = "qkv length")]
+    fn laya_attention_rejects_short_storage_before_raw_access() {
+        let mut output = vec![0.0f32; 4 * 32];
+        laya_attention_block_into(&[], &vec![true; 32 * 32], 4, 1, 32, 1, 0.0, &mut output);
+    }
+
+    #[test]
+    fn laya_attention_preserves_masked_nonfinite_values_and_empty_rows() {
+        let length = 65;
+        let d = 4;
+        let mut qkv = vec![0.0f32; 3 * d * length];
+        for key in 0..length {
+            for feature in 0..d {
+                qkv[3 * d * key + 2 * d + feature] = (feature + 1) as f32;
+            }
+        }
+        let mut keep = vec![true; length * length];
+        for query in 0..length {
+            keep[query + length * 32] = false;
+        }
+        for key in 0..length {
+            keep[length * key] = false;
+            keep[length - 1 + length * key] = false;
+        }
+        for excluded in [1.0f32, f32::NAN, f32::INFINITY] {
+            for feature in 0..d {
+                qkv[3 * d * 32 + 2 * d + feature] = excluded;
+            }
+            let mut output = vec![0.0; d * length];
+            laya_attention_block_into(&qkv, &keep, d, 1, length, 1, 0.0, &mut output);
+            for query in 0..length {
+                for feature in 0..d {
+                    let actual = output[query * d + feature];
+                    if query == 0 || query == length - 1 {
+                        assert!(actual.is_nan());
+                    } else {
+                        assert!(
+                            (actual - (feature + 1) as f32).abs() <= 1e-6,
+                            "query={query}, feature={feature}, actual={actual}"
+                        );
+                    }
                 }
             }
         }

@@ -1,0 +1,365 @@
+diff --git a/crates/cpu-kernels/src/lib.rs b/crates/cpu-kernels/src/lib.rs
+index 06d308a..7eb18ea 100644
+--- a/crates/cpu-kernels/src/lib.rs
++++ b/crates/cpu-kernels/src/lib.rs
+@@ -772,6 +772,9 @@ pub fn jeff_full_attention_into(
+ /// `(length, length, batch)` causal/window mask (`query + length*(key +
+ /// length*batch)`); `rope_base == 0.0` disables RoPE.
+ #[allow(clippy::too_many_arguments)]
++pub static GEMM_ATTENTION_DIAGNOSTIC: std::sync::atomic::AtomicBool =
++    std::sync::atomic::AtomicBool::new(true);
++
+ pub fn laya_attention_block_into(
+     qkv: &[f32],
+     keep: &[bool],
+@@ -782,10 +785,18 @@ pub fn laya_attention_block_into(
+     rope_base: f32,
+     out: &mut [f32],
+ ) {
+-    let n = d * length * batch;
+-    debug_assert_eq!(qkv.len(), 3 * n);
+-    debug_assert_eq!(out.len(), n);
+-    debug_assert_eq!(keep.len(), length * length * batch);
++    let n = d
++        .checked_mul(length)
++        .and_then(|n| n.checked_mul(batch))
++        .expect("attention dimensions overflow");
++    let qkv_size = n.checked_mul(3).expect("attention dimensions overflow");
++    let mask_size = length
++        .checked_mul(length)
++        .and_then(|n| n.checked_mul(batch))
++        .expect("attention mask dimensions overflow");
++    assert_eq!(qkv.len(), qkv_size, "qkv length");
++    assert_eq!(out.len(), n, "output length");
++    assert_eq!(keep.len(), mask_size, "mask length");
+     if n == 0 || heads == 0 || d % heads != 0 {
+         return;
+     }
+@@ -809,6 +820,66 @@ pub fn laya_attention_block_into(
+         }
+     }
+ 
++    // Share the union of each query tile's allowed key span across heads.
++    // Sliding masks then avoid a dense contraction over unrelated keys.
++    let tile = 64.min(length);
++    let tiles = length.div_ceil(tile);
++    let use_gemm =
++        length >= 32 && GEMM_ATTENTION_DIAGNOSTIC.load(std::sync::atomic::Ordering::Relaxed);
++    let key_ranges: Vec<(usize, usize, usize)> = if use_gemm {
++        (0..batch)
++            .flat_map(|b| {
++                (0..length).step_by(tile).map(move |start| {
++                    let end = (start + tile).min(length);
++                    let mut first = length;
++                    let mut last = 0;
++                    let mut allowed = 0;
++                    for key in 0..length {
++                        let column = length * (key + length * b);
++                        let active = keep[column + start..column + end]
++                            .iter()
++                            .filter(|value| **value)
++                            .count();
++                        if active > 0 {
++                            first = first.min(key);
++                            last = key + 1;
++                            allowed += active;
++                        }
++                    }
++                    if first == length {
++                        (0, 0, 0)
++                    } else {
++                        (first, last, allowed)
++                    }
++                })
++            })
++            .collect()
++    } else {
++        Vec::new()
++    };
++    let max_keys = key_ranges
++        .iter()
++        .map(|(first, last, _)| last - first)
++        .max()
++        .unwrap_or(0);
++
++    let dense_batches: Vec<bool> = if use_gemm {
++        key_ranges
++            .chunks(tiles)
++            .map(|ranges| {
++                ranges
++                    .iter()
++                    .enumerate()
++                    .all(|(index, (first, last, allowed))| {
++                        let queries = (length - index * tile).min(tile);
++                        *allowed >= (queries * (last - first)).div_ceil(2)
++                    })
++            })
++            .collect()
++    } else {
++        Vec::new()
++    };
++
+     let qkv_addr = qkv.as_ptr() as usize;
+     let keep_addr = keep.as_ptr() as usize;
+     let out_addr = out.as_mut_ptr() as usize;
+@@ -857,6 +928,102 @@ pub fn laya_attention_block_into(
+                     }
+                 }
+             }
++            // For longer sequences, use library GEMM for QKᵀ and PV. Query
++            // tiles bound scratch at O(64 * length), rather than length².
++            // A nonfinite V needs the scalar path: masked zero probabilities
++            // must not turn excluded NaNs/infinities into 0 * NaN in dense PV.
++            if use_gemm && dense_batches[b] && v.iter().all(|value| value.is_finite()) {
++                let score_size = tile
++                    .checked_mul(max_keys)
++                    .expect("attention workspace overflow");
++                let mut probabilities = vec![0.0f32; score_size];
++                let mut mixed = vec![0.0f32; tile * hd];
++                for (index, start) in (0..length).step_by(tile).enumerate() {
++                    let queries = (length - start).min(tile);
++                    let (key_start, key_end, _) = key_ranges[b * tiles + index];
++                    let keys = key_end - key_start;
++                    if keys == 0 {
++                        // Match the scalar path's all-masked softmax semantics.
++                        for local in 0..queries {
++                            let destination = feat + d * (start + local + length * b);
++                            for i in 0..hd {
++                                *out.add(destination + i) = f32::NAN;
++                            }
++                        }
++                        continue;
++                    }
++                    // The outer Rayon task owns this head; these SGEMMs are
++                    // single-threaded, with disjoint owned scratch matrices.
++                    matrixmultiply::sgemm(
++                        queries,
++                        hd,
++                        keys,
++                        1.0,
++                        q.as_ptr().add(start * hd),
++                        hd as isize,
++                        1,
++                        k.as_ptr().add(key_start * hd),
++                        1,
++                        hd as isize,
++                        0.0,
++                        probabilities.as_mut_ptr(),
++                        keys as isize,
++                        1,
++                    );
++                    for local in 0..queries {
++                        let query = start + local;
++                        let row = &mut probabilities[local * keys..(local + 1) * keys];
++                        let mut max = f32::NEG_INFINITY;
++                        for (key, value) in row.iter_mut().enumerate() {
++                            *value = if *keep.add(query + length * (key_start + key + length * b)) {
++                                *value * scale
++                            } else {
++                                f32::NEG_INFINITY
++                            };
++                            if *value > max {
++                                max = *value;
++                            }
++                        }
++                        let mut sum = 0.0f32;
++                        for value in row.iter_mut() {
++                            *value = if value.is_finite() {
++                                (*value - max).exp()
++                            } else {
++                                0.0
++                            };
++                            sum += *value;
++                        }
++                        for value in row {
++                            *value /= sum;
++                        }
++                    }
++                    matrixmultiply::sgemm(
++                        queries,
++                        keys,
++                        hd,
++                        1.0,
++                        probabilities.as_ptr(),
++                        keys as isize,
++                        1,
++                        v.as_ptr().add(key_start * hd),
++                        hd as isize,
++                        1,
++                        0.0,
++                        mixed.as_mut_ptr(),
++                        hd as isize,
++                        1,
++                    );
++                    for local in 0..queries {
++                        let destination = feat + d * (start + local + length * b);
++                        std::ptr::copy_nonoverlapping(
++                            mixed.as_ptr().add(local * hd),
++                            out.add(destination),
++                            hd,
++                        );
++                    }
++                }
++                return;
++            }
+             // masked scaled dot-product attention for this head
+             let mut probs = vec![0.0f32; length];
+             for query in 0..length {
+@@ -953,6 +1120,53 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    #[should_panic(expected = "qkv length")]
++    fn laya_attention_rejects_short_storage_before_raw_access() {
++        let mut output = vec![0.0f32; 4 * 32];
++        laya_attention_block_into(&[], &vec![true; 32 * 32], 4, 1, 32, 1, 0.0, &mut output);
++    }
++
++    #[test]
++    fn laya_attention_preserves_masked_nonfinite_values_and_empty_rows() {
++        let length = 65;
++        let d = 4;
++        let mut qkv = vec![0.0f32; 3 * d * length];
++        for key in 0..length {
++            for feature in 0..d {
++                qkv[3 * d * key + 2 * d + feature] = (feature + 1) as f32;
++            }
++        }
++        let mut keep = vec![true; length * length];
++        for query in 0..length {
++            keep[query + length * 32] = false;
++        }
++        for key in 0..length {
++            keep[length * key] = false;
++            keep[length - 1 + length * key] = false;
++        }
++        for excluded in [1.0f32, f32::NAN, f32::INFINITY] {
++            for feature in 0..d {
++                qkv[3 * d * 32 + 2 * d + feature] = excluded;
++            }
++            let mut output = vec![0.0; d * length];
++            laya_attention_block_into(&qkv, &keep, d, 1, length, 1, 0.0, &mut output);
++            for query in 0..length {
++                for feature in 0..d {
++                    let actual = output[query * d + feature];
++                    if query == 0 || query == length - 1 {
++                        assert!(actual.is_nan());
++                    } else {
++                        assert!(
++                            (actual - (feature + 1) as f32).abs() <= 1e-6,
++                            "query={query}, feature={feature}, actual={actual}"
++                        );
++                    }
++                }
++            }
++        }
++    }
++
+     #[test]
+     fn matches_naive_loop_small() {
+         let mut state = 12345u64;
+diff --git a/crates/laya-infer/examples/bench_paired_attention_gemm.rs b/crates/laya-infer/examples/bench_paired_attention_gemm.rs
+new file mode 100644
+index 0000000..3b136fa
+--- /dev/null
++++ b/crates/laya-infer/examples/bench_paired_attention_gemm.rs
+@@ -0,0 +1,98 @@
++use laya_infer::{
++    checkpoint::load_checkpoint,
++    model::{TensorCache, forward_tenferro_cached},
++};
++use serde_json::json;
++use std::{sync::atomic::Ordering, time::Instant};
++use tenferro_ad::EagerRuntime;
++use tenferro_cpu::CpuBackend;
++
++fn median(xs: &[f64]) -> f64 {
++    let mut xs = xs.to_vec();
++    xs.sort_by(f64::total_cmp);
++    xs[xs.len() / 2]
++}
++fn main() {
++    let args: Vec<String> = std::env::args().collect();
++    let checkpoint = load_checkpoint(args.get(1).expect("checkpoint directory")).unwrap();
++    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
++    let mut cache = TensorCache::new();
++    let mut results = Vec::new();
++    for (length, batch) in [(8usize, 1usize), (16, 1), (64, 1), (8, 8)] {
++        let base = [2, 100, 1000, 2000, 3000, 4000, 5, 3];
++        let ids: Vec<i64> = (0..length * batch)
++            .map(|i| base[(i % length) % 8])
++            .collect();
++        let mask = vec![true; length * batch];
++        let positions: Vec<i64> = (0..batch).flat_map(|_| [1, 3, 5]).collect();
++        let marker_mask = vec![true; 3 * batch];
++        let qtype = vec![0i64; batch];
++        let run = |cache: &mut TensorCache, prepared| {
++            cpu_kernels::GEMM_ATTENTION_DIAGNOSTIC.store(prepared, Ordering::Relaxed);
++            let begin = Instant::now();
++            let output = runtime
++                .with_eager_session(|session| {
++                    forward_tenferro_cached(
++                        session,
++                        cache,
++                        &checkpoint.encoder,
++                        &checkpoint.agent,
++                        &checkpoint.weights,
++                        &ids,
++                        &mask,
++                        &positions,
++                        &marker_mask,
++                        &qtype,
++                    )
++                })
++                .unwrap()
++                .unwrap();
++            (begin.elapsed().as_secs_f64() * 1000.0, output)
++        };
++        let mut scalar_warmup = Vec::new();
++        let mut gemm_warmup = Vec::new();
++        for _ in 0..2 {
++            scalar_warmup.push(run(&mut cache, false).0);
++            gemm_warmup.push(run(&mut cache, true).0);
++        }
++        let mut natural = Vec::new();
++        let mut prepared = Vec::new();
++        let mut max_error = 0.0f32;
++        for pair in 0..15 {
++            let (old, new) = if pair % 2 == 0 {
++                let old = run(&mut cache, false);
++                (old, run(&mut cache, true))
++            } else {
++                let new = run(&mut cache, true);
++                (run(&mut cache, false), new)
++            };
++            natural.push(old.0);
++            prepared.push(new.0);
++            for (a, b) in old
++                .1
++                .0
++                .iter()
++                .chain(&old.1.1)
++                .zip(new.1.0.iter().chain(&new.1.1))
++            {
++                max_error = max_error.max((a - b).abs());
++                assert!(a.is_finite() && b.is_finite());
++                assert!((a - b).abs() <= 2e-3 + 2e-5 * a.abs());
++            }
++        }
++        results.push(
++            json!({"length":length,"batch":batch,"scalar_ms":median(&natural),
++            "gemm_ms":median(&prepared),"max_abs_output_error":max_error,
++            "scalar_samples_ms":natural,"gemm_samples_ms":prepared,"scalar_warmup_ms":scalar_warmup,"gemm_warmup_ms":gemm_warmup}),
++        );
++    }
++    let mut metadata = bench_suite::BenchMetadata::capture();
++    metadata.profile = Some("release".into());
++    let metadata: serde_json::Value = serde_json::from_str(&metadata.to_json()).unwrap();
++    println!(
++        "{}",
++        serde_json::to_string_pretty(&json!({"metadata":metadata,"warmup_per_layout":2,
++        "paired_iterations":15,"rayon_threads":rayon::current_num_threads(),"rows":results}))
++        .unwrap()
++    );
++}

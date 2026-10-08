@@ -484,3 +484,55 @@ predates the final feature guard and layout/accumulation regression test.
 The existing CPU and production checkpoint parity tests remain the correctness
 gates; these timing reports alone do not prove numerical parity or resolve
 issue #2's remaining gap versus Julia/Python.
+
+
+## Tiled library GEMM for Laya attention (2026-10-09)
+
+The existing CPU attention extension now uses `matrixmultiply::sgemm` for
+QKᵀ and probability/value contractions at sequence lengths of at least 32.
+Queries are tiled in groups of 64. A per-batch mask plan bounds the key span
+for each tile and is shared across heads. GEMM is selected only when each
+mask tile has at least half of its query/key rectangle allowed; very sparse
+masks retain the scalar contractions. Nonfinite values also retain the scalar
+path, preserving its behavior for masked NaN/Inf values. All-masked rows still
+produce NaN. Checked storage sizes protect subsequent raw-pointer accesses.
+The scratch score buffer is bounded by 64 times the largest key span.
+
+This extends the existing CPU tenferro attention op with library GEMM. Native
+model routing and other backends retain their existing operations. It does not
+establish GPU performance or correctness.
+
+Actual checkpoint timings used eight Rayon threads, two warmups per mode and
+15 alternating pairs in one process with shared prepared weights. Benchmarks
+ran sequentially. The temporary selector was removed from production code.
+
+| L64 B1 | scalar attention | tiled GEMM attention | reduction |
+|---|---:|---:|---:|
+| first run | 194.394 ms | 178.215 ms | 8.3% |
+| repeat | 191.375 ms | 179.009 ms | 6.5% |
+
+L8/L16 B1 and L8 B8 retain the same attention algorithm; timing differences
+there are variation. Maximum checkpoint logit/action absolute difference was
+0.00048828125, within the production comparison tolerance of
+`2e-3 + abs(reference) * 2e-5`. The production Julia question/action reference
+test passed with the actual checkpoint (11.36 seconds).
+
+Boundary tests cover lengths 31/32/33/63/64/65/127/129, full and sliding
+attention, padding, mask holes and very sparse masks. Kernel tests additionally
+cover masked nonfinite values, empty rows and invalid input storage.
+Microbenchmarks show about 3.2x faster full attention at L64 and 5.7x at L512;
+very sparse masks pay a small planning overhead, so these kernel gains must
+not be interpreted as whole-model gains. Raw samples, replay patch against
+`e1f98c4`, microbenchmark source and metadata are in
+[`bench-laya-attention-gemm-2026-10-09`](../../../../fixtures/bench-laya-attention-gemm-2026-10-09).
+
+## Rejected prepared weight layout (2026-10-09)
+
+A separate experiment cached projection weights in a GEMM-friendly transposed
+layout. Synthetic contractions improved by 10–43%, but two alternating-pair
+checkpoint runs showed only small or mixed warm improvements. The measured
+first forward grew from 2.01 to 2.97 seconds, including cache preparation and
+computation, with checkpoint loading excluded. Outputs were identical.
+The production prototype was restored rather than adopting that startup cost
+for inconclusive warm gains. Exact prototype and measurement artifacts are in
+[`bench-prepared-weight-layout-2026-10-09`](../../../../fixtures/bench-prepared-weight-layout-2026-10-09).

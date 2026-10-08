@@ -357,3 +357,18 @@ The checkpoint and reference were present, so this result exercised the model
 rather than the test's absent-snapshot skip path. Raw samples, metadata,
 ablation method and parity evidence are in
 [`bench-jeff-native-constants-2026-10-09`](../../../../fixtures/bench-jeff-native-constants-2026-10-09).
+
+
+### Laya attention improvement (2026-10-09)
+
+Tiled library GEMM in the existing CPU attention extension reduced actual
+checkpoint L64 B1 inference from 194.4 to 178.2 ms in alternating pairs;
+a repeat reduced 191.4 to 179.0 ms (6.5–8.3%). Eight Rayon threads, float32,
+two warmups and 15 pairs were used. Short sequences keep the same algorithm.
+This remains slower than the original Python result of about 135 ms and Julia
+result of about 122 ms, so issue #2 remains open. The actual Julia production
+question/action parity test passed. See
+[`22_CPU_KERNEL_OPTIMIZATION.md`](22_CPU_KERNEL_OPTIMIZATION.md) for selection
+rules, numerical differences and replayable records. A prepared weight layout
+experiment was rejected because warm gains were small or mixed and startup
+became slower; its source prototype is retained only as a diagnostic artifact.

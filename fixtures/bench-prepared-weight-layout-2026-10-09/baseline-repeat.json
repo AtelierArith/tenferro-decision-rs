@@ -1,0 +1,42 @@
+{
+  "iters": 5,
+  "metadata": {
+    "arch": "x86_64",
+    "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+    "cpu_count": 16,
+    "git_rev": "e1f98c4957994ca79359f8201dae87a3457460b7",
+    "os": "linux",
+    "profile": "release",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+    "target": "x86_64-unknown-linux-gnu",
+    "timestamp_unix": 1791485172
+  },
+  "rayon_threads": 8,
+  "rows": [
+    {
+      "batch": 1,
+      "host_ms": 84.377696,
+      "length": 8,
+      "tenferro_ms": 105.173815
+    },
+    {
+      "batch": 1,
+      "host_ms": 100.92138100000001,
+      "length": 16,
+      "tenferro_ms": 108.335756
+    },
+    {
+      "batch": 1,
+      "host_ms": 331.078305,
+      "length": 64,
+      "tenferro_ms": 193.309796
+    },
+    {
+      "batch": 8,
+      "host_ms": 230.47888,
+      "length": 8,
+      "tenferro_ms": 179.33401800000001
+    }
+  ],
+  "warmup": 2
+}
