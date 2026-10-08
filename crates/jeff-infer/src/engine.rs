@@ -1,7 +1,7 @@
-//! The prepared-token Jeff [`DecisionEngine`].
+//! Jeff [`DecisionEngine`] for prepared tokens and local Text/Json prompts.
 //!
-//! This is the first engine seam for `jeff-infer`: it accepts
-//! [`State::Prepared`] tokens only, runs a forward once per row through a
+//! It accepts [`State::Prepared`] tokens, and Text/Json states when tokenizer
+//! assets are loaded. It runs a forward once per row through a
 //! workspace reused across rows, and turns the readout logits into typed answers
 //! with [`crate::readout`].
 //!
@@ -18,9 +18,8 @@
 //! - **noul**: the first two columns (false, true)
 //! - **score**: one column per level, in criteria order
 //!
-//! Natural-language (`Text`) and structured (`Json`) states are not tokenized
-//! yet; the initial engine rejects them (`docs/agents/specs/docs/14_JEFF_INFER_DESIGN.md`
-//! §9).
+//! `load` reads local tokenizer assets and compiles the checkpoint chat template.
+//! Constructors from raw weights remain prepared-only until `with_tokenizer`.
 
 use std::sync::Arc;
 
@@ -78,6 +77,7 @@ pub struct JeffEngine {
     cache: TensorCache,
     /// How the tenferro forward runs each Gated DeltaNet layer.
     delta_kernel: DeltaKernel,
+    tokenizer: Option<crate::tokenizer::JeffTokenizer>,
 }
 
 impl JeffEngine {
@@ -118,13 +118,20 @@ impl JeffEngine {
             host_opt: HostOptWorkspace::new(),
             cache: TensorCache::new(),
             delta_kernel: DeltaKernel::default(),
+            tokenizer: None,
         })
     }
 
     /// Load a local checkpoint with the default forward backend.
     pub fn load(directory: impl AsRef<std::path::Path>) -> Result<Self> {
+        let directory = directory.as_ref();
         let checkpoint = crate::checkpoint::load_checkpoint(directory)?;
-        Self::new(checkpoint.config, checkpoint.decision, checkpoint.weights)
+        let engine = Self::new(checkpoint.config, checkpoint.decision, checkpoint.weights)?;
+        if directory.join("tokenizer.json").is_file() {
+            engine.with_tokenizer(crate::tokenizer::JeffTokenizer::from_directory(directory)?)
+        } else {
+            Ok(engine)
+        }
     }
 
     /// Resolve a Hub snapshot and load it with the default forward backend.
@@ -141,6 +148,41 @@ impl JeffEngine {
                 source: Some(Box::new(error)),
             })?;
         Self::load(directory)
+    }
+
+    /// Enable Text/Json states using validated offline tokenizer assets.
+    pub fn with_tokenizer(mut self, tokenizer: crate::tokenizer::JeffTokenizer) -> Result<Self> {
+        if tokenizer.option_limit() < self.decision.max_options {
+            return Err(DecisionError::invalid_field(
+                "jeff.tokenizer",
+                "insufficient checkpoint answer codes",
+            ));
+        }
+        self.tokenizer = Some(tokenizer);
+        Ok(self)
+    }
+
+    /// Render and encode Text/Json states into one row per question.
+    pub fn prepare(&self, state: &State, questions: &QuestionSet) -> Result<PreparedState> {
+        state.validate()?;
+        questions.validate()?;
+        if let State::Prepared(prepared) = state {
+            if prepared.input_ids.len() != questions.len() {
+                return Err(DecisionError::invalid_field(
+                    "questions",
+                    "expected one question per prepared row",
+                ));
+            }
+            return Ok(prepared.clone());
+        }
+        self.tokenizer
+            .as_ref()
+            .ok_or_else(|| {
+                DecisionError::unsupported(
+                    "Text/Json states require Jeff tokenizer assets; use load or with_tokenizer",
+                )
+            })?
+            .prepare(state, questions)
     }
 
     /// Select how the tenferro forward runs each Gated DeltaNet layer.
@@ -283,17 +325,12 @@ impl DecisionEngine for JeffEngine {
     type Error = DecisionError;
 
     fn system_one(&mut self, state: &State, questions: &QuestionSet) -> Result<Vec<Answer>> {
+        let encoded;
         let prepared = match state {
             State::Prepared(prepared) => prepared,
-            State::Text(_) => {
-                return Err(DecisionError::unsupported(
-                    "jeff-infer accepts only prepared token states, not text",
-                ));
-            }
-            State::Json(_) => {
-                return Err(DecisionError::unsupported(
-                    "jeff-infer accepts only prepared token states, not JSON",
-                ));
+            State::Text(_) | State::Json(_) => {
+                encoded = self.prepare(state, questions)?;
+                &encoded
             }
         };
         prepared.validate()?;

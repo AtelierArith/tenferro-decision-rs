@@ -191,7 +191,23 @@ bundled webpki roots).
   fully tensor-native, head-batched `tensor_layer::delta_layer_tenferro_native`;
   it is now ~1.9× the host path on CPU (L8 342 ms vs 177 ms), down from ~10×
   (`23_TENFERRO_NATIVE.md`).
-- Remaining: natural-language tokenizer.
+- Natural-language input (2026-10-08): `JeffTokenizer` loads local
+  `tokenizer.json` with Qwen's NFC + regex/byte-level BPE, answer codes from
+  `decision_config.json`, and the compiled checkpoint chat template. The
+  state-first prompt renders Text/Json, choice/score/noul, and ordered Python
+  JSON spelling; thinking is disabled, matching original Jeff. No tokenizer
+  networking features are enabled, and overlong inputs fail without truncation.
+- `JeffEngine::load` attaches tokenizer assets when present. Raw-weight
+  constructors remain prepared-only until `with_tokenizer`; `prepare` exposes
+  the exact prepared rows. `jeff_system_one --text STATE` demonstrates the API.
+- Goldens in `fixtures/jeff-real/tokenizer.json` compare prompts and token ids
+  exactly against original Python Jeff. `extern/JeffClient.jl` accepts prepared
+  tokens and has no tokenizer API, so `tools/gen_jeff_text_answers.jl` captures
+  its `decide` answers using those independently produced token ids. The ignored
+  production Text/Json acceptance test then compares Rust answers with Julia.
+  Regenerate first with `tools/gen_jeff_tokenizer_reference.py`, then the Julia
+  script; ordinary tests use a small offline WordLevel tokenizer and synthetic
+  model weights.
 
 ### Phase 6 — `tenferro-gated-delta`
 

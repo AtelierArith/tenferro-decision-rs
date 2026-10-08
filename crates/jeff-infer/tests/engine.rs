@@ -277,7 +277,7 @@ fn temperature_changes_the_distribution() {
 }
 
 #[test]
-fn rejects_text_and_json_states() {
+fn rejects_text_and_json_without_tokenizer() {
     let mut engine = build_engine(4, 3, 1.0, 7);
     let set = question_set();
     assert!(
@@ -415,4 +415,80 @@ fn host_opt_backend_matches_host_backend() {
             .fold(0.0f32, f32::max);
         assert!(diff <= 2e-2, "row {row} differs by {diff}");
     }
+}
+
+fn text_tokenizer() -> jeff_infer::tokenizer::JeffTokenizer {
+    let directory =
+        std::env::temp_dir().join(format!("jeff-text-tokenizer-{}", std::process::id()));
+    std::fs::create_dir_all(&directory).unwrap();
+    let spec = serde_json::json!({
+        "version":"1.0", "truncation":{"direction":"Right", "max_length":8, "strategy":"LongestFirst", "stride":0}, "padding":null,
+        "added_tokens":[], "normalizer":null,
+        "pre_tokenizer":{"type":"Whitespace"}, "post_processor":null, "decoder":null,
+        "model":{"type":"WordLevel", "vocab":{"[UNK]":0,"A":1,"B":2,"C":3}, "unk_token":"[UNK]"}
+    });
+    std::fs::write(directory.join("tokenizer.json"), spec.to_string()).unwrap();
+    std::fs::write(directory.join("tokenizer_config.json"), "{}").unwrap();
+    std::fs::write(
+        directory.join("decision_config.json"),
+        r#"{"prompt_layout":"state-first","codes":["A","B","C"],"token_ids":[1,2,3]}"#,
+    )
+    .unwrap();
+    std::fs::write(
+        directory.join("chat_template.jinja"),
+        "{{ messages[0].content }}\n{{ messages[1].content[0].text }}",
+    )
+    .unwrap();
+    let tokenizer = jeff_infer::tokenizer::JeffTokenizer::from_directory(&directory).unwrap();
+    std::fs::remove_dir_all(directory).unwrap();
+    tokenizer
+}
+
+#[test]
+fn text_and_json_states_match_their_prepared_rows() {
+    let tokenizer = text_tokenizer();
+    let mut engine = build_engine(4, 3, 1.0, 7)
+        .with_tokenizer(tokenizer.clone())
+        .unwrap();
+    let questions = question_set();
+    for state in [
+        State::Text("hello café 日本語".into()),
+        State::Json(Content::object([
+            ("value", Content::Int(1)),
+            ("description", Content::string("hi")),
+        ])),
+    ] {
+        let prepared = engine.prepare(&state, &questions).unwrap();
+        let natural = engine.system_one(&state, &questions).unwrap();
+        let preencoded = engine
+            .system_one(&State::Prepared(prepared), &questions)
+            .unwrap();
+        assert_eq!(natural, preencoded);
+    }
+    let false_instructions = Question::Choice(
+        ChoiceQuestion::new(
+            Content::Bool(false),
+            vec![("a".into(), Content::Null), ("b".into(), Content::Int(0))],
+        )
+        .unwrap(),
+    );
+    let prompt = tokenizer
+        .render(&State::Text("hi".into()), &false_instructions)
+        .unwrap();
+    assert!(prompt.contains("Question:\nChoose the best matching option."));
+    assert!(prompt.contains("A: a\nB: b: 0"));
+    let rendered = tokenizer
+        .render(&State::Text("hi".into()), &noul_question())
+        .unwrap();
+    assert!(rendered.contains("State:\nhi\n\nQuestion:\nis it so?\n\nOptions:\nA: no\nB: yes"));
+    assert!(
+        tokenizer
+            .render(&State::Prepared(prepared()), &choice_question())
+            .is_err()
+    );
+    assert!(
+        tokenizer
+            .prepare(&State::Text("hi ".repeat(9000)), &questions)
+            .is_err()
+    );
 }

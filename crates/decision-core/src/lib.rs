@@ -40,3 +40,6 @@ pub mod prelude {
         ScoreQuestion, State, SystemOneResponse, Usage,
     };
 }
+
+/// Shared JSON spelling for Python-trained prompt formats.
+pub mod python_json;

@@ -1,4 +1,4 @@
-//! Answer a `QuestionSet` with the prepared-token Jeff engine.
+//! Answer a `QuestionSet` with prepared tokens or a natural-language state.
 //!
 //!     cargo run --release -p jeff-infer --example jeff_system_one -- <CHECKPOINT_DIR>
 //!
@@ -6,6 +6,7 @@
 //! Prepared states are `(input_ids, attention_mask)` rows; `row i` answers
 //! question `i`, and leading padding is trimmed by the engine. Pass `--tenferro`
 //! to run the tenferro-native forward instead of the default optimized host one.
+//! Pass `--text "your state"` to use the checkpoint tokenizer and chat template.
 
 use decision_core::{
     ChoiceQuestion, Content, DecisionEngine, PreparedState, Question, QuestionSet, State,
@@ -17,7 +18,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = std::env::args().collect();
     let dir = args
         .get(1)
-        .expect("usage: jeff_system_one <checkpoint_dir> [--tenferro]");
+        .expect("usage: jeff_system_one <checkpoint_dir> [--tenferro] [--text STATE]");
     let backend = if args.iter().any(|arg| arg == "--tenferro") {
         JeffBackend::Tenferro
     } else {
@@ -33,10 +34,20 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     )?;
 
     // One prepared row per question; `row 0` answers `questions[0]`.
-    let state = State::Prepared(PreparedState {
-        input_ids: vec![vec![1, 2, 3, 4]],
-        attention_mask: vec![vec![true; 4]],
-    });
+    let state = if let Some(index) = args.iter().position(|arg| arg == "--text") {
+        engine =
+            engine.with_tokenizer(jeff_infer::tokenizer::JeffTokenizer::from_directory(dir)?)?;
+        State::Text(
+            args.get(index + 1)
+                .ok_or("--text requires a state")?
+                .clone(),
+        )
+    } else {
+        State::Prepared(PreparedState {
+            input_ids: vec![vec![1, 2, 3, 4]],
+            attention_mask: vec![vec![true; 4]],
+        })
+    };
 
     let mut questions = QuestionSet::new();
     questions.push(

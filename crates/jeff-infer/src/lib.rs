@@ -10,8 +10,8 @@
 //! loads a checkpoint directory (`config.json`, `decision_config.json`,
 //! `model.safetensors`, `readout.safetensors`) into prepared [`model::JeffWeights`].
 //!
-//! Still to come: the prepared-token engine context (`JeffModel`/`JeffContext`
-//! per `docs/agents/specs/docs/14_JEFF_INFER_DESIGN.md`).
+//! [`engine::JeffEngine`] accepts prepared rows or Text/Json with local Qwen
+//! tokenizer assets. [`tokenizer`] renders the state-first checkpoint prompt.
 
 pub mod checkpoint;
 pub mod config;
@@ -19,6 +19,7 @@ pub mod engine;
 pub mod host_opt;
 pub mod model;
 pub mod readout;
+pub mod tokenizer;
 
 /// Re-export the shared decision types this crate produces.
 pub use decision_core;
