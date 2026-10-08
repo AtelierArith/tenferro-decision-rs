@@ -576,16 +576,30 @@ fn cuda_decay_preparation_feeds_native_large_key_scan_on_one_session() {
 #[test]
 #[ignore = "requires CUDA hardware, cuBLAS and cuTENSOR; run explicitly with --ignored"]
 fn native_full_layer_matches_cpu_with_masks_grouping_and_large_keys() {
-    full_layer_gpu_parity(false);
+    full_layer_gpu_parity(FullLayerPath::Native);
 }
 
 #[test]
 #[ignore = "requires CUDA hardware, NVRTC, cuBLAS and cuTENSOR; run explicitly with --ignored"]
 fn raw_recurrent_full_layer_matches_cpu_and_reuses_module() {
-    full_layer_gpu_parity(true);
+    full_layer_gpu_parity(FullLayerPath::RawRecurrent);
 }
 
-fn full_layer_gpu_parity(raw_recurrent: bool) {
+#[test]
+#[ignore = "requires CUDA hardware, NVRTC, cuBLAS and cuTENSOR; run explicitly with --ignored"]
+fn raw_convolution_native_chunked_layer_matches_cpu_and_reuses_workspace() {
+    full_layer_gpu_parity(FullLayerPath::RawChunked);
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FullLayerPath {
+    Native,
+    RawRecurrent,
+    RawChunked,
+}
+
+fn full_layer_gpu_parity(path: FullLayerPath) {
+    let raw_recurrent = path != FullLayerPath::Native;
     use tenferro_gated_delta::{
         Algorithm, GatedDeltaConfig, GatedDeltaWeights, delta_layer_reference,
         delta_layer_tenferro_prepared_mask, prepare_tensor_weights,
@@ -594,7 +608,12 @@ fn full_layer_gpu_parity(raw_recurrent: bool) {
 
     let backend = CudaBackend::new(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
     let runtime = tenferro_ad::EagerRuntime::with_cuda_backend(backend.clone()).unwrap();
-    let cases = if raw_recurrent {
+    let cases = if path == FullLayerPath::RawChunked {
+        vec![
+            (7, 2, 4, vec![1usize, 63, 64, 65]),
+            (257, 2, 4, vec![1usize, 63, 64, 65, 127, 128, 129]),
+        ]
+    } else if raw_recurrent {
         vec![
             (1, 1, 1, vec![1usize, 63, 64, 65]),
             (7, 2, 4, vec![1usize, 63, 64, 65, 127, 128, 129]),
@@ -656,17 +675,20 @@ fn full_layer_gpu_parity(raw_recurrent: bool) {
                 let expected = if raw_recurrent {
                     let first_x: Vec<_> = x.iter().map(|v| v * 0.5).collect();
                     let first = delta_layer_reference(&cfg, &weights, &first_x, &mask).unwrap();
+                    let third = if path == FullLayerPath::RawChunked {
+                        let mut changed = weights.clone();
+                        changed.conv.iter_mut().for_each(|v| *v *= 0.5);
+                        delta_layer_reference(&cfg, &changed, &x, &mask).unwrap()
+                    } else {
+                        expected.iter().map(|v| 2.0 * v).collect()
+                    };
                     (0..cfg.hidden)
                         .flat_map(|h| {
                             first[h * length..(h + 1) * length]
                                 .iter()
                                 .copied()
                                 .chain(expected[h * length..(h + 1) * length].iter().copied())
-                                .chain(
-                                    expected[h * length..(h + 1) * length]
-                                        .iter()
-                                        .map(|v| 2.0 * v),
-                                )
+                                .chain(third[h * length..(h + 1) * length].iter().copied())
                         })
                         .collect::<Vec<_>>()
                 } else {
@@ -687,7 +709,10 @@ fn full_layer_gpu_parity(raw_recurrent: bool) {
                         let mask = session
                             .constant_from_host(Tensor::from_vec_col_major(vec![length], mask)?)?;
                         let result = if raw_recurrent {
-                            use tenferro_gated_delta::cuda_layer::delta_layer_cuda_recurrent_cached;
+                            use tenferro_gated_delta::{
+                                cuda_chunked_layer::delta_layer_cuda_chunked_cached,
+                                cuda_layer::delta_layer_cuda_recurrent_cached,
+                            };
                             let arch = std::env::var("TENFERRO_CUDA_ARCH")
                                 .unwrap_or_else(|_| "compute_70".into());
                             let kernels =
@@ -697,11 +722,13 @@ fn full_layer_gpu_parity(raw_recurrent: bool) {
                                     })
                                 })
                                 .expect("CUDA execution session")?;
+                            macro_rules! reuse_cases {
+                                ($run:path) => {{
                             let first_x = session.scale_real(&x, 0.5)?;
-                            let (kernels, workspace, first) = delta_layer_cuda_recurrent_cached(
+                            let (kernels, workspace, first) = $run(
                                 session, &cfg, &prepared, &first_x, &mask, kernels, None,
                             )?;
-                            let (kernels, workspace, result) = delta_layer_cuda_recurrent_cached(
+                            let (kernels, workspace, result) = $run(
                                 session,
                                 &cfg,
                                 &prepared,
@@ -711,8 +738,12 @@ fn full_layer_gpu_parity(raw_recurrent: bool) {
                                 Some(workspace),
                             )?;
                             let mut changed_weights = prepared.clone();
-                            changed_weights.norm = session.scale_real(&prepared.norm, 2.0)?;
-                            let (_, _, changed) = delta_layer_cuda_recurrent_cached(
+                            if path == FullLayerPath::RawChunked {
+                                changed_weights.conv = session.scale_real(&prepared.conv, 0.5)?;
+                            } else {
+                                changed_weights.norm = session.scale_real(&prepared.norm, 2.0)?;
+                            }
+                            let (_, _, changed) = $run(
                                 session,
                                 &cfg,
                                 &changed_weights,
@@ -724,6 +755,13 @@ fn full_layer_gpu_parity(raw_recurrent: bool) {
                             // Read prior results after reuse and replacement: cached
                             // weights must refresh, and previous outputs must remain independent.
                             session.concatenate(&[&first, &result, &changed], 1)?
+                                }};
+                            }
+                            if path == FullLayerPath::RawChunked {
+                                reuse_cases!(delta_layer_cuda_chunked_cached)
+                            } else {
+                                reuse_cases!(delta_layer_cuda_recurrent_cached)
+                            }
                         } else {
                             delta_layer_tenferro_prepared_mask(session, &cfg, &prepared, &x, &mask)?
                         };

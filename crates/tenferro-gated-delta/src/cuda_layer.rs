@@ -31,7 +31,10 @@ struct RawWeights {
     tensors: [TypedTensor<f32>; 4],
 }
 
-fn same_raw_weights(previous: &[EagerTensor; 4], current: [&EagerTensor; 4]) -> Result<bool> {
+pub(crate) fn same_raw_weights(previous: &[EagerTensor], current: &[&EagerTensor]) -> Result<bool> {
+    if previous.len() != current.len() {
+        return Ok(false);
+    }
     for (previous, current) in previous.iter().zip(current) {
         if previous.ctx_id() != current.ctx_id() {
             return Ok(false);
@@ -196,7 +199,7 @@ pub fn delta_layer_cuda_recurrent_cached(
         &weights.norm,
     ];
     let reuse_weights = if let Some(workspace) = &workspace {
-        same_raw_weights(&workspace.weights.sources, sources)?
+        same_raw_weights(&workspace.weights.sources, &sources)?
     } else {
         false
     };

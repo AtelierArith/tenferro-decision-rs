@@ -406,6 +406,21 @@ compares all three outputs after reuse/replacement, including prior output
 independence. Production scheduling/dispatch and actual hardware parity remain
 pending.
 
+The explicit `cuda_chunked_layer::delta_layer_cuda_chunked_cached` adapter
+connects raw convolution to the shared native head-batched normalization,
+chunked triangular solve and readout. Its convolution geometry is independent
+of the recurrent register-state key limit, so key width 257 and larger use
+the native solve without CPU fallback. The private workspace retains convolution
+storage and an owning convolution-weight copy; the same source identity checks
+refresh changed weights. A device copy separates eager intermediates and prior
+outputs from reused storage. The pending owner retains raw resources through
+native readout and fences once at layer completion, including error handling.
+The separate raw chunk-decay preparation kernel is not connected to this adapter;
+decay preparation currently uses native operations. Its ignored hardware gate
+covers grouped heads, masks, chunk boundaries, workspace reuse and convolution
+weight replacement. Compilation and CPU tests do not establish GPU parity;
+production dispatch, request-wide scheduling and hardware validation remain open.
+
 `cuda::CudaStageRun` is a raw-session-scoped pending owner. Its unsafe
 `enqueue` takes the module, eight input tensors and three workspace tensors
 before launch; callers still guarantee disjoint allocations and no conflicting
@@ -523,8 +538,9 @@ python3 tools/check_cuda_kernels.py --nvrtc-library "$NVRTC_LIBRARY"
 This validates PTX generation and parameter widths/order for virtual targets
 `compute_70`, `compute_80`, and `compute_90`. It neither launches kernels nor
 proves CPU/CUDA numerical parity, residency, or asynchronous lifetime safety.
-Those exit criteria, large-key chunked execution, and the full layer adapter
-remain open. CUDA plan requests continue to return `UnsupportedConfig`.
+Those exit criteria, hardware validation of the large-key layer adapter and
+production integration remain open. CUDA plan requests continue to return
+`UnsupportedConfig`.
 The 2026-10-08 compiler report is saved in
 `fixtures/cuda-compile-2026-10-08/nvrtc.json`, using the NVIDIA
 `nvidia-cuda-nvrtc-cu12==12.6.85` distribution (NVRTC version 12.6).
