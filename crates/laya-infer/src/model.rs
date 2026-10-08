@@ -1053,7 +1053,7 @@ fn layer_norm_feature_first(
     // Feature-first LayerNorm is one fused `cpu-kernels` pass; the eager
     // `norm::layer_norm` would transpose→normalize→transpose plus a handful of
     // elementwise/reduction ops per norm.
-    if x.dtype() == tenferro_tensor::DType::F32 {
+    if x.dtype() == tenferro_tensor::DType::F32 && tenferro_ext::cpu_extensions_supported(session) {
         let weight = cache.col_major(session, vec![width], &ln.weight)?;
         let bias = match &ln.bias {
             Some(bias) => Some(cache.col_major(session, vec![width], bias)?),
@@ -1062,7 +1062,7 @@ fn layer_norm_feature_first(
         return session.layer_norm_feature_first(x, &weight, bias.as_ref(), eps as f32);
     }
 
-    // Non-f32 fallback (the extension op is f32-only).
+    // Native fallback for other dtypes and backends.
     let rank = x.shape().len();
     let mut perm: Vec<usize> = (1..rank).collect();
     perm.push(0);
@@ -1093,7 +1093,7 @@ fn linear_feature_first(
     // Route it through the `cpu-kernels`-backed `gemm` extension op so the eager
     // forward reaches the same host GEMM as `forward_reference` (the eager
     // `dot_general` uses faer and pays per-call analysis/allocation instead).
-    if x.dtype() == tenferro_tensor::DType::F32 {
+    if x.dtype() == tenferro_tensor::DType::F32 && tenferro_ext::cpu_extensions_supported(session) {
         let weight = cache.col_major(session, vec![in_dim, out_dim], &linear.weight)?;
         let trailing = x.shape()[1..].to_vec();
         let rest: usize = trailing.iter().product();
@@ -1112,7 +1112,7 @@ fn linear_feature_first(
         return session.reshape(&y2, out_shape);
     }
 
-    // Non-f32 fallback (the extension op is f32-only): the original
+    // Native fallback for other dtypes and backends: the original
     // dot_general + move-the-contracted-axis-first formulation.
     let weight = cache.col_major(session, vec![in_dim, out_dim], &linear.weight)?;
     let contracted = session.dot_general(
@@ -1168,7 +1168,9 @@ fn attention_block_tenferro(
     let hd = hidden / num_heads;
     let qkv = linear_feature_first(session, cache, x, in_proj, 3 * hidden)?; // (3d, L, B)
     let mask = tensor_bool(session, vec![length, length, batch], keep)?;
-    let attended = if qkv.dtype() == tenferro_tensor::DType::F32 {
+    let attended = if qkv.dtype() == tenferro_tensor::DType::F32
+        && tenferro_ext::cpu_extensions_supported(session)
+    {
         // Fused split + RoPE + masked attention, all in the feature-first
         // `(d, L, B)` layout, so no transposes are materialized.
         session.laya_attention_block(&qkv, &mask, hidden, num_heads, rope_base.unwrap_or(0.0))?
@@ -1252,7 +1254,9 @@ fn encoder_tensor(
 
         let hn = layer_norm_feature_first(session, cache, &z, &layer.mlp_norm, d, eps)?;
         let u = linear_feature_first(session, cache, &hn, &layer.wi, 2 * intermediate)?;
-        let g = if u.dtype() == tenferro_tensor::DType::F32 {
+        let g = if u.dtype() == tenferro_tensor::DType::F32
+            && tenferro_ext::cpu_extensions_supported(session)
+        {
             // Fused `gelu(value) * gate` in one `cpu-kernels` pass.
             session.geglu(&u, intermediate)?
         } else {

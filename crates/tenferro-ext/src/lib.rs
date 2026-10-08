@@ -52,6 +52,15 @@ use tenferro_runtime::extension::{
 use tenferro_runtime::{ErrorPhase, ExtensionModule};
 use tenferro_tensor::{BackendSession, DType, Tensor, TensorBackend, TensorRead};
 
+/// Whether this admitted eager session can execute this crate's CPU extensions.
+///
+/// Check the backend session, rather than tensor dtype: an F32 tensor may be
+/// resident on a GPU. This only borrows the CPU execution marker and does not
+/// transfer tensors or change the backend.
+pub fn cpu_extensions_supported(session: &mut EagerSession<'_>) -> bool {
+    tenferro_cpu::with_cpu_exec_session(session.backend_session(), |_| ()).is_some()
+}
+
 /// Stable family identifier for the `erf` extension op.
 pub const ERF_FAMILY_ID: &str = "tenferro-decision.erf.v1";
 
@@ -150,8 +159,8 @@ define_extension_runtime! {
 fn erf_extension_module(
     target: EagerExtensionTarget,
 ) -> tenferro_runtime::Result<Arc<dyn ExtensionModule>> {
-    // Only the CPU backend is available at this revision, so the eager target
-    // always maps to a `CpuBackend` module.
+    // This extension has a CPU implementation only. Unsupported backends
+    // report an extension error; they never download tensors implicitly.
     extension_module::<CpuBackend>(target.engine_id).map_err(|source| {
         tenferro_runtime::Error::runtime_state_source(
             "tenferro-ext::erf",

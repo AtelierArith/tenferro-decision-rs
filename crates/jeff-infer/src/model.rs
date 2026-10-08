@@ -183,8 +183,8 @@ fn linear_host(
     cpu_kernels::matmul_row_major(weight, in_dim, out_dim, x, length)
 }
 
-/// Dense `y = x · W` on the eager session, through the `cpu-kernels`-backed
-/// `linear` extension op. Its weight tensors are cached with
+/// Dense `y = x · W` on the eager session, using the CPU `linear` extension
+/// for F32 CPU sessions and native `dot_general` otherwise. Its weight tensors are cached with
 /// [`TensorCache::col_major`] over the raw safetensors buffer, so the op reads
 /// the natural row-major `(in, out)` weight storage (the fast `matrixmultiply`
 /// orientation); see `cpu_kernels::matmul_col_major_into`.
@@ -193,7 +193,11 @@ fn linear_tenferro(
     x: &EagerTensor,
     weight: &EagerTensor,
 ) -> tenferro_ad::Result<EagerTensor> {
-    session.linear(x, weight)
+    if x.dtype() == tenferro_tensor::DType::F32 && tenferro_ext::cpu_extensions_supported(session) {
+        session.linear(x, weight)
+    } else {
+        tenferro_infer::linear::linear(session, x, weight)
+    }
 }
 
 /// Feature-last RMSNorm on the eager session: the `cpu-kernels` extension op
@@ -205,7 +209,10 @@ fn rms_norm_tenferro(
     centered: bool,
     eps: f64,
 ) -> tenferro_ad::Result<EagerTensor> {
-    if x.shape().len() == 2 && x.dtype() == tenferro_tensor::DType::F32 {
+    if x.shape().len() == 2
+        && x.dtype() == tenferro_tensor::DType::F32
+        && tenferro_ext::cpu_extensions_supported(session)
+    {
         session.rms_norm_last(x, weight, centered, eps)
     } else {
         norm::rms_norm(session, x, weight, centered, eps)
@@ -219,7 +226,9 @@ fn gated_silu_tenferro(
     gate: &EagerTensor,
     up: &EagerTensor,
 ) -> tenferro_ad::Result<EagerTensor> {
-    if gate.dtype() == tenferro_tensor::DType::F32 {
+    if gate.dtype() == tenferro_tensor::DType::F32
+        && tenferro_ext::cpu_extensions_supported(session)
+    {
         session.gated_silu(gate, up)
     } else {
         activation::gated_silu(session, gate, up)
@@ -558,7 +567,9 @@ fn full_attention_tenferro(
     let v = linear_tenferro(session, x, &v_w)?;
     let gate = linear_tenferro(session, x, &gate_w)?;
 
-    let merged = if x.dtype() == tenferro_tensor::DType::F32 {
+    let merged = if x.dtype() == tenferro_tensor::DType::F32
+        && tenferro_ext::cpu_extensions_supported(session)
+    {
         // Fused RMSNorm ×2 + partial RoPE ×2 + causal masked attention + gate.
         let active = session.constant_from_host(tenferro_ad::Tensor::from_vec_col_major(
             vec![length],
@@ -810,6 +821,31 @@ mod tests {
     use super::*;
     use tenferro_ad::EagerRuntime;
     use tenferro_cpu::CpuBackend;
+
+    #[test]
+    fn native_linear_f64_preserves_weight_layout() {
+        let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+        let output = runtime
+            .with_eager_session(|session| {
+                // Two rows, three features; columns stored contiguously.
+                let x = session.constant_from(tenferro_ad::Tensor::from_vec_col_major(
+                    vec![2, 3],
+                    vec![1.0f64, 4.0, 2.0, 5.0, 3.0, 6.0],
+                )?)?;
+                let weight = session.constant_from(tenferro_ad::Tensor::from_vec_col_major(
+                    vec![3, 2],
+                    vec![1.0f64, 2.0, 3.0, -1.0, 0.0, 1.0],
+                )?)?;
+                linear_tenferro(session, &x, &weight)
+            })
+            .unwrap()
+            .unwrap();
+        assert_eq!(output.shape(), &[2, 2]);
+        assert_eq!(
+            output.value().unwrap().as_slice::<f64>().unwrap(),
+            &[14.0, 32.0, 2.0, 2.0]
+        );
+    }
 
     struct Lcg(u64);
     impl Lcg {

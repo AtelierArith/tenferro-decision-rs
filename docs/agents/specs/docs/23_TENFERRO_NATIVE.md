@@ -38,8 +38,8 @@ every weight tensor on every call.
   in place (the column-major buffers *are* the kernel's row-major operands) and
   borrows them (`GatedDeltaWeightSlices`), so switching kernels costs no extra
   copies. This keeps the forward tenferro-first while calling the fastest CPU
-  kernel on the DeltaNet; on a non-CPU backend the op is unsupported and the
-  layer falls back to `TensorNative`.
+  kernel on the DeltaNet. On a non-CPU backend this explicit selection reports
+  an unsupported extension; callers must select `TensorNative` themselves.
 - **`(length, hidden)` end-to-end** — the Jeff tenferro forward keeps hidden
   states in `(length, hidden)` (embedding gather, rms_norm over the last axis,
   `linear` contracting the last axis), so there are no per-layer
@@ -49,6 +49,13 @@ every weight tensor on every call.
 - The engines' `decide` / `logits` / `row_logits` now take `&mut self` for the
   cache (the eager session API requires a `Send` closure, so a `RefCell` borrow
   cannot cross it).
+
+CPU fused model extensions are selected using the admitted CPU execution
+marker as well as F32 dtype. Other backends use native dense, norm, attention
+and gated-activation compositions. This routing does not yet establish full
+GPU support: Laya's exact GELU still depends on the CPU-only erf extension,
+and CUDA request integration and device parity remain pending (see
+`19_TENFERRO_FEEDBACK.md`).
 
 ### tenferro conventions pinned down
 

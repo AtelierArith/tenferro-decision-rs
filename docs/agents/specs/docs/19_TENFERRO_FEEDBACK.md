@@ -101,6 +101,25 @@ The ignored CUDA stage test explicitly synchronizes and leaks retained GPU
 resources on synchronization failure. This test is not the full inference
 execution owner.
 
+## Model extension routing (2026-10-09)
+
+F32 dtype alone does not imply CPU residency. Laya and Jeff now select the
+CPU-only linear/GEMM, normalization, attention and gated-activation extensions
+only when the admitted backend exposes the public CPU execution marker
+(`with_cpu_exec_session`). Other backends use the existing native session
+compositions. Jeff's dense linear also uses native `dot_general` for other
+dtypes, with the same `(in, out)` weight layout. No host transfer or backend
+switch is used to satisfy an unsupported op.
+
+This fixes routing, not full GPU model support. Laya's exact erf-based GELU
+still requires the CPU-only self-hosted `ErfOp`: the pinned native elementwise
+surface has no erf. The native GeGLU composition therefore still reports an
+unsupported extension on GPU; it must gain a device implementation before
+Laya can execute end to end. Do not replace exact GELU with tanh approximation
+as an implicit fallback. Jeff's default HostRecurrent DeltaKernel is also
+explicitly CPU-only; TensorNative remains the portable formulation. Raw CUDA
+request integration and hardware parity remain separate outstanding work.
+
 ## Positive findings (not filed)
 
 - `triangular_solve(..., unit_diagonal = true)` fits the chunked Gated DeltaNet

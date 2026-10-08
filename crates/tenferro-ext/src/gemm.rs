@@ -156,8 +156,8 @@ define_extension_runtime! {
 fn gemm_extension_module(
     target: EagerExtensionTarget,
 ) -> tenferro_runtime::Result<Arc<dyn ExtensionModule>> {
-    // Only the CPU backend is available at this revision, so the eager target
-    // always maps to a `CpuBackend` module.
+    // This extension is CPU-only; model callers select native dot_general
+    // on other backends.
     extension_module::<CpuBackend>(target.engine_id).map_err(|source| {
         tenferro_runtime::Error::runtime_state_source(
             "tenferro-ext::gemm",
