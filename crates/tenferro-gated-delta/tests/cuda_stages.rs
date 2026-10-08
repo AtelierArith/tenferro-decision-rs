@@ -168,3 +168,50 @@ fn recurrent_stages_match_cpu_at_boundaries_and_grouped_heads() {
         }
     }
 }
+
+#[test]
+#[ignore = "requires CUDA hardware and cuBLAS; run explicitly with --ignored"]
+fn native_unit_lower_triangular_solve_supports_large_key_rhs() {
+    use tenferro_linalg::TensorLinalgExt;
+    let mut backend =
+        CudaBackend::new(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
+    // Chunk width is the triangular-system dimension; key width is the RHS
+    // column count and may exceed the recurrent kernel's register-state limit.
+    let key_dim = 257;
+    for n in [1, 63, 64, 65] {
+        let expected = values(n * key_dim, 11);
+        let mut matrix = vec![999.0; n * n];
+        let mut rhs = expected.clone();
+        for row in 0..n {
+            for column in 0..row {
+                let coefficient = ((row + column) % 7) as f32 / (n as f32 * 20.0);
+                matrix[row + column * n] = coefficient;
+                for key in 0..key_dim {
+                    rhs[row + key * n] += coefficient * expected[column + key * n];
+                }
+            }
+        }
+        // Deliberately non-unit diagonal and large upper-triangular entries:
+        // the lower/unit flags must ignore both rather than solve a dense matrix.
+        let matrix = Tensor::from_vec_col_major(vec![n, n], matrix).unwrap();
+        let rhs = Tensor::from_vec_col_major(vec![n, key_dim], rhs).unwrap();
+        let matrix = upload_tensor(backend.runtime(), &matrix).unwrap();
+        let rhs = upload_tensor(backend.runtime(), &rhs).unwrap();
+        let solution = backend
+            .with_backend_session(|session| {
+                matrix.triangular_solve(&rhs, true, true, false, true, session)
+            })
+            .unwrap()
+            .expect("CUDA unit triangular solve must be supported");
+        assert!(
+            solution.as_typed::<f32>().unwrap().host_data().is_err(),
+            "native CUDA solve must return device storage"
+        );
+        let solution = download_tensor(backend.runtime(), &solution).unwrap();
+        let actual = solution.as_slice::<f32>().unwrap();
+        assert_eq!(actual.len(), expected.len());
+        for (&actual, &expected) in actual.iter().zip(&expected) {
+            assert!(actual.is_finite() && (actual - expected).abs() <= 1e-4);
+        }
+    }
+}

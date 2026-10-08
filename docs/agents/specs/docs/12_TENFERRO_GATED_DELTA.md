@@ -332,7 +332,9 @@ Constraints:
   documented in `11_TENFERRO_API_SURVEY.md` §9.
 
 CUDA support is behind a `cuda` feature; the crate compiles and its CPU paths
-remain testable without a GPU.
+remain testable without a GPU. The feature also enables the CUDA dispatch
+in `tenferro-ad` and `tenferro-linalg`, required for a native triangular-solve
+fallback; enabling only `tenferro-gpu/cuda` does not enable that linalg route.
 
 The current optional component is `cuda::CudaKernels`, which compiles and holds
 raw handles for convolution/SiLU, the register-state scan (`key_dim <= 256`)
@@ -366,6 +368,13 @@ Run it explicitly on a CUDA runner with NVRTC available:
 ```sh
 TENFERRO_CUDA_ARCH=compute_80 cargo test -p tenferro-gated-delta --features cuda --test cuda_stages -- --ignored
 ```
+
+A second ignored gate, `native_unit_lower_triangular_solve_supports_large_key_rhs`,
+checks native CUDA linalg with triangular widths 1/63/64/65 and 257 RHS
+columns. Non-unit diagonal and large upper entries verify that the lower/unit
+flags are respected; the result must stay device-backed before download.
+This checks the library building block only. The device-side cumulative decay,
+contractions, chunk loop, and full large-key DeltaNet parity remain pending.
 
 Select an architecture supported by the device. On 2026-10-08 this explicit
 run failed before launch because the environment lacks `libcuda`; the test

@@ -10,7 +10,7 @@ authors.workspace = true
 
 [features]
 default = []
-cuda = ["dep:tenferro-gpu"]
+cuda = ["dep:tenferro-gpu", "tenferro-ad/cuda", "tenferro-linalg/cuda"]
 
 [dependencies]
 decision-core.workspace = true
