@@ -540,13 +540,9 @@ pub fn delta_layer_tenferro_prepared_mask(
         ));
     }
     let length = mask_dims[0];
-    let key_dim = cfg.key_dim;
-    let value_dim = cfg.value_dim;
-    let heads = cfg.value_heads;
-    let key_width = key_dim * cfg.key_heads;
-    let value_width = value_dim * cfg.value_heads;
+    let key_width = cfg.key_dim * cfg.key_heads;
+    let value_width = cfg.value_dim * cfg.value_heads;
     let conv_channels = 2 * key_width + value_width;
-    let groups = cfg.value_heads / cfg.key_heads;
 
     let x_masked = session.mul(x, mask)?;
 
@@ -563,13 +559,81 @@ pub fn delta_layer_tenferro_prepared_mask(
     let a = linear_col(session, &x_masked, &weights.a)?; // (value_heads, L)
     let b = linear_col(session, &x_masked, &weights.b)?; // (value_heads, L)
 
+    delta_layer_from_projected(
+        session,
+        cfg,
+        weights,
+        ProjectedDeltaTensors {
+            mixed: &mixed,
+            z: &z,
+            a: &a,
+            b: &b,
+        },
+    )
+}
+
+/// Device-resident layer intermediates after projection and convolution/SiLU.
+pub struct ProjectedDeltaTensors<'a> {
+    /// Convolved Q/K/V, `[2 * key_width + value_width, length]`.
+    pub mixed: &'a EagerTensor,
+    /// Output gate projection, `[value_width, length]`.
+    pub z: &'a EagerTensor,
+    /// Decay projection, `[value_heads, length]`.
+    pub a: &'a EagerTensor,
+    /// Write gate projection, `[value_heads, length]`.
+    pub b: &'a EagerTensor,
+}
+
+/// Complete a prepared layer using native normalization, chunked scan/readout.
+///
+/// The head-batched scan uses native triangular solves, including key widths
+/// above the recurrent kernel limit. No intermediate tensor is read on host.
+/// This also lets a CUDA adapter substitute raw convolution without duplicating
+/// the backend-agnostic scan and head-grouping logic.
+pub fn delta_layer_from_projected(
+    session: &mut EagerSession<'_>,
+    cfg: &GatedDeltaConfig,
+    weights: &GatedDeltaTensorWeights,
+    inputs: ProjectedDeltaTensors<'_>,
+) -> AdResult<EagerTensor> {
+    cfg.validate().map_err(invalid_weights)?;
+    let invalid = || {
+        tenferro_ad::Error::TensorRuntime(tenferro_tensor::Error::invalid_argument(
+            "delta_layer_from_projected",
+            "shape",
+            "prepared projections must have matching nonempty length and configured widths",
+        ))
+    };
+    let key_dim = cfg.key_dim;
+    let value_dim = cfg.value_dim;
+    let heads = cfg.value_heads;
+    let key_width = key_dim.checked_mul(cfg.key_heads).ok_or_else(invalid)?;
+    let value_width = value_dim.checked_mul(cfg.value_heads).ok_or_else(invalid)?;
+    let expected_channels = key_width
+        .checked_mul(2)
+        .and_then(|n| n.checked_add(value_width))
+        .ok_or_else(invalid)?;
+    let groups = cfg.value_heads / cfg.key_heads;
+    let ProjectedDeltaTensors { mixed, z, a, b } = inputs;
+    let [channels, length] = mixed.shape() else {
+        return Err(invalid());
+    };
+    let length = *length;
+    if length == 0
+        || *channels != expected_channels
+        || z.shape() != [value_width, length]
+        || a.shape() != [heads, length]
+        || b.shape() != [heads, length]
+    {
+        return Err(invalid());
+    }
     // Split Q/K/V/Z into heads. tenferro's `reshape` preserves column-major
     // order, so `[width, L]` splits to `(dim, heads, L)` and then transposes to
     // heads-leading (matching the attention code's `project_heads`).
-    let q_block = slice_rows(session, &mixed, 0, key_width, length)?;
+    let q_block = slice_rows(session, mixed, 0, key_width, length)?;
     let q = session.reshape(&q_block, vec![key_dim, cfg.key_heads, length])?;
     let q = session.transpose(&q, &[1, 0, 2])?; // (key_heads, key_dim, L)
-    let k_block = slice_rows(session, &mixed, key_width, key_width, length)?;
+    let k_block = slice_rows(session, mixed, key_width, key_width, length)?;
     let k = session.reshape(&k_block, vec![key_dim, cfg.key_heads, length])?;
     let k = session.transpose(&k, &[1, 0, 2])?;
     // Expand the key heads to value heads (consecutive grouping: head `h`
@@ -589,10 +653,10 @@ pub fn delta_layer_tenferro_prepared_mask(
     let q = expand(session, q)?;
     let k = expand(session, k)?;
 
-    let v_block = slice_rows(session, &mixed, 2 * key_width, value_width, length)?;
+    let v_block = slice_rows(session, mixed, 2 * key_width, value_width, length)?;
     let v = session.reshape(&v_block, vec![value_dim, heads, length])?;
     let v = session.transpose(&v, &[1, 0, 2])?;
-    let z = session.reshape(&z, vec![value_dim, heads, length])?;
+    let z = session.reshape(z, vec![value_dim, heads, length])?;
     let z = session.transpose(&z, &[1, 0, 2])?;
 
     // L2-normalize Q/K over the head width (eps fixed at 1e-6, as in the host
@@ -603,9 +667,9 @@ pub fn delta_layer_tenferro_prepared_mask(
     let k = l2_normalize_heads(session, &k, heads, length, 1e-6)?;
 
     // Gates: beta = sigmoid(b); decay = a_decay * softplus(a + dt_bias).
-    let beta = activation::sigmoid(session, &b)?; // (heads, L)
+    let beta = activation::sigmoid(session, b)?; // (heads, L)
     let dt_bias = session.reshape(&weights.dt_bias, vec![heads, 1])?;
-    let a_shifted = session.add(&a, &dt_bias)?;
+    let a_shifted = session.add(a, &dt_bias)?;
     let softplus = softplus(session, &a_shifted)?;
     let a_decay = session.reshape(&weights.a_decay, vec![heads, 1])?;
     let decay = session.mul(&a_decay, &softplus)?;

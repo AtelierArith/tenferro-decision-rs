@@ -47,8 +47,9 @@ pub use plan::{AlgorithmChoice, BackendCaps, GatedDeltaPlan, resolve_algorithm};
 pub use recurrent::{delta_layer_recurrent, delta_layer_recurrent_slices};
 pub use reference::{DeltaScanInputs, delta_scan_reference};
 pub use tensor_layer::{
-    GatedDeltaKernelWeights, GatedDeltaTensorWeights, delta_layer_tenferro_native,
-    delta_layer_tenferro_prepared_mask, prepare_kernel_weights, prepare_tensor_weights,
+    GatedDeltaKernelWeights, GatedDeltaTensorWeights, ProjectedDeltaTensors,
+    delta_layer_from_projected, delta_layer_tenferro_native, delta_layer_tenferro_prepared_mask,
+    prepare_kernel_weights, prepare_tensor_weights,
 };
 pub use workspace::GatedDeltaWorkspace;
 
