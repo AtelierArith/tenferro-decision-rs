@@ -355,7 +355,7 @@ pub(crate) fn constant(
     shape: &[usize],
     data: &[f32],
 ) -> Result<EagerTensor> {
-    session.constant_from(Tensor::from_vec_col_major(shape.to_vec(), data.to_vec())?)
+    session.constant_from_host(Tensor::from_vec_col_major(shape.to_vec(), data.to_vec())?)
 }
 
 pub(crate) fn col_major(rows: usize, cols: usize, row_major: &[f32]) -> Result<Vec<f32>> {

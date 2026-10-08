@@ -297,7 +297,7 @@ fn l2_normalize_heads(
     eps: f64,
 ) -> AdResult<EagerTensor> {
     let sum_sq = session.reduce_sum_squares(x, &[1])?; // (heads, length)
-    let eps = session.constant_from(tenferro_ad::Tensor::from_vec_col_major(
+    let eps = session.constant_from_host(tenferro_ad::Tensor::from_vec_col_major(
         vec![length],
         vec![eps as f32; length],
     )?)?;
