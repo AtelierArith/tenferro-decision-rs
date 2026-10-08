@@ -598,6 +598,155 @@ enum FullLayerPath {
     RawChunked,
 }
 
+#[test]
+#[ignore = "requires CUDA hardware, NVRTC, cuBLAS and cuTENSOR; run explicitly with --ignored"]
+fn chunked_request_composes_layers_and_reuses_completed_resources() {
+    use tenferro_gated_delta::cuda_request::with_cuda_chunked_request;
+    use tenferro_gated_delta::{
+        Algorithm, GatedDeltaConfig, GatedDeltaWeights, delta_layer_reference,
+        prepare_tensor_weights,
+    };
+    use tenferro_infer::TensorCache;
+
+    fn weights(cfg: &GatedDeltaConfig, seed: usize) -> GatedDeltaWeights {
+        let keys = cfg.key_heads * cfg.key_dim;
+        let width = cfg.value_heads * cfg.value_dim;
+        let channels = 2 * keys + width;
+        GatedDeltaWeights {
+            qkv: values(cfg.hidden * channels, seed),
+            z: values(cfg.hidden * width, seed + 1),
+            a: values(cfg.hidden * cfg.value_heads, seed + 2),
+            b: values(cfg.hidden * cfg.value_heads, seed + 3),
+            conv: values(channels * cfg.conv_taps, seed + 4),
+            a_decay: vec![-0.4; cfg.value_heads],
+            dt_bias: values(cfg.value_heads, seed + 5),
+            norm: vec![1.0; cfg.value_dim],
+            out_proj: values(width * cfg.hidden, seed + 6),
+        }
+    }
+    let backend = CudaBackend::new(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
+    let runtime = tenferro_ad::EagerRuntime::with_cuda_backend(backend.clone()).unwrap();
+    let arch = std::env::var("TENFERRO_CUDA_ARCH").unwrap_or_else(|_| "compute_70".into());
+    let cfg = GatedDeltaConfig {
+        hidden: 8,
+        key_dim: 7,
+        value_dim: 3,
+        key_heads: 2,
+        value_heads: 4,
+        conv_taps: 4,
+        chunk_size: 64,
+        eps: 1e-5,
+        algorithm: Algorithm::Chunked,
+    };
+    let large = GatedDeltaConfig {
+        key_dim: 257,
+        ..cfg
+    };
+    let first_weights = weights(&cfg, 61);
+    let second_weights = weights(&large, 71);
+    for length in [1usize, 63, 64, 65] {
+        for holes in [false, true] {
+            let mask: Vec<f32> = (0..length)
+                .map(|t| {
+                    if holes && (t < 2 || t % 11 == 5) {
+                        0.0
+                    } else {
+                        1.0
+                    }
+                })
+                .collect();
+            let input = values(cfg.hidden * length, 81);
+            let mut expected = Vec::new();
+            for scale in [1.0, 0.5] {
+                let input: Vec<_> = input.iter().map(|&x| x * scale).collect();
+                let first = delta_layer_reference(&cfg, &first_weights, &input, &mask).unwrap();
+                let second = delta_layer_reference(&large, &second_weights, &first, &mask).unwrap();
+                expected.extend([first, second]);
+            }
+            let outputs = runtime
+                .with_eager_session(|session| {
+                    let mut cache = TensorCache::new();
+                    let first_weights =
+                        prepare_tensor_weights(session, &cfg, &first_weights, &mut cache)?;
+                    let second_weights =
+                        prepare_tensor_weights(session, &large, &second_weights, &mut cache)?;
+                    let mask = session.constant_from_host(Tensor::from_vec_col_major(
+                        vec![length],
+                        mask.clone(),
+                    )?)?;
+                    let mut kernels = with_cuda_exec_session(session.backend_session(), |cuda| {
+                        cuda.with_raw("request_compile", |raw| CudaKernels::compile(raw, &arch))
+                    })
+                    .expect("CUDA execution session")?;
+                    let mut workspaces = Vec::new();
+                    let mut retained = Vec::new();
+                    for scale in [1.0, 0.5] {
+                        let column_major: Vec<_> = (0..length)
+                            .flat_map(|t| {
+                                let input = &input;
+                                (0..cfg.hidden).map(move |r| input[r * length + t] * scale)
+                            })
+                            .collect();
+                        let input = session.constant_from_host(Tensor::from_vec_col_major(
+                            vec![cfg.hidden, length],
+                            column_major,
+                        )?)?;
+                        let (module, buffers, results) = with_cuda_chunked_request(
+                            session,
+                            kernels,
+                            workspaces,
+                            |request, session| {
+                                let first =
+                                    request.layer(session, &cfg, &first_weights, &input, &mask)?;
+                                let second = request.layer(
+                                    session,
+                                    &large,
+                                    &second_weights,
+                                    &first,
+                                    &mask,
+                                )?;
+                                Ok([first, second])
+                            },
+                        )?;
+                        assert_eq!(buffers.len(), 2);
+                        kernels = module;
+                        workspaces = buffers;
+                        retained.extend(results);
+                    }
+                    // Inspect all results only after both requests, so earlier
+                    // results must survive workspace reuse. No layer downloads.
+                    let mut copies = Vec::new();
+                    for output in retained {
+                        let copy = session.duplicate_value(&output)?;
+                        assert!(copy.is_backend_buffer(), "request result must stay on CUDA");
+                        copies.push(copy);
+                    }
+                    with_cuda_exec_session(session.backend_session(), |cuda| {
+                        cuda.with_raw("request_test_download_finish", |raw| raw.synchronize())
+                    })
+                    .expect("CUDA execution session")?;
+                    Ok::<_, tenferro_ad::Error>(copies)
+                })
+                .unwrap()
+                .unwrap();
+            for (output, expected) in outputs.iter().zip(&expected) {
+                let output = download_tensor(backend.runtime(), output).unwrap();
+                let actual = output.as_slice::<f32>().unwrap();
+                for row in 0..cfg.hidden {
+                    for token in 0..length {
+                        let actual = actual[row + token * cfg.hidden];
+                        let expected = expected[row * length + token];
+                        assert!(
+                            actual.is_finite() && (actual - expected).abs() <= 5e-3,
+                            "L={length} holes={holes} row={row} token={token}: {actual} vs {expected}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 fn full_layer_gpu_parity(path: FullLayerPath) {
     let raw_recurrent = path != FullLayerPath::Native;
     use tenferro_gated_delta::{

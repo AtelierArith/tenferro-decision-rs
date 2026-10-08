@@ -1,6 +1,8 @@
 //! Raw CUDA convolution with native head-batched chunked scan and readout.
 //! Normal production CUDA plan dispatch remains gated on hardware parity.
 
+use std::rc::Rc;
+
 use tenferro_ad::{DType, EagerSession, EagerTensor, Result};
 use tenferro_gpu::cuda::with_cuda_exec_session;
 use tenferro_tensor::{Tensor, TensorRead, TypedTensor};
@@ -24,9 +26,9 @@ pub struct CudaChunkedWorkspace {
 }
 
 // Never escapes this function's admitted eager scope while work is pending.
-struct PendingChunkedLayer {
+pub(crate) struct PendingChunkedLayer {
     runtime: tenferro_gpu::cuda::CudaRuntime,
-    kernels: Option<CudaKernels>,
+    kernels: Option<Rc<CudaKernels>>,
     input: Option<TypedTensor<f32>>,
     workspace: Option<CudaChunkedWorkspace>,
     completed: bool,
@@ -49,7 +51,8 @@ impl Drop for PendingChunkedLayer {
 /// reuse the returned module and workspace within the admitted eager callback.
 /// All intermediates remain on device; success synchronizes once after readout.
 /// A device copy separates returned results from reusable convolution storage.
-/// Request-wide scheduling and actual hardware parity are still pending.
+/// The scoped request API can defer chunked-layer fences; production integration
+/// and actual hardware parity are still pending.
 pub fn delta_layer_cuda_chunked_cached(
     session: &mut EagerSession<'_>,
     cfg: &GatedDeltaConfig,
@@ -59,6 +62,52 @@ pub fn delta_layer_cuda_chunked_cached(
     kernels: CudaKernels,
     workspace: Option<CudaChunkedWorkspace>,
 ) -> Result<(CudaKernels, CudaChunkedWorkspace, EagerTensor)> {
+    let kernels = Rc::new(kernels);
+    let (mut pending, output) =
+        enqueue_chunked_layer(session, cfg, weights, x, mask, kernels.clone(), workspace)?;
+    let synchronized = with_cuda_exec_session(session.backend_session(), |cuda| {
+        cuda.with_raw("cuda_chunked_layer_finish", |raw| raw.synchronize())
+    })
+    .expect("CUDA session checked by enqueue");
+    if let Err(error) = synchronized {
+        std::mem::forget(output);
+        return Err(error.into());
+    }
+    let workspace = pending.complete_workspace();
+    Ok((
+        Rc::try_unwrap(kernels)
+            .ok()
+            .expect("private module ownership"),
+        workspace,
+        output,
+    ))
+}
+
+impl PendingChunkedLayer {
+    /// Caller establishes stream completion before recovering resources.
+    pub(crate) fn complete_workspace(&mut self) -> CudaChunkedWorkspace {
+        self.completed = true;
+        self.kernels.take();
+        self.input.take();
+        self.workspace.take().expect("owned workspace")
+    }
+
+    pub(crate) fn mark_completed(&mut self) {
+        self.completed = true;
+    }
+}
+
+// Only scoped owners call this: success leaves raw work pending and returns
+// its owner; any error/unwind fences via PendingChunkedLayer::drop.
+pub(crate) fn enqueue_chunked_layer(
+    session: &mut EagerSession<'_>,
+    cfg: &GatedDeltaConfig,
+    weights: &GatedDeltaTensorWeights,
+    x: &EagerTensor,
+    mask: &EagerTensor,
+    kernels: Rc<CudaKernels>,
+    workspace: Option<CudaChunkedWorkspace>,
+) -> Result<(PendingChunkedLayer, EagerTensor)> {
     let invalid = |message| {
         tenferro_ad::Error::TensorRuntime(tenferro_tensor::Error::invalid_argument(
             "delta_layer_cuda_chunked",
@@ -219,19 +268,6 @@ pub fn delta_layer_cuda_chunked_cached(
                 .constants,
         )
     })();
-    let synchronized = with_cuda_exec_session(session.backend_session(), |cuda| {
-        cuda.with_raw("cuda_chunked_layer_finish", |raw| raw.synchronize())
-    })
-    .expect("CUDA session checked above");
-    if let Err(error) = synchronized {
-        std::mem::forget(computed);
-        return Err(error.into());
-    }
-    pending.completed = true;
     let output = computed?;
-    Ok((
-        pending.kernels.take().expect("owned module"),
-        pending.workspace.take().expect("owned workspace"),
-        output,
-    ))
+    Ok((pending, output))
 }

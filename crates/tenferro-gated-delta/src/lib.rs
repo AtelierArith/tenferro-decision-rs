@@ -29,6 +29,8 @@ pub mod cuda;
 pub mod cuda_chunked_layer;
 #[cfg(feature = "cuda")]
 pub mod cuda_layer;
+#[cfg(feature = "cuda")]
+pub mod cuda_request;
 pub mod extension;
 pub mod layer;
 pub mod ops;
