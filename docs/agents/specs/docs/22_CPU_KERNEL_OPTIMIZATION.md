@@ -404,3 +404,34 @@ Two GEMM alternatives were also measured and rejected: fewer output-column
 tasks improved isolated contractions but had no consistent model-level gain;
 faer was faster on some square projections and slower on the wide MLP
 projection. Neither experimental change is included.
+
+## Remaining Laya CPU cost (2026-10-08)
+
+Temporary `Instant` timers on the cached tenferro encoder and its GEMM
+extension measured the remaining cost after parallel GeGLU. Each encoder
+stage below is the median of five per-forward sums across all 28 layers,
+excluding two warmup forwards. Ryzen CPU, float32, eight Rayon threads.
+
+| shape | attention + projections + residual | MLP norm | MLP up projection | GeGLU | MLP down + residual |
+|---|---:|---:|---:|---:|---:|
+| L8 B1 | 26.3 ms | 0.7 ms | 30.5 ms | 1.8 ms | 13.0 ms |
+| L64 B1 | 67.0 ms | 4.1 ms | 67.0 ms | 9.7 ms | 29.6 ms |
+| L8 B8 | 56.3 ms | 4.0 ms | 66.6 ms | 9.4 ms | 29.2 ms |
+
+These are diagnostic timings, not a replacement for uninstrumented latency.
+Embedding, pre-attention norm, mask construction, final norm, and decision/action
+heads are outside these windows. Reports and timer definitions are recorded in
+`fixtures/bench-geglu-cpu-2026-10-08/laya_stage_profile.json`; the instrumentation
+was removed afterwards.
+
+No GEMM call took the `to_contiguous_read` fallback. The large MLP projection's
+kernel median was about 1.9 ms versus about 2.4 ms for the eager projection
+call. Removing fallback materialization therefore cannot explain the remaining
+gap. Both kernel execution and eager-call overhead matter.
+
+An explicit runtime-selected x86 FMA version preserved scalar GeGLU bits but
+changed full-model L64 B1 only from 220.2 to 215.9 ms, within the observed
+variation. A full-model faer experiment at 32 or more rows measured L64 B1
+231.9 ms and L8 B8 210.4 ms versus 220.2/211.3 ms with the existing kernel;
+its improvements to the host oracle did not carry over to the production
+tenferro path. Both changes were rejected and reverted.

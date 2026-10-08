@@ -1,0 +1,45 @@
+{
+  "iters": 5,
+  "metadata": {
+    "arch": "x86_64",
+    "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+    "cpu_count": 16,
+    "git_rev": "7edf74e1327b0487094bb9f75ee5c3c7a4cb007a",
+    "os": "linux",
+    "profile": "release",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+    "target": "x86_64-unknown-linux-gnu",
+    "timestamp_unix": 1791465303
+  },
+  "rayon_threads": 8,
+  "rows": [
+    {
+      "batch": 1,
+      "host_ms": 85.74156300000001,
+      "length": 8,
+      "tenferro_ms": 105.256754
+    },
+    {
+      "batch": 1,
+      "host_ms": 108.791674,
+      "length": 16,
+      "tenferro_ms": 119.316755
+    },
+    {
+      "batch": 1,
+      "host_ms": 379.45882600000004,
+      "length": 64,
+      "tenferro_ms": 215.913525
+    },
+    {
+      "batch": 8,
+      "host_ms": 274.724982,
+      "length": 8,
+      "tenferro_ms": 206.43256300000002
+    }
+  ],
+  "warmup": 2,
+  "source_dirty": true,
+  "source_patch": "rejected runtime-selected x86 FMA GeGLU with inlined erf/expm1 polynomials on 7edf74e",
+  "checkpoint_revision": "7b928d828b7b0e022f929d9bd2e44165aa270148"
+}
