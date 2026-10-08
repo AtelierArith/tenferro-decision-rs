@@ -110,3 +110,46 @@ extern "C" __global__ void gated_delta_norm_gate(
         output[index] = (input[index] * inv * norm[row]) * (gate / (1.0f + expf(-gate)));
     }
 }
+
+// One block per (value head, chunk), block=(128,1,1), grid=(heads*chunks,1,1).
+// chunk_size is in 1..=256. Prefix/beta/tail use (length,heads) column-major;
+// pair uses (chunk_size,chunk_size,chunks,heads) column-major, including zeros
+// for upper triangle and padded rows/columns. final uses (chunks,heads).
+// Store cumulative LOG decay so a final factor that underflows to zero does
+// not destroy the finite differences used by pair/tail weights.
+extern "C" __global__ void gated_delta_chunk_decay(
+    float* cumulative, float* beta, float* pair, float* tail, float* final_factor,
+    const float* a, const float* b, const float* a_decay, const float* dt_bias,
+    int length, int heads, int chunk_size) {
+    int chunks = (length - 1) / chunk_size + 1;
+    int task = blockIdx.x;
+    if (task >= heads * chunks) return;
+    int head = task / chunks;
+    int chunk = task % chunks;
+    int start = chunk * chunk_size;
+    int count = min(chunk_size, length - start);
+    int base = head * length + start;
+    for (int row = threadIdx.x; row < count; row += blockDim.x) {
+        float sum = 0.0f;
+        for (int t = 0; t <= row; ++t) {
+            float raw_a = a[base + t] + dt_bias[head];
+            float softplus = fmaxf(raw_a, 0.0f) + log1pf(expf(-fabsf(raw_a)));
+            sum += a_decay[head] * softplus;
+        }
+        cumulative[base + row] = sum;
+        beta[base + row] = 1.0f / (1.0f + expf(-b[base + row]));
+    }
+    __syncthreads();
+    float last = cumulative[base + count - 1];
+    if (threadIdx.x == 0) final_factor[task] = expf(last);
+    for (int row = threadIdx.x; row < count; row += blockDim.x) {
+        tail[base + row] = expf(last - cumulative[base + row]);
+    }
+    int cells = chunk_size * chunk_size;
+    for (int cell = threadIdx.x; cell < cells; cell += blockDim.x) {
+        int row = cell % chunk_size;
+        int column = cell / chunk_size;
+        pair[task * cells + cell] = row < count && column < count && row >= column
+            ? expf(cumulative[base + row] - cumulative[base + column]) : 0.0f;
+    }
+}

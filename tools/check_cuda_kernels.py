@@ -50,6 +50,7 @@ def main():
     signatures = {
         "gated_delta_conv_silu": ["u64"] * 3 + ["u32"] * 3,
         "gated_delta_recurrent": ["u64"] * 6 + ["u32"] * 5,
+        "gated_delta_chunk_decay": ["u64"] * 9 + ["u32"] * 3,
         "gated_delta_norm_gate": ["u64"] * 4 + ["u32"] * 2 + ["f32"],
     }
     results = []

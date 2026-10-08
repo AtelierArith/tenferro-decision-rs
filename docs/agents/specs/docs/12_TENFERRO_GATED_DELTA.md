@@ -373,12 +373,33 @@ A second ignored gate, `native_unit_lower_triangular_solve_supports_large_key_rh
 checks native CUDA linalg with triangular widths 1/63/64/65 and 257 RHS
 columns. Non-unit diagonal and large upper entries verify that the lower/unit
 flags are respected; the result must stay device-backed before download.
-This checks the library building block only. The device-side cumulative decay,
-contractions, chunk loop, and full large-key DeltaNet parity remain pending.
+This checks the library building block only. Device-side cumulative decay
+preparation is implemented below;
+contractions, solve integration, the chunk loop, and full large-key DeltaNet
+parity remain pending.
 
 Select an architecture supported by the device. On 2026-10-08 this explicit
 run failed before launch because the environment lacks `libcuda`; the test
 compiled, but hardware numerical parity is still unproven.
+
+`CudaKernels::enqueue_chunk_decay` now prepares chunk gates and decay factors
+on device: cumulative **log** decay, beta, lower-triangular pair weights,
+ending-key tail weights and the final chunk decay. One block owns a value-head
+chunk; upper-triangular and padded pair entries are explicitly zeroed. The
+log-prefix storage preserves finite pair/tail differences when the final
+factor underflows. `ChunkDecayGeometry` bounds chunk width to 1..=256 and
+checks signed 32-bit indexing products. The unsafe enqueue adapter validates
+all f32 shapes/layouts, runtime/device residency and allocation spans; buffer
+aliasing and lifetime management remain the caller's obligations.
+
+The ignored `chunk_decay_matches_cpu_with_padding_and_underflow` hardware gate
+covers lengths 1/63/64/65/127/128/129 and strongly negative decay. It compares
+all five outputs, including pair padding and tail weights with a zero final
+factor. This gate compiles but has not run on a CUDA device. The compiler
+report for all four exported kernels is
+`fixtures/cuda-compile-2026-10-08/nvrtc-chunk-decay.json`; the earlier report
+records the original three-stage source hash. Device contractions, solve
+integration and full-layer dispatch remain pending.
 
 For compiler validation without a GPU, run:
 

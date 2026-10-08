@@ -27,7 +27,7 @@ fn recurrent_stages_match_cpu_at_boundaries_and_grouped_heads() {
         CudaBackend::new(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
     let arch = std::env::var("TENFERRO_CUDA_ARCH").unwrap_or_else(|_| "compute_70".into());
     for (kd, vd, kh, vh) in [(1, 1, 1, 1), (33, 37, 2, 4), (256, 128, 1, 2)] {
-        for length in [1, 63, 64, 65, 127, 128, 129] {
+        for length in [1usize, 63, 64, 65, 127, 128, 129] {
             let channels = 2 * kh * kd + vh * vd;
             let taps = 4;
             let x = values(length * channels, 1);
@@ -212,6 +212,130 @@ fn native_unit_lower_triangular_solve_supports_large_key_rhs() {
         assert_eq!(actual.len(), expected.len());
         for (&actual, &expected) in actual.iter().zip(&expected) {
             assert!(actual.is_finite() && (actual - expected).abs() <= 1e-4);
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires CUDA hardware and NVRTC; run explicitly with --ignored"]
+fn chunk_decay_matches_cpu_with_padding_and_underflow() {
+    use tenferro_gated_delta::cuda::{ChunkDecayBuffers, ChunkDecayGeometry};
+    let mut backend =
+        CudaBackend::new(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
+    let arch = std::env::var("TENFERRO_CUDA_ARCH").unwrap_or_else(|_| "compute_70".into());
+    let heads = 2;
+    let chunk_size = 64usize;
+    for length in [1usize, 63, 64, 65, 127, 128, 129] {
+        let chunks = length.div_ceil(chunk_size);
+        let a = vec![0.75; length * heads];
+        let b = values(length * heads, 13);
+        let decay = vec![-0.4, -30.0];
+        let bias = vec![0.1, -0.2];
+        let mut cumulative = vec![0.0; length * heads];
+        let beta: Vec<_> = b.iter().copied().map(sigmoid).collect();
+        let mut pair = vec![0.0; chunk_size * chunk_size * chunks * heads];
+        let mut tail = vec![0.0; length * heads];
+        let mut final_factor = vec![0.0; chunks * heads];
+        for head in 0..heads {
+            for chunk in 0..chunks {
+                let start = chunk * chunk_size;
+                let n = chunk_size.min(length - start);
+                let base = head * length + start;
+                let mut sum = 0.0;
+                for token in 0..n {
+                    sum += decay[head] * softplus(a[base + token] + bias[head]);
+                    cumulative[base + token] = sum;
+                }
+                let task = head * chunks + chunk;
+                final_factor[task] = sum.exp();
+                for row in 0..n {
+                    tail[base + row] = (sum - cumulative[base + row]).exp();
+                    for column in 0..=row {
+                        pair[task * chunk_size * chunk_size + row + column * chunk_size] =
+                            (cumulative[base + row] - cumulative[base + column]).exp();
+                    }
+                }
+                assert_eq!(tail[base + n - 1], 1.0);
+                if head == 1 && n >= 63 {
+                    assert_eq!(final_factor[task], 0.0);
+                }
+            }
+        }
+        let expected = [cumulative, beta, pair, tail, final_factor];
+        let upload = |shape: Vec<usize>, data: Vec<f32>| {
+            let host = Tensor::from_vec_col_major(shape, data).unwrap();
+            upload_tensor(backend.runtime(), &host)
+                .unwrap()
+                .into_typed::<f32>()
+                .unwrap()
+        };
+        let inputs = [
+            upload(vec![length, heads], a),
+            upload(vec![length, heads], b),
+            upload(vec![heads], decay),
+            upload(vec![heads], bias),
+        ];
+        let geometry = ChunkDecayGeometry::new(length, heads, chunk_size).unwrap();
+        let outputs = backend
+            .with_backend_session(|session| {
+                with_cuda_exec_session(session, |cuda| {
+                    cuda.with_raw("cuda_chunk_decay", |raw| {
+                        let kernels = CudaKernels::compile(raw, &arch)?;
+                        let mut outputs = [
+                            raw.alloc_output::<f32>(&[length, heads])?,
+                            raw.alloc_output::<f32>(&[length, heads])?,
+                            raw.alloc_output::<f32>(&[chunk_size, chunk_size, chunks, heads])?,
+                            raw.alloc_output::<f32>(&[length, heads])?,
+                            raw.alloc_output::<f32>(&[chunks, heads])?,
+                        ];
+                        let mut retained = Vec::new();
+                        for tensor in inputs.iter().chain(outputs.iter()) {
+                            retained.push(raw.retain_tensor(tensor, "cuda_chunk_decay")?);
+                        }
+                        let [cumulative, beta, pair, tail, final_factor] = &mut outputs;
+                        // SAFETY: distinct owned uploads/outputs stay retained through
+                        // synchronization, including when enqueueing returns an error.
+                        let launched = unsafe {
+                            kernels.enqueue_chunk_decay(
+                                raw,
+                                &geometry,
+                                ChunkDecayBuffers {
+                                    a: &inputs[0],
+                                    b: &inputs[1],
+                                    a_decay: &inputs[2],
+                                    dt_bias: &inputs[3],
+                                    cumulative,
+                                    beta,
+                                    pair,
+                                    tail,
+                                    final_factor,
+                                },
+                            )
+                        };
+                        if let Err(error) = raw.synchronize() {
+                            std::mem::forget(retained);
+                            std::mem::forget(kernels);
+                            return Err(error);
+                        }
+                        launched?;
+                        Ok(outputs.map(Tensor::from_typed))
+                    })
+                })
+                .expect("CUDA execution session")
+            })
+            .unwrap()
+            .unwrap();
+        for (index, (output, expected)) in outputs.iter().zip(&expected).enumerate() {
+            let host = download_tensor(backend.runtime(), output).unwrap();
+            let actual = host.as_slice::<f32>().unwrap();
+            assert_eq!(actual.len(), expected.len());
+            for (&actual, &expected) in actual.iter().zip(expected) {
+                assert!(
+                    actual.is_finite()
+                        && (actual - expected).abs() <= 3e-4 * (1.0 + expected.abs()),
+                    "L={length} output={index}: {actual} vs {expected}"
+                );
+            }
         }
     }
 }

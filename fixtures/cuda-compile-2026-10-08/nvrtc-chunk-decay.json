@@ -1,0 +1,176 @@
+{
+  "nvrtc_version": "12.6",
+  "source": "crates/tenferro-gated-delta/src/cuda/kernels.cu",
+  "source_sha256": "628a49ed716fd3fc91cd87b396787b33e3400c4b7f86b1bc567792f3462b5298",
+  "targets": [
+    {
+      "arch": "compute_70",
+      "flags": [
+        "--std=c++14",
+        "--gpu-architecture=compute_70",
+        "--fmad=false"
+      ],
+      "ptx_bytes": 39889,
+      "signatures": {
+        "gated_delta_conv_silu": [
+          "u64",
+          "u64",
+          "u64",
+          "u32",
+          "u32",
+          "u32"
+        ],
+        "gated_delta_recurrent": [
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u32",
+          "u32",
+          "u32",
+          "u32",
+          "u32"
+        ],
+        "gated_delta_chunk_decay": [
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u32",
+          "u32",
+          "u32"
+        ],
+        "gated_delta_norm_gate": [
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u32",
+          "u32",
+          "f32"
+        ]
+      },
+      "log": ""
+    },
+    {
+      "arch": "compute_80",
+      "flags": [
+        "--std=c++14",
+        "--gpu-architecture=compute_80",
+        "--fmad=false"
+      ],
+      "ptx_bytes": 39889,
+      "signatures": {
+        "gated_delta_conv_silu": [
+          "u64",
+          "u64",
+          "u64",
+          "u32",
+          "u32",
+          "u32"
+        ],
+        "gated_delta_recurrent": [
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u32",
+          "u32",
+          "u32",
+          "u32",
+          "u32"
+        ],
+        "gated_delta_chunk_decay": [
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u32",
+          "u32",
+          "u32"
+        ],
+        "gated_delta_norm_gate": [
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u32",
+          "u32",
+          "f32"
+        ]
+      },
+      "log": ""
+    },
+    {
+      "arch": "compute_90",
+      "flags": [
+        "--std=c++14",
+        "--gpu-architecture=compute_90",
+        "--fmad=false"
+      ],
+      "ptx_bytes": 39889,
+      "signatures": {
+        "gated_delta_conv_silu": [
+          "u64",
+          "u64",
+          "u64",
+          "u32",
+          "u32",
+          "u32"
+        ],
+        "gated_delta_recurrent": [
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u32",
+          "u32",
+          "u32",
+          "u32",
+          "u32"
+        ],
+        "gated_delta_chunk_decay": [
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u32",
+          "u32",
+          "u32"
+        ],
+        "gated_delta_norm_gate": [
+          "u64",
+          "u64",
+          "u64",
+          "u64",
+          "u32",
+          "u32",
+          "f32"
+        ]
+      },
+      "log": ""
+    }
+  ],
+  "gpu_execution_tested": false
+}
