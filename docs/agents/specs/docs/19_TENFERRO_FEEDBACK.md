@@ -84,15 +84,22 @@ At the pinned revision, `cuda::raw::Module` and `Function` are `!Send`/`!Sync`.
 `ExtensionCacheStore::put` requires `Send + Sync`. Loaded module handles
 therefore cannot be cached directly in either store. A thread-bound CUDA
 execution owner must retain the module instead; do not add unsafe `Send`/`Sync`
-implementations to bypass this boundary.
+implementations to bypass this boundary. `BackendSessionHost::with_backend_session`
+also requires both its closure and return value to be `Send`, so a loaded
+module cannot be captured from outside or returned across session admission.
+Construct/use a thread-bound owner inside the admitted executor scope, or
+provide an appropriate thread-local cache; runtime identity must be checked.
 
 `raw::Session::launch` explicitly requires modules and device allocations to
 remain live until a subsequent synchronization; launch does not retain them
 for asynchronous completion. An extension-local module that is dropped on
 return is insufficient. Full GatedDelta integration must provide an execution
 owner/lease that spans the device work, with stream-ordered buffer reuse and
-cleanup. The current low-level `CudaKernels` owner exposes handles but neither
-launches nor claims to solve this lifetime contract.
+cleanup. The current low-level `CudaKernels` owner validates and enqueues raw stages
+through an unsafe API; it leaves completion/lifetime management to the caller.
+The ignored CUDA stage test explicitly synchronizes and leaks retained GPU
+resources on synchronization failure. This test is not the full inference
+execution owner.
 
 ## Positive findings (not filed)
 

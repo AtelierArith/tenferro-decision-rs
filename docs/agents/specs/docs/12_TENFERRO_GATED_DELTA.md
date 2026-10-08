@@ -355,6 +355,22 @@ must ensure disjoint underlying allocations and retain all buffers/module
 until successful stream synchronization, including when a later launch
 fails. A safe full-layer execution owner and hardware parity remain pending.
 
+The ignored hardware test `tests/cuda_stages.rs` compares the three-stage
+output with causal convolution plus the existing CPU recurrent oracle for
+lengths 1/63/64/65/127/128/129, key widths 1/33/256, and grouped heads. It
+synchronizes once after all stages, including after enqueue errors; if the
+barrier fails it intentionally retains the allocations and kernel module.
+This is a raw-stage gate, not full-layer mask/padding or large-key coverage.
+Run it explicitly on a CUDA runner with NVRTC available:
+
+```sh
+TENFERRO_CUDA_ARCH=compute_80 cargo test -p tenferro-gated-delta --features cuda --test cuda_stages -- --ignored
+```
+
+Select an architecture supported by the device. On 2026-10-08 this explicit
+run failed before launch because the environment lacks `libcuda`; the test
+compiled, but hardware numerical parity is still unproven.
+
 For compiler validation without a GPU, run:
 
 ```sh
