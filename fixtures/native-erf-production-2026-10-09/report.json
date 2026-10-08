@@ -1,0 +1,27 @@
+{
+  "base_revision": "c93a8a590ff43a881bd5da92c405cfbf6e965183",
+  "change_under_test": "Backend-native erf/GELU composition, uncommitted on the base revision",
+  "checkpoint": {
+    "model": "convaiinnovations/laya",
+    "revision": "7b928d828b7b0e022f929d9bd2e44165aa270148"
+  },
+  "backend": "CPU",
+  "dtype": "F32",
+  "profile": "release",
+  "rayon_threads": 8,
+  "command": "cargo test --offline --release -p laya-infer --test production_answers -- --nocapture",
+  "diagnostic_overrides": [
+    "In encoder_tensor, prefix the fused GeGLU condition with false && to select the native split/GELU/multiply composition.",
+    "In EagerSessionErfExt::{erf,gelu_erf}, temporarily replace !cpu_extensions_supported(self) with true to exercise native erf-based activation on CPU."
+  ],
+  "result": {
+    "test": "bundled_questions_match_julia_collate_predict_and_action",
+    "passed": 1,
+    "failed": 0,
+    "elapsed_seconds": 10.85,
+    "checkpoint_skipped": false,
+    "source_overrides_restored": true
+  },
+  "coverage": "Production Julia input IDs, logits and action scores within the existing 2e-3 + abs(expected)*2e-5 tolerance, plus decision and system-one answer assertions.",
+  "limitations": "CPU evidence only. Other model operations retain their standard CPU paths. This does not prove GPU primitive behavior, full GPU model parity, bit-identical arithmetic or latency improvement."
+}

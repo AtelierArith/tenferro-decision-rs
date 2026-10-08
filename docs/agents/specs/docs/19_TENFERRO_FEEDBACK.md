@@ -111,14 +111,35 @@ compositions. Jeff's dense linear also uses native `dot_general` for other
 dtypes, with the same `(in, out)` weight layout. No host transfer or backend
 switch is used to satisfy an unsupported op.
 
-This fixes routing, not full GPU model support. Laya's exact erf-based GELU
-still requires the CPU-only self-hosted `ErfOp`: the pinned native elementwise
-surface has no erf. The native GeGLU composition therefore still reports an
-unsupported extension on GPU; it must gain a device implementation before
-Laya can execute end to end. Do not replace exact GELU with tanh approximation
-as an implicit fallback. Jeff's default HostRecurrent DeltaKernel is also
-explicitly CPU-only; TensorNative remains the portable formulation. Raw CUDA
-request integration and hardware parity remain separate outstanding work.
+Laya's erf-based GELU now has a tensor-native composition in `tenferro-ext`:
+F32 uses the CPU MLX polynomial coefficients with native `expm1`, and F64
+uses the same Abramowitz–Stegun approximation as the CPU extension. CPU
+sessions retain the original fused extension. Other sessions select the native
+composition and upload only scalar constants. No tanh GELU substitution is
+used. Native F32 arithmetic is not bit-identical to the fused CPU polynomial;
+CPU verification over 40,001 grid points plus branch boundaries measured erf
+maximum absolute difference 8.34465e-7; a separate 40,001-point GELU grid
+measured 5.9604645e-7. Special-value tests cover signed zeros, infinities,
+extreme finite F32 values and NaN. CUDA execution has an explicit
+ignored hardware gate (`tenferro-ext/cuda`); actual device parity remains
+unverified on this machine. Unsupported native primitives still return errors.
+
+This does not establish full GPU model support. Jeff's default HostRecurrent
+DeltaKernel remains explicitly CPU-only; TensorNative is the portable
+formulation. Raw CUDA request integration, full-model GPU parity and backend
+primitive coverage remain outstanding work. The native erf convenience path
+currently uploads scalar coefficients per call; preparing and caching those
+constants is also required before claiming device-resident production
+constants across requests.
+
+A diagnostic release run forced only Laya's GeGLU/erf/GELU compositions onto
+the native path on CPU and passed the actual production
+`bundled_questions_match_julia_collate_predict_and_action` test (Julia logits,
+action scores and answers). The temporary routing overrides were restored;
+other model operations retained their CPU paths. This provides full-model CPU
+accuracy evidence for the new activation, not GPU evidence. The conditions,
+existing tolerance and result are recorded in
+[`native-erf-production-2026-10-09`](../../../../fixtures/native-erf-production-2026-10-09/report.json).
 
 ## Positive findings (not filed)
 

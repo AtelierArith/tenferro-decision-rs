@@ -3784,6 +3784,7 @@ dependencies = [
  "cpu-kernels",
  "tenferro-ad",
  "tenferro-cpu",
+ "tenferro-gpu",
  "tenferro-runtime",
  "tenferro-tensor",
 ]

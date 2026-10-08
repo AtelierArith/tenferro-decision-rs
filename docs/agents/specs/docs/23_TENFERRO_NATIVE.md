@@ -53,8 +53,8 @@ every weight tensor on every call.
 CPU fused model extensions are selected using the admitted CPU execution
 marker as well as F32 dtype. Other backends use native dense, norm, attention
 and gated-activation compositions. This routing does not yet establish full
-GPU support: Laya's exact GELU still depends on the CPU-only erf extension,
-and CUDA request integration and device parity remain pending (see
+GPU support: Laya's erf-based GELU now has a native polynomial composition,
+but device parity and CUDA request integration remain pending (see
 `19_TENFERRO_FEEDBACK.md`).
 
 ### tenferro conventions pinned down

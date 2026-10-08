@@ -8,9 +8,14 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+default = []
+cuda = ["dep:tenferro-gpu", "tenferro-ad/cuda"]
+
 [dependencies]
 tenferro-ad.workspace = true
 tenferro-runtime.workspace = true
 tenferro-tensor.workspace = true
 tenferro-cpu.workspace = true
 cpu-kernels.workspace = true
+tenferro-gpu = { workspace = true, optional = true, features = ["cuda"] }

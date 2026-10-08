@@ -3,6 +3,8 @@
 //! tenferro has no elementwise `erf`, so this crate adds one as a first-class
 //! extension op — the same mechanism `tenferro-linalg`/`tenferro-fft` use — and
 //! exposes it together with the exact (erf-based) GELU on the eager session.
+//! CPU sessions use the fused extension; other backends compose the same erf
+//! approximation coefficients from native elementwise operations.
 //!
 //! The `f32` kernel ports the MLX Metal `erff`/`expm1f` sequence used by Laya's
 //! reference (`extern/Laya.jl/src/mathfns.jl`), so the eager GELU matches the
@@ -21,6 +23,7 @@ mod jeff_attention;
 mod laya_attention;
 mod layernorm;
 mod linear;
+mod native_erf;
 mod rms_norm;
 
 pub use gated_silu::{EagerSessionGatedSiluExt, GATED_SILU_FAMILY_ID, GatedSiluOp};
@@ -35,6 +38,7 @@ pub use laya_attention::{
 };
 pub use layernorm::{EagerSessionLayerNormExt, LAYER_NORM_FF_FAMILY_ID, LayerNormFeatureFirstOp};
 pub use linear::{EagerSessionLinearExt, LINEAR_FAMILY_ID, LinearOp};
+pub use native_erf::{erf_tensor_native, gelu_erf_tensor_native};
 pub use rms_norm::{EagerSessionRmsNormExt, RMS_NORM_FAMILY_ID, RmsNormLastOp};
 
 use std::any::Any;
@@ -172,7 +176,7 @@ fn erf_extension_module(
 
 /// Eager-session methods for the `erf` extension and the exact GELU.
 pub trait EagerSessionErfExt {
-    /// Elementwise `erf`.
+    /// Elementwise `erf`; CPU extension or native composition by backend.
     fn erf(&mut self, x: &EagerTensor) -> tenferro_ad::Result<EagerTensor>;
 
     /// Exact (erf-based) GELU: `x * (1 + erf(x / sqrt(2))) / 2`.
@@ -181,6 +185,9 @@ pub trait EagerSessionErfExt {
 
 impl EagerSessionErfExt for EagerSession<'_> {
     fn erf(&mut self, x: &EagerTensor) -> tenferro_ad::Result<EagerTensor> {
+        if !cpu_extensions_supported(self) {
+            return erf_tensor_native(self, x);
+        }
         one_output(
             apply_eager_with_targeted_extension_in_session(
                 self,
@@ -193,6 +200,9 @@ impl EagerSessionErfExt for EagerSession<'_> {
     }
 
     fn gelu_erf(&mut self, x: &EagerTensor) -> tenferro_ad::Result<EagerTensor> {
+        if !cpu_extensions_supported(self) {
+            return gelu_erf_tensor_native(self, x);
+        }
         let scaled = self.scale_real(x, std::f64::consts::FRAC_1_SQRT_2)?;
         let erf = self.erf(&scaled)?;
         let one = scalar_like(self, x, 1.0)?;
@@ -234,7 +244,7 @@ fn scalar_like(
             ));
         }
     };
-    session.constant_from(tensor)
+    session.constant_from_host(tensor)
 }
 
 /// Abramowitz–Stegun 7.1.26 (`|ε| ≤ 1.5e-7`) for `f64`.
