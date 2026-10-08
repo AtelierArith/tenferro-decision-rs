@@ -294,14 +294,10 @@ fn l2_normalize_heads(
     x: &EagerTensor,
     heads: usize,
     length: usize,
-    eps: f64,
+    eps: &EagerTensor,
 ) -> AdResult<EagerTensor> {
     let sum_sq = session.reduce_sum_squares(x, &[1])?; // (heads, length)
-    let eps = session.constant_from_host(tenferro_ad::Tensor::from_vec_col_major(
-        vec![length],
-        vec![eps as f32; length],
-    )?)?;
-    let denom = session.add(&sum_sq, &eps)?;
+    let denom = session.add(&sum_sq, eps)?;
     let inv = session.rsqrt(&denom)?;
     let inv = session.reshape(&inv, vec![heads, 1, length])?;
     session.mul(x, &inv)
@@ -399,6 +395,20 @@ fn delta_scan_chunked_batched(
 ) -> AdResult<EagerTensor> {
     let neg_big = scalar(session, -1.0e30)?;
     let zero = scalar(session, 0.0)?;
+    let norm_eps = constant(session, &[], &[eps as f32])?;
+    // There are at most two chunk widths. Prepare each lower mask once, then
+    // reuse its device tensor for every chunk instead of uploading/tril again.
+    let full_width = chunk_size.min(length);
+    let full_lower = lower_tri_ones(session, full_width)?;
+    let full_lower =
+        session.broadcast_in_dim(&full_lower, &[heads, full_width, full_width], &[1, 2])?;
+    let tail_width = length % chunk_size;
+    let tail_lower = if tail_width != 0 && tail_width != full_width {
+        let lower = lower_tri_ones(session, tail_width)?;
+        Some(session.broadcast_in_dim(&lower, &[heads, tail_width, tail_width], &[1, 2])?)
+    } else {
+        None
+    };
     let mut state = constant(
         session,
         &[heads, value_dim, key_dim],
@@ -419,8 +429,11 @@ fn delta_scan_chunked_batched(
         let dc = slice_time_rows(session, decay, heads, start, end)?; // (H, n)
 
         // Cumulative log-decay via a lower-tri ones matmul, plus the pair decay.
-        let lower = lower_tri_ones(session, n)?;
-        let lower = session.broadcast_in_dim(&lower, &[heads, n, n], &[1, 2])?;
+        let lower = if n == full_width {
+            full_lower.clone()
+        } else {
+            tail_lower.as_ref().expect("prepared tail width").clone()
+        };
         let dc_col = session.reshape(&dc, vec![heads, n, 1])?;
         let cumulative = bmm(session, &lower, &dc_col)?; // (H, n, 1)
         let cumulative = session.reshape(&cumulative, vec![heads, n])?;
@@ -488,7 +501,8 @@ fn delta_scan_chunked_batched(
 
         // Non-centered RMSNorm over the value dimension, then the output gate.
         let result_t = session.transpose(&result, &[0, 2, 1])?; // (H, n, vd)
-        let normalized_t = norm::rms_norm(session, &result_t, norm_weight, false, eps)?;
+        let normalized_t =
+            norm::rms_norm_with_epsilon(session, &result_t, norm_weight, false, &norm_eps)?;
         let normalized = session.transpose(&normalized_t, &[0, 2, 1])?;
         let gated_z = activation::silu(session, &zc)?;
         let chunk_out = session.mul(&normalized, &gated_z)?;
@@ -661,10 +675,11 @@ pub fn delta_layer_from_projected(
 
     // L2-normalize Q/K over the head width (eps fixed at 1e-6, as in the host
     // reference) and scale Q by 1/sqrt(key_dim).
-    let q = l2_normalize_heads(session, &q, heads, length, 1e-6)?;
+    let l2_eps = constant(session, &[length], &vec![1e-6f32; length])?;
+    let q = l2_normalize_heads(session, &q, heads, length, &l2_eps)?;
     let inv_scale = 1.0 / (key_dim as f64).sqrt();
     let q = session.scale_real(&q, inv_scale)?;
-    let k = l2_normalize_heads(session, &k, heads, length, 1e-6)?;
+    let k = l2_normalize_heads(session, &k, heads, length, &l2_eps)?;
 
     // Gates: beta = sigmoid(b); decay = a_decay * softplus(a + dt_bias).
     let beta = activation::sigmoid(session, b)?; // (heads, L)

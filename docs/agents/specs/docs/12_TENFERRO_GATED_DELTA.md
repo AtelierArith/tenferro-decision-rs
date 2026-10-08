@@ -421,6 +421,15 @@ covers grouped heads, masks, chunk boundaries, workspace reuse and convolution
 weight replacement. Compilation and CPU tests do not establish GPU parity;
 production dispatch, request-wide scheduling and hardware validation remain open.
 
+The native head-batched scan now prepares its lower-triangular masks once for
+each of the at most two chunk widths (full and final partial chunk), including
+head broadcasting. Chunks reuse those tensors rather than reconstructing and
+uploading them. Q/K share one epsilon vector, and all scan chunks share a
+prepared rank-zero RMSNorm epsilon through
+`tenferro_infer::norm::rms_norm_with_epsilon`. These changes reduce repeated
+constant preparation within a layer and retain the native operation path;
+cross-request constant/plan caching and measured CUDA performance remain pending.
+
 `cuda::CudaStageRun` is a raw-session-scoped pending owner. Its unsafe
 `enqueue` takes the module, eight input tensors and three workspace tensors
 before launch; callers still guarantee disjoint allocations and no conflicting

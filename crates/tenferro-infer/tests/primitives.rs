@@ -84,6 +84,25 @@ fn rms_norm_matches_reference() {
             let x = s.constant_from(Tensor::from_vec_col_major(vec![rows, cols], xv.to_vec())?)?;
             let w = s.constant_from(Tensor::from_vec_col_major(vec![cols], wv.to_vec())?)?;
             let y = ti::norm::rms_norm(s, &x, &w, centered, eps)?;
+            let prepared_eps = s.constant_from(Tensor::from_vec_col_major(vec![], vec![eps])?)?;
+            let prepared = ti::norm::rms_norm_with_epsilon(s, &x, &w, centered, &prepared_eps)?;
+            let doubled = s.scale_real(&x, 2.0)?;
+            // Reuse one epsilon for different inputs and retain the earlier
+            // result while evaluating the second normalization.
+            let reused = ti::norm::rms_norm_with_epsilon(s, &doubled, &w, centered, &prepared_eps)?;
+            let expected_reused = ti::norm::rms_norm(s, &doubled, &w, centered, eps)?;
+            assert_close(
+                s.duplicate_value(&reused)?.as_slice::<f64>()?,
+                s.duplicate_value(&expected_reused)?.as_slice::<f64>()?,
+                1e-9,
+            );
+            assert_close(
+                s.duplicate_value(&prepared)?.as_slice::<f64>()?,
+                s.duplicate_value(&y)?.as_slice::<f64>()?,
+                1e-9,
+            );
+            let vector_eps = s.constant_from(Tensor::from_vec_col_major(vec![1], vec![eps])?)?;
+            assert!(ti::norm::rms_norm_with_epsilon(s, &x, &w, centered, &vector_eps).is_err());
             s.duplicate_value(&y)
         });
 
