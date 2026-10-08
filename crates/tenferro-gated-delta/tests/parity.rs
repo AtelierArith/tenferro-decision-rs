@@ -106,6 +106,7 @@ fn compare(case: &Case, chunk_size: usize, tolerance: f32) {
     assert_eq!(reference.len(), chunked.len());
     let mut max_diff = 0.0f32;
     for (a, b) in reference.iter().zip(&chunked) {
+        assert!(a.is_finite() && b.is_finite(), "scan output must be finite");
         max_diff = max_diff.max((a - b).abs());
     }
     assert!(
@@ -150,6 +151,16 @@ fn chunked_matches_reference_with_groups() {
     // Value width different from key width.
     let case = make_case(5, 3, 9, 4);
     compare(&case, 4, 2e-3);
+}
+
+#[test]
+fn chunked_large_key_matches_reference_at_chunk_boundaries() {
+    // This is the native contraction/solve path needed beyond the CUDA
+    // recurrent kernel's key_dim <= 256 register-state limit.
+    for length in [1, 63, 64, 65] {
+        let case = make_case(257, 3, length, 19);
+        compare(&case, 64, 2e-3);
+    }
 }
 
 #[test]

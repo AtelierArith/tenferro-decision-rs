@@ -375,8 +375,8 @@ columns. Non-unit diagonal and large upper entries verify that the lower/unit
 flags are respected; the result must stay device-backed before download.
 This checks the library building block only. Device-side cumulative decay
 preparation is implemented below;
-contractions, solve integration, the chunk loop, and full large-key DeltaNet
-parity remain pending.
+The contraction/solve step is implemented below; CUDA chunk-loop integration
+and full large-key DeltaNet parity remain pending.
 
 Select an architecture supported by the device. On 2026-10-08 this explicit
 run failed before launch because the environment lacks `libcuda`; the test
@@ -398,8 +398,27 @@ all five outputs, including pair padding and tail weights with a zero final
 factor. This gate compiles but has not run on a CUDA device. The compiler
 report for all four exported kernels is
 `fixtures/cuda-compile-2026-10-08/nvrtc-chunk-decay.json`; the earlier report
-records the original three-stage source hash. Device contractions, solve
-integration and full-layer dispatch remain pending.
+records the original three-stage source hash. Device preparation and the native chunk step are implemented separately;
+CUDA chunk-loop integration and full-layer dispatch remain pending.
+
+The backend-agnostic `chunked::delta_scan_chunk_step` now accepts prepared
+`EagerTensor` inputs and returns the next state and gated chunk output. It
+composes contractions, two unit-lower `triangular_solve` calls, corrections,
+state update, RMSNorm and SiLU entirely through session ops. Epsilon,
+inverse value width and one are prepared scalar tensors supplied by the
+caller; the step creates no host constants, reads no tensor values onto the
+host and adds no explicit synchronization. Tensor shapes are validated before
+computing. No backend fallback is introduced.
+
+The existing host-input `delta_scan_chunked` wrapper now calls this same
+step; it still prepares host decay factors and downloads chunk outputs for
+its `Vec<f32>` API. CPU oracle tests cover key width 257 at lengths 1/63/64/65,
+as well as the existing unequal key/value widths and strong-decay boundary
+regressions. They now reject non-finite outputs explicitly. A malformed norm
+weight is checked to return a typed error. This verifies the contraction/solve
+building block on CPU, not device preparation plus a complete CUDA scan.
+The CUDA adapter still needs to bind prepared device factors to eager tensors,
+iterate heads/chunks with stream-ordered ownership and assemble device outputs.
 
 For compiler validation without a GPU, run:
 
