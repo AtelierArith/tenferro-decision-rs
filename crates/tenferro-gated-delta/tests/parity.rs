@@ -103,6 +103,108 @@ fn compare(case: &Case, chunk_size: usize, tolerance: f32) {
         .unwrap()
         .unwrap();
 
+    // Exercise the prepared tensor entry point separately: poison padded pair
+    // cells so an incorrect final-chunk crop cannot silently pass parity.
+    let chunks = case.length.div_ceil(chunk_size);
+    let mut cumulative = vec![0.0; case.length];
+    let mut tail = vec![0.0; case.length];
+    let mut final_decay = vec![0.0; chunks];
+    let mut pair = vec![f32::NAN; chunk_size * chunk_size * chunks];
+    for (chunk, final_factor) in final_decay.iter_mut().enumerate() {
+        let start = chunk * chunk_size;
+        let end = (start + chunk_size).min(case.length);
+        let n = end - start;
+        let mut sum = 0.0;
+        for (prefix, decay) in cumulative[start..end]
+            .iter_mut()
+            .zip(&case.decay[start..end])
+        {
+            sum += decay;
+            *prefix = sum;
+        }
+        *final_factor = sum.exp();
+        for i in 0..n {
+            tail[start + i] = (sum - cumulative[start + i]).exp();
+            for j in 0..n {
+                pair[chunk * chunk_size * chunk_size + i + j * chunk_size] = if i >= j {
+                    (cumulative[start + i] - cumulative[start + j]).exp()
+                } else {
+                    0.0
+                };
+            }
+        }
+    }
+    let prepared = runtime
+        .with_eager_session(|session| {
+            use tenferro_gated_delta::chunked::{PreparedChunkScan, delta_scan_prepared};
+            let tensor = |session: &mut tenferro_ad::EagerSession<'_>,
+                          shape: Vec<usize>,
+                          data: Vec<f32>| {
+                session.constant_from(tenferro_ad::Tensor::from_vec_col_major(shape, data).unwrap())
+            };
+            let matrix =
+                |session: &mut tenferro_ad::EagerSession<'_>, rows: usize, data: &[f32]| {
+                    let col: Vec<_> = (0..case.length)
+                        .flat_map(|t| (0..rows).map(move |r| data[r * case.length + t]))
+                        .collect();
+                    tensor(session, vec![rows, case.length], col)
+                };
+            let q = matrix(session, case.key_dim, &case.q)?;
+            let k = matrix(session, case.key_dim, &case.k)?;
+            let v = matrix(session, case.value_dim, &case.v)?;
+            let z = matrix(session, case.value_dim, &case.z)?;
+            let state = tensor(
+                session,
+                vec![case.value_dim, case.key_dim],
+                vec![0.0; case.value_dim * case.key_dim],
+            )?;
+            let beta = tensor(session, vec![case.length], case.beta.clone())?;
+            let cumulative = tensor(session, vec![case.length], cumulative)?;
+            let pair = tensor(session, vec![chunk_size, chunk_size, chunks], pair)?;
+            let tail = tensor(session, vec![case.length], tail)?;
+            let final_decay = tensor(session, vec![chunks], final_decay)?;
+            let norm = tensor(session, vec![case.value_dim], case.norm.clone())?;
+            let eps = tensor(session, vec![], vec![case.eps])?;
+            let inverse = tensor(session, vec![], vec![1.0 / case.value_dim as f32])?;
+            let one = tensor(session, vec![], vec![1.0])?;
+            let (state, output) = delta_scan_prepared(
+                session,
+                PreparedChunkScan {
+                    state: &state,
+                    q: &q,
+                    k: &k,
+                    v: &v,
+                    z: &z,
+                    beta: &beta,
+                    cumulative: &cumulative,
+                    pair: &pair,
+                    tail: &tail,
+                    final_decay: &final_decay,
+                    norm_weight: &norm,
+                    eps: &eps,
+                    inverse_value_dim: &inverse,
+                    one: &one,
+                },
+                chunk_size,
+            )?;
+            assert_eq!(state.shape(), &[case.value_dim, case.key_dim]);
+            let host = session.duplicate_value(&output)?;
+            let data = host.as_slice::<f32>()?;
+            let row: Vec<_> = (0..case.value_dim)
+                .flat_map(|r| (0..case.length).map(move |t| data[r + t * case.value_dim]))
+                .collect();
+            Ok::<_, tenferro_ad::Error>(row)
+        })
+        .unwrap()
+        .unwrap();
+    assert_eq!(prepared.len(), reference.len());
+    for (&actual, &expected) in prepared.iter().zip(&reference) {
+        assert!(
+            actual.is_finite() && (actual - expected).abs() <= tolerance,
+            "prepared scan chunk={chunk_size}: {actual} vs {expected}"
+        );
+    }
+
     assert_eq!(reference.len(), chunked.len());
     let mut max_diff = 0.0f32;
     for (a, b) in reference.iter().zip(&chunked) {

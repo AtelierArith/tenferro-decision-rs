@@ -417,8 +417,17 @@ as well as the existing unequal key/value widths and strong-decay boundary
 regressions. They now reject non-finite outputs explicitly. A malformed norm
 weight is checked to return a typed error. This verifies the contraction/solve
 building block on CPU, not device preparation plus a complete CUDA scan.
-The CUDA adapter still needs to bind prepared device factors to eager tensors,
-iterate heads/chunks with stream-ordered ownership and assemble device outputs.
+`chunked::delta_scan_prepared` now iterates one head's prepared chunks,
+propagates state and concatenates outputs as eager tensors. It takes cumulative
+log decay, beta/tail, padded pair matrices and final factors in the CUDA
+preparation layout with the head axis removed. It crops padded pair rows and
+columns before each solve. Constants and initial state are caller-prepared;
+there is no host tensor read or constant construction in the loop.
+All oracle comparisons also exercise this prepared scan, with NaN-poisoned
+padding to detect invalid reads. Key width 257, chunk boundaries and strong
+decay pass on CPU. This still does not establish CUDA execution parity: the
+CUDA adapter must bind device preparation outputs to eager tensors, manage
+raw resource lifetimes, iterate heads and integrate the full layer.
 
 For compiler validation without a GPU, run:
 

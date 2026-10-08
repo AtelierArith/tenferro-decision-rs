@@ -130,6 +130,124 @@ pub fn delta_scan_chunk_step(
     Ok((next_state, output))
 }
 
+/// Prepared one-head scan tensors. Q/K have shape (key_dim, length), V/Z
+/// (value_dim, length), and state (value_dim, key_dim). Beta, cumulative log
+/// decay and tail have shape (length,). Pair has shape
+/// (chunk_size, chunk_size, chunks), including padding; final decay has shape
+/// (chunks,). Scalar constants and norm weights are prepared once by the owner.
+pub struct PreparedChunkScan<'a> {
+    pub state: &'a EagerTensor,
+    pub q: &'a EagerTensor,
+    pub k: &'a EagerTensor,
+    pub v: &'a EagerTensor,
+    pub z: &'a EagerTensor,
+    pub beta: &'a EagerTensor,
+    pub cumulative: &'a EagerTensor,
+    pub pair: &'a EagerTensor,
+    pub tail: &'a EagerTensor,
+    pub final_decay: &'a EagerTensor,
+    pub norm_weight: &'a EagerTensor,
+    pub eps: &'a EagerTensor,
+    pub inverse_value_dim: &'a EagerTensor,
+    pub one: &'a EagerTensor,
+}
+
+/// Scan prepared chunks, returning (final state, output) as eager tensors.
+/// No tensor values cross the host boundary and no constants are constructed.
+/// Chunk padding is cropped before solve; all state updates and output assembly
+/// execute through the selected backend. The caller retains CUDA preparation
+/// resources until stream completion; this function does not own raw modules.
+pub fn delta_scan_prepared(
+    session: &mut EagerSession<'_>,
+    inputs: PreparedChunkScan<'_>,
+    chunk_size: usize,
+) -> Result<(EagerTensor, EagerTensor)> {
+    let invalid = || {
+        tenferro_ad::Error::TensorRuntime(tenferro_tensor::Error::invalid_argument(
+            "delta_scan_prepared",
+            "shape",
+            "prepared scan shapes must agree with nonzero dimensions and chunk size",
+        ))
+    };
+    let [kd, length] = inputs.q.shape() else {
+        return Err(invalid());
+    };
+    let [vd, state_kd] = inputs.state.shape() else {
+        return Err(invalid());
+    };
+    if chunk_size == 0 || *kd == 0 || *vd == 0 || *length == 0 || kd != state_kd {
+        return Err(invalid());
+    }
+    let chunks = length.div_ceil(chunk_size);
+    for (tensor, shape) in [
+        (inputs.k, vec![*kd, *length]),
+        (inputs.v, vec![*vd, *length]),
+        (inputs.z, vec![*vd, *length]),
+        (inputs.beta, vec![*length]),
+        (inputs.cumulative, vec![*length]),
+        (inputs.tail, vec![*length]),
+        (inputs.pair, vec![chunk_size, chunk_size, chunks]),
+        (inputs.final_decay, vec![chunks]),
+        (inputs.norm_weight, vec![*vd]),
+        (inputs.eps, vec![]),
+        (inputs.inverse_value_dim, vec![]),
+        (inputs.one, vec![]),
+    ] {
+        if tensor.shape() != shape {
+            return Err(invalid());
+        }
+    }
+    let mut state = inputs.state.clone();
+    let mut outputs = Vec::with_capacity(chunks);
+    for chunk in 0..chunks {
+        let start = chunk * chunk_size;
+        let end = start.saturating_add(chunk_size).min(*length);
+        let n = end - start;
+        let q = slice_cols(session, inputs.q, *kd, start, end)?;
+        let k = slice_cols(session, inputs.k, *kd, start, end)?;
+        let v = slice_cols(session, inputs.v, *vd, start, end)?;
+        let z = slice_cols(session, inputs.z, *vd, start, end)?;
+        let beta = slice_range(session, inputs.beta, start, end)?;
+        let cumulative = slice_range(session, inputs.cumulative, start, end)?;
+        let exp_decay = session.exp(&cumulative)?;
+        let tail = slice_range(session, inputs.tail, start, end)?;
+        let final_decay = slice_range(session, inputs.final_decay, chunk, chunk + 1)?;
+        let final_decay = session.reshape(&final_decay, Vec::<usize>::new())?;
+        let pair = session.slice(
+            inputs.pair,
+            SliceConfig {
+                starts: vec![0, 0, chunk],
+                limits: vec![n, n, chunk + 1],
+                strides: vec![1, 1, 1],
+            },
+        )?;
+        let pair = session.reshape(&pair, vec![n, n])?;
+        let (next_state, output) = delta_scan_chunk_step(
+            session,
+            ChunkStepInputs {
+                state: &state,
+                q: &q,
+                k: &k,
+                v: &v,
+                z: &z,
+                beta: &beta,
+                exp_decay: &exp_decay,
+                pair_decay: &pair,
+                tail: &tail,
+                final_decay: &final_decay,
+                norm_weight: inputs.norm_weight,
+                eps: inputs.eps,
+                inverse_value_dim: inputs.inverse_value_dim,
+                one: inputs.one,
+            },
+        )?;
+        state = next_state;
+        outputs.push(output);
+    }
+    let refs: Vec<_> = outputs.iter().collect();
+    Ok((state, session.concatenate(&refs, 1)?))
+}
+
 /// Run the chunked scan on `session` and return the head output as a
 /// row-major `(value_dim, length)` vector.
 pub fn delta_scan_chunked(
