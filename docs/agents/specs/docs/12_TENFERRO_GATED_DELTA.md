@@ -343,6 +343,13 @@ The source documents buffer layouts, argument order, and launch geometry.
 Loaded modules must stay in a thread-bound execution owner until queued work
 completes; the raw launch contract is not automatically managed by this helper.
 
+The `cuda::RecurrentGeometry` adapter validates nonzero dimensions, grouped
+head divisibility, the register-state key limit, CUDA grid-y limits, and all
+signed 32-bit indexing products before exposing scalar arguments and launch
+geometry. GPU-free tests cover token boundaries and overflowing dimensions.
+This does not yet validate tensor storage, residency, aliasing or stream
+lifetimes; those remain obligations of the pending execution adapter.
+
 For compiler validation without a GPU, run:
 
 ```sh
