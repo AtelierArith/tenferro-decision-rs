@@ -369,6 +369,16 @@ Run it explicitly on a CUDA runner with NVRTC available:
 TENFERRO_CUDA_ARCH=compute_80 cargo test -p tenferro-gated-delta --features cuda --test cuda_stages -- --ignored
 ```
 
+The ignored `native_full_layer_matches_cpu_with_masks_grouping_and_large_keys`
+gate exercises the existing tensor-native full layer on CUDA, independently of
+the custom raw stages. It includes projections, convolution, normalization,
+chunked scan and output projection, with grouped heads, left padding and mask
+holes, lengths 1/63/64/65/127/128/129, and key width 257. Prepared weights are
+reused across requests; their QKV tensor and the final output must be
+device-backed before the final download. This validates the tensor-native
+fallback when explicitly run on hardware; it does not enable raw-kernel
+production dispatch or prove persistent workspace ownership.
+
 A second ignored gate, `native_unit_lower_triangular_solve_supports_large_key_rhs`,
 checks native CUDA linalg with triangular widths 1/63/64/65 and 257 RHS
 columns. Non-unit diagonal and large upper entries verify that the lower/unit

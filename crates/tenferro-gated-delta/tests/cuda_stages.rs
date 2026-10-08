@@ -588,3 +588,111 @@ fn cuda_decay_preparation_feeds_native_large_key_scan_on_one_session() {
         }
     }
 }
+
+#[test]
+#[ignore = "requires CUDA hardware, cuBLAS and cuTENSOR; run explicitly with --ignored"]
+fn native_full_layer_matches_cpu_with_masks_grouping_and_large_keys() {
+    use tenferro_gated_delta::{
+        Algorithm, GatedDeltaConfig, GatedDeltaWeights, delta_layer_reference,
+        delta_layer_tenferro_prepared_mask, prepare_tensor_weights,
+    };
+    use tenferro_infer::TensorCache;
+
+    let backend = CudaBackend::new(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
+    let runtime = tenferro_ad::EagerRuntime::with_cuda_backend(backend.clone()).unwrap();
+    for (kd, kh, vh, lengths) in [
+        (7, 2, 4, vec![1usize, 63, 64, 65, 127, 128, 129]),
+        (257, 1, 2, vec![1usize, 63, 64, 65]),
+    ] {
+        let cfg = GatedDeltaConfig {
+            hidden: 4,
+            key_dim: kd,
+            value_dim: 3,
+            key_heads: kh,
+            value_heads: vh,
+            conv_taps: 4,
+            chunk_size: 64,
+            eps: 1e-5,
+            algorithm: Algorithm::Chunked,
+        };
+        let channels = 2 * kd * kh + cfg.value_dim * vh;
+        let width = cfg.value_dim * vh;
+        let weights = GatedDeltaWeights {
+            qkv: values(cfg.hidden * channels, 1),
+            z: values(cfg.hidden * width, 2),
+            a: values(cfg.hidden * vh, 3),
+            b: values(cfg.hidden * vh, 4),
+            conv: values(channels * cfg.conv_taps, 5),
+            a_decay: vec![-0.4; vh],
+            dt_bias: values(vh, 6),
+            norm: vec![1.0; cfg.value_dim],
+            out_proj: values(width * cfg.hidden, 7),
+        };
+        let mut cache = TensorCache::new();
+        let prepared = runtime
+            .with_eager_session(|session| {
+                prepare_tensor_weights(session, &cfg, &weights, &mut cache)
+            })
+            .unwrap()
+            .unwrap();
+        assert!(prepared.qkv.tensor_read().backend_family().is_some());
+        for length in lengths {
+            let x = values(cfg.hidden * length, 8);
+            for masked in [false, true] {
+                let mask: Vec<f32> = (0..length)
+                    .map(|t| {
+                        if masked && (t < 2 || t % 11 == 5) {
+                            0.0
+                        } else {
+                            1.0
+                        }
+                    })
+                    .collect();
+                let expected = delta_layer_reference(&cfg, &weights, &x, &mask).unwrap();
+                let mut column_major = vec![0.0; x.len()];
+                for h in 0..cfg.hidden {
+                    for t in 0..length {
+                        column_major[h + cfg.hidden * t] = x[h * length + t];
+                    }
+                }
+                let output = runtime
+                    .with_eager_session(|session| {
+                        let x = session.constant_from_host(Tensor::from_vec_col_major(
+                            vec![cfg.hidden, length],
+                            column_major,
+                        )?)?;
+                        let mask = session
+                            .constant_from_host(Tensor::from_vec_col_major(vec![length], mask)?)?;
+                        let result = delta_layer_tenferro_prepared_mask(
+                            session, &cfg, &prepared, &x, &mask,
+                        )?;
+                        let result = session.duplicate_value(&result)?;
+                        assert!(
+                            result.is_backend_buffer(),
+                            "full layer must remain on device"
+                        );
+                        with_cuda_exec_session(session.backend_session(), |cuda| {
+                            cuda.with_raw("cuda_full_layer_finish", |raw| raw.synchronize())
+                        })
+                        .expect("CUDA execution session")?;
+                        Ok::<_, tenferro_ad::Error>(result)
+                    })
+                    .unwrap()
+                    .unwrap();
+                let host = download_tensor(backend.runtime(), &output).unwrap();
+                let actual = host.as_slice::<f32>().unwrap();
+                for h in 0..cfg.hidden {
+                    for t in 0..length {
+                        let actual = actual[h + cfg.hidden * t];
+                        let expected = expected[h * length + t];
+                        assert!(actual.is_finite());
+                        assert!(
+                            (actual - expected).abs() < 5e-3,
+                            "kd={kd} length={length} masked={masked} h={h} t={t}: {actual} vs {expected}"
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
