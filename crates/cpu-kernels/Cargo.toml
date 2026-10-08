@@ -8,6 +8,11 @@ license.workspace = true
 repository.workspace = true
 authors.workspace = true
 
+[features]
+default = []
+# Links the system LP64 OpenBLAS library for wide Laya projection GEMMs.
+openblas = []
+
 [dependencies]
 matrixmultiply.workspace = true
 rayon.workspace = true

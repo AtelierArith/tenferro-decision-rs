@@ -1,0 +1,46 @@
+{
+  "iters": 5,
+  "metadata": {
+    "arch": "x86_64",
+    "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+    "cpu_count": 16,
+    "git_rev": "0bc8720f710bea92643191362f98d016c9dfe595",
+    "os": "linux",
+    "profile": "release",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+    "target": "x86_64-unknown-linux-gnu",
+    "timestamp_unix": 1791468087
+  },
+  "rayon_threads": 8,
+  "rows": [
+    {
+      "batch": 1,
+      "host_ms": 83.502088,
+      "length": 8,
+      "tenferro_ms": 103.528991
+    },
+    {
+      "batch": 1,
+      "host_ms": 106.952212,
+      "length": 16,
+      "tenferro_ms": 114.39990399999999
+    },
+    {
+      "batch": 1,
+      "host_ms": 695.3419,
+      "length": 64,
+      "tenferro_ms": 618.4312520000001
+    },
+    {
+      "batch": 8,
+      "host_ms": 614.47827,
+      "length": 8,
+      "tenferro_ms": 599.274774
+    }
+  ],
+  "warmup": 2,
+  "measurement_scope": "production cached tenferro Laya forward; host oracle included separately",
+  "openblas_threads": 1,
+  "openblas_config": "OpenBLAS 0.3.26 NO_LAPACKE DYNAMIC_ARCH NO_AFFINITY Cooperlake MAX_THREADS=64",
+  "source_patch": "openblas_projection_experiment.patch"
+}

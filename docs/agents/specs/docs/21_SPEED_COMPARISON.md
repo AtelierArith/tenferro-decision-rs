@@ -277,3 +277,13 @@ The same-machine Julia Jeff remeasurement is included in this directory:
 (selected by the upstream native backend). Rust HostOpt's Python-comparison
 report above records 109.6/112.3/175.8 ms; the relative Julia gap is therefore
 shape-dependent, rather than a uniform language/runtime advantage.
+
+An optional system OpenBLAS provider was also measured on this machine with
+`cpu-kernels/openblas`: at eight BLAS/Rayon threads, cached Laya L64 B1 was
+216.9 ms (repeat 215.1), and L8 B8 was 201.6 ms (repeat 201.7), against a
+contemporaneous portable baseline of 225.0/216.6 ms. This is a modest additional
+4%/7% improvement, not closure of the Julia/Python gap. One BLAS thread was
+much slower (618.4/599.3 ms), so thread settings matter. The optional provider
+uses the existing tenferro extension path and requires an installed LP64
+OpenBLAS; the default remains portable. Exact conditions and report links are
+in `22_CPU_KERNEL_OPTIMIZATION.md`.

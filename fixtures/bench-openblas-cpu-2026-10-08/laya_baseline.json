@@ -1,0 +1,43 @@
+{
+  "iters": 5,
+  "metadata": {
+    "arch": "x86_64",
+    "cargo": "cargo 1.99.0 (5f94df478 2026-08-27)",
+    "cpu_count": 16,
+    "git_rev": "0bc8720f710bea92643191362f98d016c9dfe595",
+    "os": "linux",
+    "profile": "release",
+    "rustc": "rustc 1.99.0 (b940084d7 2026-09-28)",
+    "target": "x86_64-unknown-linux-gnu",
+    "timestamp_unix": 1791468114
+  },
+  "rayon_threads": 8,
+  "rows": [
+    {
+      "batch": 1,
+      "host_ms": 87.406183,
+      "length": 8,
+      "tenferro_ms": 105.32479000000001
+    },
+    {
+      "batch": 1,
+      "host_ms": 108.61777000000001,
+      "length": 16,
+      "tenferro_ms": 116.881202
+    },
+    {
+      "batch": 1,
+      "host_ms": 369.627771,
+      "length": 64,
+      "tenferro_ms": 224.950975
+    },
+    {
+      "batch": 8,
+      "host_ms": 268.83797999999996,
+      "length": 8,
+      "tenferro_ms": 216.577773
+    }
+  ],
+  "warmup": 2,
+  "measurement_scope": "production cached tenferro Laya forward; host oracle included separately"
+}

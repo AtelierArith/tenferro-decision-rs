@@ -135,14 +135,62 @@ pub fn input_mul_weight_transpose_add_into(
     out_dim: usize,
     y: &mut [f32],
 ) {
-    debug_assert_eq!(x.len(), rows * in_dim);
-    debug_assert_eq!(weight.len(), out_dim * in_dim);
-    debug_assert_eq!(y.len(), rows * out_dim);
+    assert_eq!(x.len(), rows * in_dim);
+    assert_eq!(weight.len(), out_dim * in_dim);
+    assert_eq!(y.len(), rows * out_dim);
     if rows == 0 || out_dim == 0 || in_dim == 0 {
         return;
     }
     // y ← x · weightᵀ + y. `weightᵀ` is `(in_dim, out_dim)` with row stride 1
     // (the `in_dim` axis of the row-major `(out_dim, in_dim)` storage).
+    #[cfg(feature = "openblas")]
+    if rows >= 32
+        && [rows, in_dim, out_dim]
+            .iter()
+            .all(|&n| n <= i32::MAX as usize)
+    {
+        #[link(name = "openblas")]
+        unsafe extern "C" {
+            fn cblas_sgemm(
+                layout: i32,
+                trans_a: i32,
+                trans_b: i32,
+                m: i32,
+                n: i32,
+                k: i32,
+                alpha: f32,
+                a: *const f32,
+                lda: i32,
+                b: *const f32,
+                ldb: i32,
+                beta: f32,
+                c: *mut f32,
+                ldc: i32,
+            );
+        }
+        // SAFETY: nonempty dimensions fit the LP64 CBLAS integer ABI; the
+        // validated slices describe row-major X, W and accumulated Y. The
+        // output is exclusively borrowed and all leading dimensions match.
+        unsafe {
+            cblas_sgemm(
+                101,
+                111,
+                112,
+                rows as i32,
+                out_dim as i32,
+                in_dim as i32,
+                1.0,
+                x.as_ptr(),
+                in_dim as i32,
+                weight.as_ptr(),
+                in_dim as i32,
+                1.0,
+                y.as_mut_ptr(),
+                out_dim as i32,
+            );
+        }
+        return;
+    }
     let work = rows.saturating_mul(in_dim).saturating_mul(out_dim);
     if work >= PARALLEL_THRESHOLD && out_dim > 1 {
         // Block over the large `out_dim` axis (columns of `y`) so the rayon
@@ -879,6 +927,30 @@ mod tests {
     fn lcg(state: &mut u64) -> f32 {
         *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
         ((*state >> 40) as f32) / (1u64 << 24) as f32 - 0.5
+    }
+
+    #[cfg(feature = "openblas")]
+    #[test]
+    fn openblas_projection_preserves_layout_and_accumulation() {
+        for (rows, in_dim, out_dim) in [(32, 67, 37), (65, 33, 1)] {
+            let x: Vec<f32> = (0..rows * in_dim)
+                .map(|i| (i % 17) as f32 / 17.0 - 0.5)
+                .collect();
+            let weight: Vec<f32> = (0..out_dim * in_dim)
+                .map(|i| (i % 23) as f32 / 23.0 - 0.5)
+                .collect();
+            let mut output = vec![0.25; rows * out_dim];
+            input_mul_weight_transpose_add_into(&x, rows, in_dim, &weight, out_dim, &mut output);
+            for row in 0..rows {
+                for column in 0..out_dim {
+                    let expected = 0.25
+                        + (0..in_dim)
+                            .map(|i| x[row * in_dim + i] * weight[column * in_dim + i])
+                            .sum::<f32>();
+                    assert!((output[row * out_dim + column] - expected).abs() < 1e-5);
+                }
+            }
+        }
     }
 
     #[test]

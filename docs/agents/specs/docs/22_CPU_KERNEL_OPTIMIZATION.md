@@ -435,3 +435,40 @@ variation. A full-model faer experiment at 32 or more rows measured L64 B1
 231.9 ms and L8 B8 210.4 ms versus 220.2/211.3 ms with the existing kernel;
 its improvements to the host oracle did not carry over to the production
 tenferro path. Both changes were rejected and reverted.
+
+## Optional system OpenBLAS projections (2026-10-08)
+
+`cpu-kernels/openblas` links an installed **LP64** OpenBLAS (`libopenblas`)
+for the existing row-major `input_mul_weight_transpose_add_into` path when
+there are at least 32 rows and dimensions fit CBLAS integers. Smaller inputs
+keep the portable Rayon/matrixmultiply implementation. This is reached by
+Laya's tenferro GEMM/bias extension; it does not replace tenferro dispatch.
+All other CPU kernels retain their existing implementation. This feature is
+opt-in and requires the system library at build/run time; the default build
+has no BLAS linkage. Configure BLAS threads explicitly, for example:
+
+```sh
+OPENBLAS_NUM_THREADS=8 RAYON_NUM_THREADS=8 cargo run --release -p laya-infer --features cpu-kernels/openblas --example bench_laya_tenferro_gap -- "$LAYA_CHECKPOINT" 2 5
+```
+
+Same Ryzen/Linux setup as `21_SPEED_COMPARISON.md`, float32, eight Rayon
+threads, sequential runs, warmup 2 / median of 5. System OpenBLAS 0.3.26:
+
+| production cached Laya | portable baseline | OpenBLAS 8 | OpenBLAS 8 repeat | OpenBLAS 1 |
+|---|---:|---:|---:|---:|
+| L8 B1 | 105.3 ms | 103.0 ms | 105.9 ms | 103.5 ms |
+| L16 B1 | 116.9 ms | 114.3 ms | 124.8 ms | 114.4 ms |
+| L64 B1 | 225.0 ms | 216.9 ms | 215.1 ms | 618.4 ms |
+| L8 B8 | 216.6 ms | 201.6 ms | 201.7 ms | 599.3 ms |
+
+The 8-thread results improve L64/L8B8 by approximately 4%/7%; the 1-thread
+configuration is substantially slower. The row threshold excludes L8/L16 B1,
+so differences there are run variation, not provider speedups. The initial
+experiment replaced the column-major Jeff kernel instead; those runs did not
+test Laya's primary projection route and are excluded from this table.
+Sanitized benchmark reports, environment metadata and the exact temporary
+provider patch are in `fixtures/bench-openblas-cpu-2026-10-08/`. That patch
+predates the final feature guard and layout/accumulation regression test.
+The existing CPU and production checkpoint parity tests remain the correctness
+gates; these timing reports alone do not prove numerical parity or resolve
+issue #2's remaining gap versus Julia/Python.
