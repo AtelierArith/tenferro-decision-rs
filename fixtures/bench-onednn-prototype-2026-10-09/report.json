@@ -1,0 +1,15 @@
+{
+  "base_revision": "0b764d2",
+  "status": "Promising diagnostic only; not production implementation. Goal incomplete.",
+  "dtype": "F32",
+  "threads": 8,
+  "warmup": 5,
+  "iterations": 15,
+  "library": "oneDNN 3.1.1 Ubuntu noble package, isolated extraction, strict F32 math, inner_product_forward inference, sum post-op for accumulating projection and bias. No system installation or dependency changes.",
+  "accuracy": "Unmodified host reference tested both logits and action outputs with 2e-3 + abs(reference)*2e-5 tolerance. Max difference 0.0029296875. Micro double accumulation reference error under 1e-4.",
+  "memory": "Weights packed in roughly raw F32 size. Shared packed weights across token counts when memory descriptors match. Observed 6551444 KiB process RSS during first model run.",
+  "limitations": "Global diagnostic pointer cache assumes one checkpoint with stable weight allocations; replace with runtime-local owned preparation before production adoption. Same-session state and library allocations need lifecycle and error-path tests. L64 repeat 134.614ms is too close to previous Python 134.519ms to claim victory.",
+  "reproduce": "Compile bridge.cpp as a shared library with C++17 and supplied oneDNN includes/library. Supply library through LAYA_DNNL_DIAGNOSTIC_LIBRARY. Set OMP_NUM_THREADS=8, RAYON_NUM_THREADS=8, OMP_WAIT_POLICY=PASSIVE; benchmark release after applying diagnostic.patch. Link flags use local include/library paths; no paths recorded in source.",
+  "fresh_python": "Sequential fresh Python run with OMP_WAIT_POLICY=PASSIVE: L8 94.330ms, L64 152.262ms, L8 B8 146.680ms. Larger variation than prior Python baseline; repeat with default upstream OpenMP policy before claiming a stable win.",
+  "upstream_accuracy": "Both diagnostic runs compared directly against fresh upstream Python logits and action outputs for every shape. Maximum logit error 2.86102294921875e-6, maximum action error 0.00341796875; passes 2e-3 + abs(reference)*2e-5."
+}

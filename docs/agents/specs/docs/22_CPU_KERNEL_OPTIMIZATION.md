@@ -596,3 +596,34 @@ single diagnostic run, not a repeated production speedup. Microbenchmarks
 also validate token tails at lengths 1/3/7/8/9/16/64/65. Exact source, replay
 patch, raw samples and configuration are in
 [`bench-mkl-blocked-2026-10-09`](../../../../fixtures/bench-mkl-blocked-2026-10-09).
+
+## oneDNN prepared-projection prototype (2026-10-09)
+
+An isolated oneDNN 3.1.1 prototype uses strict F32 inner-product inference,
+reorders weights once, reuses compatible packed formats across sequence lengths,
+and uses a sum post-op to retain the existing accumulation/bias behavior. The
+packed weights stay approximately the size of raw F32 weights, unlike the
+blocked MKL experiment. Both runs use eight CPU threads, five warmups, 15 samples
+and check logits plus action outputs against the unaffected host reference.
+
+| shape | first prototype run | repeat | prior Python run |
+|---|---:|---:|---:|
+| L8 B1 | 68.334 ms | 69.965 ms | 87.244 ms |
+| L64 B1 | 132.345 ms | 134.614 ms | 134.519 ms |
+| L8 B8 | 130.764 ms | 134.057 ms | 134.558 ms |
+
+This is promising for short sequences, but the longer-shape margins are too
+small to establish a Python speed win. Maximum host-reference error was
+0.0029296875, within `2e-3 + abs(reference) * 2e-5`. The global diagnostic
+pointer cache and supplied C++ library are not production infrastructure;
+proper runtime-local ownership, cache accounting, error handling and tests
+are required before adoption. The diagnostic hooks were removed. Source,
+raw samples, configuration and replay patch are in
+[`bench-onednn-prototype-2026-10-09`](../../../../fixtures/bench-onednn-prototype-2026-10-09).
+
+A subsequent Python run with `OMP_WAIT_POLICY=PASSIVE` measured 94.330 /
+152.262 / 146.680 ms for those three shapes. Both prototype runs also passed
+direct upstream comparisons of logits and action outputs at every shape
+(maximum errors 2.862e-6 and 0.003418, respectively). Python timing differs
+materially from the earlier baseline, so default-policy Python runs and
+repeated production comparisons remain necessary for the speed target.

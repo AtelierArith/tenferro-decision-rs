@@ -1,0 +1,69 @@
+diff --git a/crates/cpu-kernels/src/lib.rs b/crates/cpu-kernels/src/lib.rs
+index f3b6ed8..574fc92 100644
+--- a/crates/cpu-kernels/src/lib.rs
++++ b/crates/cpu-kernels/src/lib.rs
+@@ -11,6 +11,7 @@
+ #![allow(clippy::approx_constant, clippy::excessive_precision)]
+ 
+ use rayon::prelude::*;
++pub mod dnnl_diagnostic;
+ 
+ /// Below this many multiply-adds the threading overhead is not worth it.
+ const PARALLEL_THRESHOLD: usize = 1 << 18;
+@@ -141,6 +142,7 @@ pub fn input_mul_weight_transpose_add_into(
+     if rows == 0 || out_dim == 0 || in_dim == 0 {
+         return;
+     }
++    if dnnl_diagnostic::run(x, rows, in_dim, weight, out_dim, y) { return; }
+     // y ← x · weightᵀ + y. `weightᵀ` is `(in_dim, out_dim)` with row stride 1
+     // (the `in_dim` axis of the row-major `(out_dim, in_dim)` storage).
+     #[cfg(feature = "openblas")]
+diff --git a/crates/laya-infer/examples/bench_laya_tenferro_gap.rs b/crates/laya-infer/examples/bench_laya_tenferro_gap.rs
+index f51d078..74db6e5 100644
+--- a/crates/laya-infer/examples/bench_laya_tenferro_gap.rs
++++ b/crates/laya-infer/examples/bench_laya_tenferro_gap.rs
+@@ -62,6 +62,7 @@ fn main() {
+     for (length, batch) in [(8usize, 1usize), (16, 1), (64, 1), (8, 8)] {
+         let (ids, mask, marker_pos, marker_mask, qtype) = make_batch(length, batch);
+ 
++        cpu_kernels::dnnl_diagnostic::ENABLED.store(false, std::sync::atomic::Ordering::Relaxed);
+         for _ in 0..warmup {
+             let _ = forward_reference(
+                 &checkpoint.encoder,
+@@ -93,6 +94,7 @@ fn main() {
+         }
+ 
+         let run_te = |cache: &mut TensorCache| {
++            cpu_kernels::dnnl_diagnostic::ENABLED.store(true, std::sync::atomic::Ordering::Relaxed);
+             let t = Instant::now();
+             let output = runtime
+                 .with_eager_session(|session| {
+@@ -124,6 +126,7 @@ fn main() {
+             native_output = Some(output);
+         }
+         let (logits, action) = native_output.expect("at least one measured forward");
++        cpu_kernels::dnnl_diagnostic::ENABLED.store(false, std::sync::atomic::Ordering::Relaxed);
+         let reference = forward_reference(
+             &checkpoint.encoder,
+             &checkpoint.agent,
+diff --git a/crates/cpu-kernels/src/dnnl_diagnostic.rs b/crates/cpu-kernels/src/dnnl_diagnostic.rs
+new file mode 100644
+index 0000000..46aab3b
+--- /dev/null
++++ b/crates/cpu-kernels/src/dnnl_diagnostic.rs
+@@ -0,0 +1,15 @@
++//! Temporary supplied-library diagnostic; not a production API.
++use std::ffi::{CString,c_char,c_void};
++use std::sync::{OnceLock,atomic::{AtomicBool,Ordering}};
++#[link(name="dl")]
++unsafe extern "C" {fn dlopen(name:*const c_char,flags:i32)->*mut c_void;fn dlsym(handle:*mut c_void,name:*const c_char)->*mut c_void;}
++type Run=unsafe extern "C" fn(*const f32,i32,i32,*const f32,i32,*mut f32)->i32;
++static RUN:OnceLock<Option<Run>>=OnceLock::new();
++pub static ENABLED:AtomicBool=AtomicBool::new(false);
++pub fn run(x:&[f32],rows:usize,input:usize,w:&[f32],output:usize,y:&mut[f32])->bool {
++ if !ENABLED.load(Ordering::Relaxed){return false;}
++ let run=RUN.get_or_init(||{let path=CString::new(std::env::var("LAYA_DNNL_DIAGNOSTIC_LIBRARY").ok()?).unwrap();let h=unsafe{dlopen(path.as_ptr(),2)};assert!(!h.is_null());let p=unsafe{dlsym(h,c"diagnostic_run".as_ptr())};assert!(!p.is_null());Some(unsafe{std::mem::transmute::<*mut c_void,Run>(p)})});
++ let Some(run)=run else{return false;};
++ assert!([rows,input,output].iter().all(|n|*n<=i32::MAX as usize));
++ assert_eq!(unsafe{run(x.as_ptr(),rows as i32,input as i32,w.as_ptr(),output as i32,y.as_mut_ptr())},0);true
++}
