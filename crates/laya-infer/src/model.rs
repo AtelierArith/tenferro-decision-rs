@@ -986,7 +986,7 @@ fn tensor_col(
     shape: Vec<usize>,
     data: &[f32],
 ) -> tenferro_ad::Result<EagerTensor> {
-    session.constant_from(Tensor::from_vec_col_major(shape, data.to_vec())?)
+    session.constant_from_host(Tensor::from_vec_col_major(shape, data.to_vec())?)
 }
 
 fn tensor_col_i64(
@@ -994,7 +994,7 @@ fn tensor_col_i64(
     shape: Vec<usize>,
     data: &[i64],
 ) -> tenferro_ad::Result<EagerTensor> {
-    session.constant_from(Tensor::from_vec_col_major(shape, data.to_vec())?)
+    session.constant_from_host(Tensor::from_vec_col_major(shape, data.to_vec())?)
 }
 
 fn tensor_bool(
@@ -1002,7 +1002,7 @@ fn tensor_bool(
     shape: Vec<usize>,
     data: &[bool],
 ) -> tenferro_ad::Result<EagerTensor> {
-    session.constant_from(Tensor::from_vec_col_major(shape, data.to_vec())?)
+    session.constant_from_host(Tensor::from_vec_col_major(shape, data.to_vec())?)
 }
 
 /// Reusable weight-tensor cache for the eager session.
@@ -1147,7 +1147,7 @@ fn relu_tensor(
     session: &mut EagerSession<'_>,
     x: &EagerTensor,
 ) -> tenferro_ad::Result<EagerTensor> {
-    let zero = session.constant_from(Tensor::from_vec_col_major(vec![], vec![0.0f32])?)?;
+    let zero = session.constant_from_host(Tensor::from_vec_col_major(vec![], vec![0.0f32])?)?;
     session.maximum(x, &zero)
 }
 

@@ -96,8 +96,8 @@ fn rotate_pair_half(
     let target = first.shape().to_vec();
     let dims = [rank - 2, rank - 1];
 
-    let cos = session.constant_from(table(x.dtype(), &cos, vec![seq, half])?)?;
-    let sin = session.constant_from(table(x.dtype(), &sin, vec![seq, half])?)?;
+    let cos = session.constant_from_host(table(x.dtype(), &cos, vec![seq, half])?)?;
+    let sin = session.constant_from_host(table(x.dtype(), &sin, vec![seq, half])?)?;
     let cos = session.broadcast_in_dim(&cos, &target, &dims)?;
     let sin = session.broadcast_in_dim(&sin, &target, &dims)?;
 

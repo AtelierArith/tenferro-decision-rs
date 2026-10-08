@@ -482,7 +482,7 @@ fn host_to_tensor(
             col[r + c * rows] = row_major[r * cols + c];
         }
     }
-    session.constant_from(tenferro_ad::Tensor::from_vec_col_major(
+    session.constant_from_host(tenferro_ad::Tensor::from_vec_col_major(
         vec![rows, cols],
         col,
     )?)
@@ -560,7 +560,7 @@ fn full_attention_tenferro(
 
     let merged = if x.dtype() == tenferro_tensor::DType::F32 {
         // Fused RMSNorm ×2 + partial RoPE ×2 + causal masked attention + gate.
-        let active = session.constant_from(tenferro_ad::Tensor::from_vec_col_major(
+        let active = session.constant_from_host(tenferro_ad::Tensor::from_vec_col_major(
             vec![length],
             mask.to_vec(),
         )?)?;
@@ -607,7 +607,7 @@ fn full_attention_tenferro(
                     col[r + c * length] = keep[r * length + c];
                 }
             }
-            session.constant_from(tenferro_ad::Tensor::from_vec_col_major(
+            session.constant_from_host(tenferro_ad::Tensor::from_vec_col_major(
                 vec![length, length],
                 col,
             )?)?
@@ -704,13 +704,13 @@ pub fn forward_tenferro_cached_kernel(
     // the orientation the whole forward stays in — rms_norm normalizes the last
     // axis and `linear` contracts the last axis, so no per-layer transposes.
     let table = cache.col_major(session, vec![weights.vocab, cfg.hidden], &weights.embedding)?;
-    let ids_t = session.constant_from(tenferro_ad::Tensor::from_vec_col_major(
+    let ids_t = session.constant_from_host(tenferro_ad::Tensor::from_vec_col_major(
         vec![length],
         ids.to_vec(),
     )?)?;
     let mut hidden = embedding::embedding(session, &table, &ids_t)?; // (length, hidden)
     // Share the request mask across all Delta layers and both formulations.
-    let mask_t = session.constant_from(tenferro_ad::Tensor::from_vec_col_major(
+    let mask_t = session.constant_from_host(tenferro_ad::Tensor::from_vec_col_major(
         vec![length],
         mask.to_vec(),
     )?)?;
@@ -916,10 +916,11 @@ mod tests {
                     // The forward now works on `(length, hidden)`; the host `x` is
                     // row-major `(hidden, length)`, which is exactly the
                     // column-major `(length, hidden)` buffer.
-                    let x_t = session.constant_from(tenferro_ad::Tensor::from_vec_col_major(
-                        vec![length, cfg.hidden],
-                        x.to_vec(),
-                    )?)?;
+                    let x_t =
+                        session.constant_from_host(tenferro_ad::Tensor::from_vec_col_major(
+                            vec![length, cfg.hidden],
+                            x.to_vec(),
+                        )?)?;
                     let mut cache = TensorCache::new();
                     let out = full_attention_tenferro(
                         session, &mut cache, &w, &cfg, &x_t, &mask, length,

@@ -13,7 +13,7 @@ pub(crate) fn scalar_like(
         DType::F32 => Tensor::from_vec_col_major(vec![], vec![value as f32])?,
         dtype => return Err(unsupported(dtype, "floating point")),
     };
-    session.constant_from(tensor)
+    session.constant_from_host(tensor)
 }
 
 /// Insert a singleton at `axis` and broadcast back to `target`.
