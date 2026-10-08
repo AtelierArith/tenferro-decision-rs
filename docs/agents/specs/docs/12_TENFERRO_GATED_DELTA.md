@@ -372,6 +372,16 @@ adapter twice with one loaded module, including masks, grouped heads, token
 boundaries and key widths 1/7/256; the native full-layer gate separately covers
 key width 257. Neither gate counts as parity without explicit hardware execution.
 
+The `delta_layer_cuda_recurrent_cached` variant accepts and returns a private
+`CudaRecurrentWorkspace`; passing `None` allocates it on the first request.
+Subsequent calls move the same three buffers through the pending owner and
+recover them only after stream completion. A device copy of the output is
+registered in eager, so later reuse cannot overwrite a previously returned
+result. The raw full-layer gate uses different inputs for the two calls and
+compares both outputs after reuse. This implements scratch-buffer reuse for
+matching shapes/runtime inside the admitted callback; raw operand copies,
+the intermediate completion barrier and production cache integration remain.
+
 `cuda::CudaStageRun` is a raw-session-scoped pending owner. Its unsafe
 `enqueue` takes the module, eight input tensors and three workspace tensors
 before launch; callers still guarantee disjoint allocations and no conflicting

@@ -5,7 +5,7 @@
 
 use tenferro_ad::{DType, EagerSession, EagerTensor, Result};
 use tenferro_gpu::cuda::with_cuda_exec_session;
-use tenferro_tensor::Tensor;
+use tenferro_tensor::{Tensor, TensorRead, TypedTensor};
 
 use crate::{
     GatedDeltaConfig, GatedDeltaTensorWeights,
@@ -13,6 +13,16 @@ use crate::{
     layer::invalid_weights,
     tensor_layer::linear_col,
 };
+
+/// Completed, exclusively owned CUDA scratch tensors for reuse at one shape.
+///
+/// Fields stay private so callers cannot alias mutable workspace buffers.
+/// The cached entry point validates shape/runtime through the raw adapter.
+pub struct CudaRecurrentWorkspace {
+    convolved: TypedTensor<f32>,
+    scanned: TypedTensor<f32>,
+    output: Tensor,
+}
 
 /// Run the f32 CUDA recurrent formulation with prepared device weights/mask.
 ///
@@ -33,6 +43,27 @@ pub fn delta_layer_cuda_recurrent(
     mask: &EagerTensor,
     kernels: CudaKernels,
 ) -> Result<(CudaKernels, EagerTensor)> {
+    let (kernels, _, output) =
+        delta_layer_cuda_recurrent_cached(session, cfg, weights, x, mask, kernels, None)?;
+    Ok((kernels, output))
+}
+
+/// Run the recurrent adapter with a workspace returned by an earlier call.
+///
+/// Pass `None` to allocate once, then retain the returned workspace and module
+/// within the admitted callback. The workspace must match shape/runtime. Raw
+/// operands still use device copies, and the raw-stage completion barrier
+/// remains. The output is copied on device before eager registration, so a
+/// later workspace reuse cannot overwrite the returned tensor.
+pub fn delta_layer_cuda_recurrent_cached(
+    session: &mut EagerSession<'_>,
+    cfg: &GatedDeltaConfig,
+    weights: &GatedDeltaTensorWeights,
+    x: &EagerTensor,
+    mask: &EagerTensor,
+    kernels: CudaKernels,
+    workspace: Option<CudaRecurrentWorkspace>,
+) -> Result<(CudaKernels, CudaRecurrentWorkspace, EagerTensor)> {
     let invalid = |message| {
         tenferro_ad::Error::TensorRuntime(tenferro_tensor::Error::invalid_argument(
             "delta_layer_cuda_recurrent",
@@ -117,15 +148,26 @@ pub fn delta_layer_cuda_recurrent(
         .map_err(|failure| failure.into_parts().1)?;
     let channels = 2 * cfg.key_heads * cfg.key_dim + cfg.value_heads * cfg.value_dim;
     let width = cfg.value_heads * cfg.value_dim;
-    let (kernels, output) = with_cuda_exec_session(session.backend_session(), |cuda| {
+    let (kernels, workspace) = with_cuda_exec_session(session.backend_session(), |cuda| {
         cuda.with_raw("cuda_recurrent_layer", |raw| {
-            let outputs = [
-                raw.alloc_output::<f32>(&[*length, channels])?,
-                raw.alloc_output::<f32>(&[*length, width])?,
-                raw.alloc_output::<f32>(&[*length, width])?,
-            ];
+            let outputs = if let Some(workspace) = workspace {
+                [
+                    workspace.convolved,
+                    workspace.scanned,
+                    workspace
+                        .output
+                        .into_typed::<f32>()
+                        .map_err(|failure| failure.into_parts().1)?,
+                ]
+            } else {
+                [
+                    raw.alloc_output::<f32>(&[*length, channels])?,
+                    raw.alloc_output::<f32>(&[*length, width])?,
+                    raw.alloc_output::<f32>(&[*length, width])?,
+                ]
+            };
             // SAFETY: duplicate_value provides distinct owning device copies;
-            // workspace allocations are fresh and disjoint. No handles escape
+            // workspace allocations are exclusively owned and disjoint. No handles escape
             // before the pending owner completes this stream.
             let run = unsafe {
                 CudaStageRun::enqueue(
@@ -137,13 +179,23 @@ pub fn delta_layer_cuda_recurrent(
                     cfg.eps,
                 )?
             };
-            let (kernels, _, [_, _, output]) = run.finish()?;
-            Ok((kernels, Tensor::from_typed(output)))
+            let (kernels, _, [convolved, scanned, output]) = run.finish()?;
+            Ok((
+                kernels,
+                CudaRecurrentWorkspace {
+                    convolved,
+                    scanned,
+                    output: Tensor::from_typed(output),
+                },
+            ))
         })
     })
     .expect("CUDA session checked above")?;
+    let output = session
+        .backend_session()
+        .to_contiguous_read(TensorRead::from_tensor(&workspace.output))?;
     let output = session.constant_from(output)?;
     let output = session.transpose(&output, &[1, 0])?;
     let output = linear_col(session, &output, &weights.out_proj)?;
-    Ok((kernels, output))
+    Ok((kernels, workspace, output))
 }

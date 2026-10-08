@@ -652,6 +652,21 @@ fn full_layer_gpu_parity(raw_recurrent: bool) {
                     })
                     .collect();
                 let expected = delta_layer_reference(&cfg, &weights, &x, &mask).unwrap();
+                let result_length = if raw_recurrent { 2 * length } else { length };
+                let expected = if raw_recurrent {
+                    let first_x: Vec<_> = x.iter().map(|v| v * 0.5).collect();
+                    let first = delta_layer_reference(&cfg, &weights, &first_x, &mask).unwrap();
+                    (0..cfg.hidden)
+                        .flat_map(|h| {
+                            first[h * length..(h + 1) * length]
+                                .iter()
+                                .chain(&expected[h * length..(h + 1) * length])
+                                .copied()
+                        })
+                        .collect::<Vec<_>>()
+                } else {
+                    expected
+                };
                 let mut column_major = vec![0.0; x.len()];
                 for h in 0..cfg.hidden {
                     for t in 0..length {
@@ -667,7 +682,7 @@ fn full_layer_gpu_parity(raw_recurrent: bool) {
                         let mask = session
                             .constant_from_host(Tensor::from_vec_col_major(vec![length], mask)?)?;
                         let result = if raw_recurrent {
-                            use tenferro_gated_delta::cuda_layer::delta_layer_cuda_recurrent;
+                            use tenferro_gated_delta::cuda_layer::delta_layer_cuda_recurrent_cached;
                             let arch = std::env::var("TENFERRO_CUDA_ARCH")
                                 .unwrap_or_else(|_| "compute_70".into());
                             let kernels =
@@ -677,13 +692,22 @@ fn full_layer_gpu_parity(raw_recurrent: bool) {
                                     })
                                 })
                                 .expect("CUDA execution session")?;
-                            let (kernels, _) = delta_layer_cuda_recurrent(
-                                session, &cfg, &prepared, &x, &mask, kernels,
+                            let first_x = session.scale_real(&x, 0.5)?;
+                            let (kernels, workspace, first) = delta_layer_cuda_recurrent_cached(
+                                session, &cfg, &prepared, &first_x, &mask, kernels, None,
                             )?;
-                            let (_, result) = delta_layer_cuda_recurrent(
-                                session, &cfg, &prepared, &x, &mask, kernels,
+                            let (_, _, result) = delta_layer_cuda_recurrent_cached(
+                                session,
+                                &cfg,
+                                &prepared,
+                                &x,
+                                &mask,
+                                kernels,
+                                Some(workspace),
                             )?;
-                            result
+                            // Read both results only after reuse: the first output
+                            // must not alias the workspace overwritten by the second.
+                            session.concatenate(&[&first, &result], 1)?
                         } else {
                             delta_layer_tenferro_prepared_mask(session, &cfg, &prepared, &x, &mask)?
                         };
@@ -703,9 +727,9 @@ fn full_layer_gpu_parity(raw_recurrent: bool) {
                 let host = download_tensor(backend.runtime(), &output).unwrap();
                 let actual = host.as_slice::<f32>().unwrap();
                 for h in 0..cfg.hidden {
-                    for t in 0..length {
+                    for t in 0..result_length {
                         let actual = actual[h + cfg.hidden * t];
-                        let expected = expected[h * length + t];
+                        let expected = expected[h * result_length + t];
                         assert!(actual.is_finite());
                         assert!(
                             (actual - expected).abs() < 5e-3,
