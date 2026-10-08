@@ -287,3 +287,16 @@ much slower (618.4/599.3 ms), so thread settings matter. The optional provider
 uses the existing tenferro extension path and requires an installed LP64
 OpenBLAS; the default remains portable. Exact conditions and report links are
 in `22_CPU_KERNEL_OPTIMIZATION.md`.
+
+
+On 2026-10-09 JST, the portable CPU path was remeasured after the explicit
+host-upload and weight-cache registration fixes at `6601a11` (eight Rayon
+threads, two warmups, median of five iterations). Laya L64 B1 measured
+192.8 ms and 209.8 ms on repeat; L8 B8 measured 182.0/182.8 ms. L8 B1 was
+106.0/103.7 ms and L16 B1 was 108.4/110.0 ms. Reports, including the host
+oracle and environment metadata, are in
+[`bench-explicit-upload-cpu-2026-10-09`](../../../../fixtures/bench-explicit-upload-cpu-2026-10-09).
+These runs show no observed slowdown relative to the historical portable
+225.0/216.6 ms L64/batch report, but do not isolate the registration changes:
+the host oracle also ran faster, and no contemporaneous old-revision baseline
+was measured. The Python/Julia Laya gap remains unresolved.
