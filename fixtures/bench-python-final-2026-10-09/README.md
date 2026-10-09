@@ -24,6 +24,7 @@ env -u OMP_WAIT_POLICY OMP_NUM_THREADS=8 "$PYTHON_BIN" tools/bench_python_real.p
 `jeff-rust.json` omits the machine-specific checkpoint path from the original
 output; timings and logits are unchanged. Laya's raw results and two-run
 comparison are in the adjacent `bench-onednn-owned-2026-10-09` directory.
-Rust metadata currently identifies the parent revision; measurements include
-this uncommitted owned-provider worktree. A final validation record must identify
-the committed implementation before claiming completion.
+Rust metadata identifies the parent revision; measurements include the
+owned-provider worktree committed as the `implementation_revision` in
+[`validation.json`](validation.json). That record identifies the implementation,
+comparison evidence, required checks and remaining scope limitations.

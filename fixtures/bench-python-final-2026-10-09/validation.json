@@ -1,0 +1,48 @@
+{
+  "status": "verified",
+  "implementation_revision": "3659d958e496a5b5ff1996708a51a101f1fba2d8",
+  "measurement_source_note": "Rust raw metadata identifies parent 96d71c6; measurements were made from the worktree subsequently committed as implementation_revision. Rust computation sources were unchanged between final checks, repeat measurements, and this commit.",
+  "scope": "Prepared CPU F32 inference, eight threads; Laya optional oneDNN3.1.1 feature and Jeff default HostOpt production path. No arbitrary-shape or other-device speed guarantee.",
+  "speed_evidence": [
+    "fixtures/bench-onednn-owned-2026-10-09/attention-python-comparison.json",
+    "fixtures/bench-python-final-2026-10-09/jeff-comparison.json"
+  ],
+  "evidence_sha256": {
+    "fixtures/bench-onednn-owned-2026-10-09/attention-python-comparison.json": "27391f4ceca449d622e64a2d7031f0debebb1b4de284d6fc6276f6d5ba574226",
+    "fixtures/bench-python-final-2026-10-09/jeff-comparison.json": "8b29547be0103bdd6d309a2b4d3c81583e06b2a91da733518c4244d079dd928a"
+  },
+  "gates": [
+    {
+      "command": "cargo fmt --all --check",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets -- -D warnings",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test --workspace",
+      "exit_code": 0,
+      "passed": 249,
+      "failed": 0,
+      "ignored": 3
+    },
+    {
+      "command": "cargo clippy --workspace --all-targets --features laya-infer/onednn -- -D warnings",
+      "exit_code": 0
+    },
+    {
+      "command": "cargo test --release -p cpu-kernels -p tenferro-ext -p tenferro-infer -p laya-infer --features laya-infer/onednn",
+      "exit_code": 0,
+      "passed": 102,
+      "failed": 0,
+      "ignored": 0
+    },
+    {
+      "command": "python3 -m py_compile tools/bench_python_real.py",
+      "exit_code": 0
+    }
+  ],
+  "correctness": "Every measured Laya marker/action output and all 255 Jeff logits agree with upstream Python within recorded tolerances. Actual Laya bundled Julia question/action reference passes. Default workspace ignores three checkpoint-dependent Jeff tests as declared in the repository; fresh upstream Python comparison covers the measured production HostOpt output.",
+  "limitations": "Laya L64 beats the faster measured Python median by less than 1 ms in the slower Rust run. Raw samples retain timing drift and rejected earlier candidates."
+}
