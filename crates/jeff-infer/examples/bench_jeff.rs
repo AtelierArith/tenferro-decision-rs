@@ -22,6 +22,7 @@ use tenferro_infer::TensorCache;
 const BASE: [i64; 8] = [2, 100, 1000, 2000, 3000, 4000, 5, 3];
 
 fn stats(mut samples: Vec<f64>) -> serde_json::Value {
+    let raw_samples = samples.clone();
     samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
     let n = samples.len();
     let median = if n % 2 == 1 {
@@ -34,6 +35,7 @@ fn stats(mut samples: Vec<f64>) -> serde_json::Value {
         "ms_min": samples.first().copied().unwrap_or(0.0),
         "ms_mean": samples.iter().sum::<f64>() / n as f64,
         "iterations": n,
+        "samples_ms": raw_samples,
     })
 }
 
@@ -79,6 +81,21 @@ fn main() {
             opt_samples.push(timer.elapsed().as_secs_f64() * 1000.0);
         }
         value["host_opt"] = stats(opt_samples);
+        let oracle = forward_reference(&cfg, &weights, &ids, &mask).unwrap();
+        let actual = forward_host_opt_with(&mut host_opt_ws, &cfg, &weights, &ids, &mask).unwrap();
+        assert_eq!(actual.len(), oracle.len());
+        let mut max_error = 0.0f32;
+        for (a, b) in actual.iter().zip(&oracle) {
+            assert!(a.is_finite() && b.is_finite());
+            let error = (a - b).abs();
+            assert!(
+                error <= 2e-4 + b.abs() * 2e-5,
+                "host-opt output error {error}"
+            );
+            max_error = max_error.max(error);
+        }
+        value["host_opt_logits"] = json!([actual]);
+        value["max_host_reference_output_error"] = json!(max_error);
         shapes.push(value);
     }
 

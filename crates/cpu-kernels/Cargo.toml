@@ -10,9 +10,14 @@ authors.workspace = true
 
 [features]
 default = []
+# Optional system oneDNN provider; portable kernels remain available.
+onednn = ["dep:cc"]
 # Links the system LP64 OpenBLAS library for wide Laya projection GEMMs.
 openblas = []
 
 [dependencies]
 matrixmultiply.workspace = true
 rayon.workspace = true
+
+[build-dependencies]
+cc = { version = "1.6", optional = true }

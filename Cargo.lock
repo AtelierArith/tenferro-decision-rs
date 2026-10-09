@@ -402,6 +402,7 @@ dependencies = [
 name = "cpu-kernels"
 version = "0.1.0"
 dependencies = [
+ "cc",
  "matrixmultiply",
  "rayon",
 ]

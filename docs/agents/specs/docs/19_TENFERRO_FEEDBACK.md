@@ -174,3 +174,16 @@ hardware because libcuda is absent.
 - The eager session surface covers the inference primitives (norm, activations,
   softmax, RoPE, attention).
 - Unsupported dtype/shape returns a typed error with no silent CPU fallback.
+
+
+## Prepared CPU library projection workaround (2026-10-09)
+
+The pinned eager path still lacks an exposed owned packed-weight CPU projection
+resource reusable across repeated model forwards. Recreating layouts and
+projection buffers is material at Laya's production sizes. The optional
+self-hosted `PreparedGemm` extension uses standard oneDNN primitives, owns packed
+weights independently of the runtime, and stores scratch in session caches.
+The implementation and lifetime/thread tests are in this repository; no pinned
+tenferro source or submodule is modified. Non-CPU backends retain the native
+composition. A future public tenferro preparation interface could replace this
+CPU-only provider while preserving model-level caching and independent outputs.

@@ -387,3 +387,38 @@ now records native raw samples and both marker/action outputs, and validates
 all measured native shapes against the host oracle. Python records action
 outputs as well as marker logits. See the new fixture directories linked in
 `22_CPU_KERNEL_OPTIMIZATION.md` for source, accuracy and measurement limits.
+
+
+## Original Python CPU comparison: owned provider (2026-10-09)
+
+Ryzen 9 PRO 8945HS, F32, eight threads, five warm-ups and 15 timed prepared
+forwards. Python uses clean upstream sources, PyTorch 2.14.1 CPU and
+Transformers 5.17.0. Model loading is excluded. Laya uses the optional
+`laya-infer/onednn` feature with oneDNN 3.1.1 and passive OpenMP waiting; Jeff
+uses the existing default HostOpt engine path. Python keeps its default OpenMP
+waiting policy with eight PyTorch threads. Benchmarks execute sequentially.
+
+| Model / shape | Rust median | Python median |
+|---|---:|---:|
+| Laya L8 B1 | 68.02 / 69.74 ms | 86.05 / 98.94 ms |
+| Laya L16 B1 | 77.22 / 75.78 ms | 106.80 ms |
+| Laya L64 B1 | 133.98 / 135.92 ms | 136.82 / 148.48 ms |
+| Laya L8 B8 | 130.31 / 129.83 ms | 137.64 / 148.27 ms |
+| Jeff L8 B1 | 108.16 / 108.29 ms | 131.31 ms |
+| Jeff L16 B1 | 109.91 / 109.11 ms | 143.49 ms |
+| Jeff L64 B1 | 172.99 / 169.74 ms | 196.17 ms |
+
+Rust values show two independent runs. Laya Python was repeated with L16 added.
+The L64 margin against the faster Python run is small; timing drift is visible.
+Earlier B8 runs before attention scratch reuse did not consistently win.
+Workspace formatting, all-target Clippy and tests passed; oneDNN-enabled
+workspace Clippy and related release tests also passed. These CPU results
+establish no GPU performance claim.
+
+Every Jeff output row contains 255 compared logits; maximum Python difference
+is 1.48e-5. Laya marker-logit differences are <=2.7e-6 and action-output
+differences <=0.00171. The latest Laya provider also passes the bundled Julia
+question/action reference with the actual checkpoint. Raw inputs, versions,
+samples and outputs are retained in
+[`bench-onednn-owned-2026-10-09`](../../../../fixtures/bench-onednn-owned-2026-10-09)
+and [`bench-python-final-2026-10-09`](../../../../fixtures/bench-python-final-2026-10-09).

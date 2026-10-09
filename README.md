@@ -198,6 +198,30 @@ M2 Max (12 cores, macOS 26, Julia 1.13.1, rustc 1.98.1, release build):
   Jeff "OpenBLAS" rows were really Accelerate/`BLAS=8`; update
   `QwenDecisionCore` (`Pkg.update`) to get the audited default.
 
+### Optional oneDNN CPU provider
+
+Build Laya with `--features onednn` to use the owned oneDNN F32 projection,
+GeGLU, and selected LayerNorm extension operations. Install the oneDNN headers
+and shared library in the build environment; for a nonstandard installation set
+`ONEDNN_INCLUDE_DIR` and `ONEDNN_LIB_DIR`, and make the shared library available
+to the runtime loader. This feature requires a C++17 compiler. The default build
+does not require oneDNN.
+
+For the measured eight-thread configuration, set `OMP_NUM_THREADS=8`,
+`RAYON_NUM_THREADS=8`, and `OMP_WAIT_POLICY=PASSIVE`. Packed weights are owned
+by the model's preparation cache; activation and aligned oneDNN scratch buffers
+are reused by the session. Primitives use user-provided scratch so sequential
+calls can move between threads. Arithmetic uses strict F32 library operations.
+Other backends continue to use the tenferro composition.
+
+Current evidence and raw samples are in
+[`fixtures/bench-onednn-owned-2026-10-09`](fixtures/bench-onednn-owned-2026-10-09).
+Two Rust runs beat measured original Python medians at all four Laya shapes;
+Jeff also wins at its three measured shapes. These results apply to the optional
+Laya feature and the default Jeff HostOpt path, and do not establish performance
+for other backends. See `docs/agents/specs/docs/21_SPEED_COMPARISON.md` for
+conditions, timing drift and correctness evidence.
+
 ### Jeff
 
 Checkpoint `mstrasser/Jeff-Qwen3.5-0.8B`. `Rust (opt)` is `host_opt`, the

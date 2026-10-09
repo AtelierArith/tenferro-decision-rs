@@ -7,7 +7,9 @@
 //! overhead). Entries are keyed by the host storage identity, so callers must
 //! keep the weight slices alive while the cache is in use.
 
+use std::any::{Any, TypeId};
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use tenferro_ad::{ContextId, EagerSession, EagerTensor, Result};
 use tenferro_tensor::{DType, Tensor};
@@ -18,6 +20,15 @@ pub struct TensorCache {
     weights: HashMap<WeightKey, EagerTensor>,
     scalars: HashMap<ScalarKey, EagerTensor>,
     scalar_runtime: Option<ContextId>,
+    prepared: HashMap<(TypeId, usize, usize, Vec<usize>), PreparedValue>,
+}
+
+#[derive(Clone)]
+struct PreparedValue(Arc<dyn Any + Send + Sync>);
+impl std::fmt::Debug for PreparedValue {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("PreparedValue")
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
@@ -42,12 +53,42 @@ impl TensorCache {
 
     /// The number of cached tensors.
     pub fn len(&self) -> usize {
-        self.weights.len() + self.scalars.len()
+        self.weights.len() + self.scalars.len() + self.prepared.len()
     }
 
     /// Whether the cache is empty.
     pub fn is_empty(&self) -> bool {
-        self.weights.is_empty() && self.scalars.is_empty()
+        self.weights.is_empty() && self.scalars.is_empty() && self.prepared.is_empty()
+    }
+
+    /// Reuse an owned host-weight preparation, keyed by type, source storage
+    /// identity and logical shape. As with weight tensors, keep the source
+    /// slice alive and immutable while this cache is in use. The prepared
+    /// value must own its resources and must not retain an eager runtime.
+    pub fn prepared_host<T: Any + Send + Sync>(
+        &mut self,
+        source: &[f32],
+        shape: &[usize],
+        create: impl FnOnce() -> Result<T>,
+    ) -> Result<Arc<T>> {
+        let key = (
+            TypeId::of::<T>(),
+            source.as_ptr() as usize,
+            source.len(),
+            shape.to_vec(),
+        );
+        if let Some(value) = self.prepared.get(&key) {
+            return Arc::clone(&value.0).downcast::<T>().map_err(|_| {
+                tenferro_ad::Error::TensorRuntime(tenferro_tensor::Error::invalid_argument(
+                    "TensorCache::prepared_host",
+                    "type",
+                    "prepared cache type mismatch",
+                ))
+            });
+        }
+        let value = Arc::new(create()?);
+        self.prepared.insert(key, PreparedValue(value.clone()));
+        Ok(value)
     }
 
     /// Cache a rank-zero floating constant in `like`'s dtype and runtime.
@@ -221,5 +262,59 @@ mod tests {
             })
             .unwrap()
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod prepared_tests {
+    use super::*;
+    #[test]
+    fn owned_preparations_are_keyed_by_type_storage_shape_and_shared_by_clones() {
+        let source = vec![1., 2., 3., 4.];
+        let other = source.clone();
+        let mut cache = TensorCache::new();
+        let first = cache
+            .prepared_host(&source, &[2, 2], || Ok(17usize))
+            .unwrap();
+        let again = cache
+            .prepared_host(&source, &[2, 2], || panic!("prepared twice"))
+            .unwrap();
+        assert!(Arc::ptr_eq(&first, &again));
+        assert!(Arc::ptr_eq(
+            &first,
+            &cache
+                .clone()
+                .prepared_host(&source, &[2, 2], || panic!("clone prepared twice"))
+                .unwrap()
+        ));
+        let different = cache
+            .prepared_host(&other, &[2, 2], || Ok(19usize))
+            .unwrap();
+        assert!(!Arc::ptr_eq(&first, &different));
+        let reshaped = cache.prepared_host(&source, &[4], || Ok(23usize)).unwrap();
+        assert_eq!(*reshaped, 23);
+        let typed = cache
+            .prepared_host(&source, &[2, 2], || Ok(String::from("owned")))
+            .unwrap();
+        assert_eq!(&*typed, "owned");
+        assert_eq!(cache.len(), 4);
+        drop(cache);
+        assert_eq!(*first, 17);
+    }
+    #[test]
+    fn preparation_errors_do_not_populate_the_cache() {
+        let source = [1.];
+        let mut cache = TensorCache::new();
+        let result = cache.prepared_host::<usize>(&source, &[1], || {
+            Err(tenferro_ad::Error::TensorRuntime(
+                tenferro_tensor::Error::invalid_argument("test", "prepare", "failed"),
+            ))
+        });
+        assert!(result.is_err());
+        assert!(cache.is_empty());
+        assert_eq!(
+            *cache.prepared_host(&source, &[1], || Ok(7usize)).unwrap(),
+            7
+        );
     }
 }

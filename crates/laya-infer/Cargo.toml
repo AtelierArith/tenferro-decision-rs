@@ -10,6 +10,7 @@ authors.workspace = true
 
 [features]
 default = []
+onednn = ["tenferro-ext/onednn"]
 hub = ["dep:hf-fetch"]
 
 [dependencies]

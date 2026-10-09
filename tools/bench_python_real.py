@@ -42,7 +42,7 @@ def main():
         if args.model == "laya":
             import laya
             model = laya.load(str(checkpoint), device="cpu", backend="eager").model.eval()
-            shapes = ((8, 1), (64, 1), (8, 8))
+            shapes = ((8, 1), (16, 1), (64, 1), (8, 8))
         else:
             from jeff.models import load_decision_model
             from jeff.model import PreparedBatch

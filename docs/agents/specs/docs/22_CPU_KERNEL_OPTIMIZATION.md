@@ -627,3 +627,24 @@ direct upstream comparisons of logits and action outputs at every shape
 (maximum errors 2.862e-6 and 0.003418, respectively). Python timing differs
 materially from the earlier baseline, so default-policy Python runs and
 repeated production comparisons remain necessary for the speed target.
+
+
+## Owned provider after the oneDNN prototype (2026-10-09)
+
+The optional provider replaces the diagnostic global pointer cache with
+model-owned packed weights and bounded shape plans. A typed host-preparation
+cache shares these resources across tensor-cache clones without retaining the
+runtime. Session workspaces reuse expanded projection outputs, aligned native
+scratch, and attention head buffers. Readouts own their output storage.
+
+Projection, erf GELU, multiplication and selected LayerNorm execute through
+standard strict-F32 oneDNN primitives in tenferro extension ops. Dense layer
+preparation uses owned packed data, not borrowed checkpoint pointers. User
+scratchpad mode permits sequential thread migration. Tests cover thread moves,
+plan eviction, current input/scale/bias, workspace growth and retained outputs.
+The default build remains independent of oneDNN, and other backends retain the
+tenferro composition. The pinned tenferro dependency is unchanged.
+
+Fresh upstream-Python results and pending completion gates are recorded in
+`21_SPEED_COMPARISON.md`; raw diagnostic and full-model evidence is retained in
+`fixtures/bench-onednn-owned-2026-10-09`.

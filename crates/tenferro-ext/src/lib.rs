@@ -266,3 +266,8 @@ fn erf_f64(x: f64) -> f64 {
         * t;
     sign * (1.0 - poly * (-x * x).exp())
 }
+
+#[cfg(feature = "onednn")]
+mod prepared_gemm;
+#[cfg(feature = "onednn")]
+pub use prepared_gemm::{EagerSessionPreparedGemmExt, PreparedGemm};

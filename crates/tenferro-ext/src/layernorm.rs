@@ -156,6 +156,69 @@ fn execute_layernorm_in_session(
     };
 
     let mut y = vec![0.0f32; d * cols];
+    #[cfg(feature = "onednn")]
+    if d == 1024
+        && cols >= 16
+        && f32::from_bits(op.eps_bits).is_finite()
+        && f32::from_bits(op.eps_bits) > 0.
+    {
+        use cpu_kernels::prepared_projection::{PreparedLayerNorm, ProjectionWorkspace};
+        use std::collections::HashMap;
+        type Key = (usize, usize, u32, bool);
+        type Plans = HashMap<Key, PreparedLayerNorm>;
+        let key =
+            tenferro_runtime::ExtensionCacheKey::new(LAYER_NORM_FF_FAMILY_ID, "onednn_plans", 0);
+        let workspace_key =
+            tenferro_runtime::ExtensionCacheKey::new(LAYER_NORM_FF_FAMILY_ID, "onednn_scratch", 0);
+        if _caches.get::<Plans>(&key).is_none() {
+            _caches.put_with_retained_bytes(key, Plans::new(), |p| {
+                p.capacity()
+                    .saturating_mul(std::mem::size_of::<(Key, PreparedLayerNorm)>())
+            });
+        }
+        if _caches.get::<ProjectionWorkspace>(&workspace_key).is_none() {
+            _caches.put_with_retained_bytes(
+                workspace_key,
+                ProjectionWorkspace::default(),
+                ProjectionWorkspace::retained_bytes,
+            );
+        }
+        // Take workspace out briefly to borrow plans independently. Always
+        // restore it, including execution errors; neither entry owns a runtime.
+        let mut workspace = std::mem::take(
+            _caches
+                .get_mut::<ProjectionWorkspace>(&workspace_key)
+                .ok_or_else(|| tensor_error("cache", "normalization workspace unavailable"))?,
+        );
+        let result = (|| {
+            let plans = _caches
+                .get_mut::<Plans>(&key)
+                .ok_or_else(|| tensor_error("cache", "normalization plans unavailable"))?;
+            let shape_key = (cols, d, op.eps_bits, op.with_bias);
+            if !plans.contains_key(&shape_key) {
+                if plans.len() == 32 {
+                    let oldest = *plans.keys().next().unwrap();
+                    plans.remove(&oldest);
+                }
+                let plan =
+                    PreparedLayerNorm::new(cols, d, f32::from_bits(op.eps_bits), op.with_bias)
+                        .map_err(|e| tensor_error("plan", e))?;
+                plans.insert(shape_key, plan);
+            }
+            plans
+                .get_mut(&shape_key)
+                .unwrap()
+                .run(x_data, weight_data, bias_data, &mut y, &mut workspace)
+                .map_err(|e| tensor_error("execution", e))
+        })();
+        _caches.put_with_retained_bytes(
+            workspace_key,
+            workspace,
+            ProjectionWorkspace::retained_bytes,
+        );
+        result?;
+        return Ok(vec![Tensor::from_vec_col_major(shape, y)?]);
+    }
     cpu_kernels::layer_norm_feature_first_into(
         x_data,
         d,
@@ -254,61 +317,61 @@ mod tests {
 
     #[test]
     fn layernorm_ff_matches_naive() {
-        let (d, l, b) = (5usize, 3usize, 2usize);
-        let eps = 1e-5f32;
-        let mut state = 7u64;
-        let x: Vec<f32> = (0..d * l * b).map(|_| lcg(&mut state)).collect();
-        let weight: Vec<f32> = (0..d).map(|_| lcg(&mut state)).collect();
-        let bias: Vec<f32> = (0..d).map(|_| lcg(&mut state)).collect();
+        for (d, l, b) in [(5usize, 3usize, 2usize), (1024, 16, 1), (1024, 8, 8)] {
+            let eps = 1e-5f32;
+            let mut state = 7u64;
+            let x: Vec<f32> = (0..d * l * b).map(|_| lcg(&mut state)).collect();
+            let weight: Vec<f32> = (0..d).map(|_| lcg(&mut state)).collect();
+            let bias: Vec<f32> = (0..d).map(|_| lcg(&mut state)).collect();
 
-        let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
-        let run = |bias_in: Option<Vec<f32>>| -> Vec<f32> {
-            runtime
-                .with_eager_session(|session| {
-                    let x_t = session
-                        .constant_from(Tensor::from_vec_col_major(vec![d, l, b], x.clone())?)?;
-                    let w_t = session
-                        .constant_from(Tensor::from_vec_col_major(vec![d], weight.clone())?)?;
-                    let b_t =
-                        match &bias_in {
+            let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+            let run = |bias_in: Option<Vec<f32>>| -> Vec<f32> {
+                runtime
+                    .with_eager_session(|session| {
+                        let x_t = session
+                            .constant_from(Tensor::from_vec_col_major(vec![d, l, b], x.clone())?)?;
+                        let w_t = session
+                            .constant_from(Tensor::from_vec_col_major(vec![d], weight.clone())?)?;
+                        let b_t = match &bias_in {
                             Some(bias) => Some(session.constant_from(
                                 Tensor::from_vec_col_major(vec![d], bias.clone())?,
                             )?),
                             None => None,
                         };
-                    session.layer_norm_feature_first(&x_t, &w_t, b_t.as_ref(), eps)
-                })
-                .unwrap()
-                .unwrap()
-                .value()
-                .unwrap()
-                .as_slice::<f32>()
-                .unwrap()
-                .to_vec()
-        };
+                        session.layer_norm_feature_first(&x_t, &w_t, b_t.as_ref(), eps)
+                    })
+                    .unwrap()
+                    .unwrap()
+                    .value()
+                    .unwrap()
+                    .as_slice::<f32>()
+                    .unwrap()
+                    .to_vec()
+            };
 
-        for bias_in in [None, Some(bias.clone())] {
-            let got = run(bias_in.clone());
-            let mut want = vec![0.0f32; d * l * b];
-            for c in 0..l * b {
-                let col = &x[c * d..(c + 1) * d];
-                let mean = col.iter().sum::<f32>() / d as f32;
-                let var = col.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / d as f32;
-                let inv = 1.0 / (var + eps).sqrt();
-                for i in 0..d {
-                    let mut value = (col[i] - mean) * inv * weight[i];
-                    if let Some(bias) = &bias_in {
-                        value += bias[i];
+            for bias_in in [None, Some(bias.clone())] {
+                let got = run(bias_in.clone());
+                let mut want = vec![0.0f32; d * l * b];
+                for c in 0..l * b {
+                    let col = &x[c * d..(c + 1) * d];
+                    let mean = col.iter().sum::<f32>() / d as f32;
+                    let var = col.iter().map(|v| (v - mean) * (v - mean)).sum::<f32>() / d as f32;
+                    let inv = 1.0 / (var + eps).sqrt();
+                    for i in 0..d {
+                        let mut value = (col[i] - mean) * inv * weight[i];
+                        if let Some(bias) = &bias_in {
+                            value += bias[i];
+                        }
+                        want[c * d + i] = value;
                     }
-                    want[c * d + i] = value;
                 }
+                let diff = got
+                    .iter()
+                    .zip(&want)
+                    .map(|(a, b)| (a - b).abs())
+                    .fold(0.0f32, f32::max);
+                assert!(diff < 1e-5, "layernorm diff {diff}");
             }
-            let diff = got
-                .iter()
-                .zip(&want)
-                .map(|(a, b)| (a - b).abs())
-                .fold(0.0f32, f32::max);
-            assert!(diff < 1e-5, "layernorm diff {diff}");
         }
     }
 }

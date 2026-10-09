@@ -1,0 +1,6 @@
+rows=8 fused=0 ms=0.024365 error=5.23664e-07 impl=jit:avx512_core
+rows=8 fused=1 ms=0.215086 error=9.32419e-07 impl=ref:any
+rows=16 fused=0 ms=0.010559 error=5.23664e-07 impl=jit:avx512_core
+rows=16 fused=1 ms=0.426435 error=9.32419e-07 impl=ref:any
+rows=64 fused=0 ms=0.026829 error=5.23664e-07 impl=jit:avx512_core
+rows=64 fused=1 ms=1.09552 error=9.32419e-07 impl=ref:any

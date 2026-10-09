@@ -1,0 +1,12 @@
+{
+  "status": "Integrated owned optional oneDNN provider; all four measured Laya shapes beat original Python medians across two Rust runs, correctness and required gates passed.",
+  "dtype": "F32",
+  "threads": 8,
+  "warmup": 5,
+  "iterations": 15,
+  "accuracy": "All shapes checked against unchanged host reference; latest maximum absolute output difference 0.005859375, within 2e-3 + abs(reference)*2e-5. Against upstream Python, marker logits differ by <=2.7e-6 and action outputs by <=0.00171.",
+  "variants": "Per-layer user scratch, shared projection scratch, shared native scratch, native GELU plus binary multiply, then native LayerNorm at width1024 and >=16 rows. Native arithmetic remains strict F32. Source of diagnostic microbenchmarks retained.",
+  "limitation": "CPU eight-thread prepared F32 inference with optional oneDNN3.1.1 provider. L64 margin against the faster Python run is small. Timing drift is visible in retained raw samples. No other-device or arbitrary-shape performance guarantee.",
+  "configuration": "System oneDNN3.1.1 isolated library, laya-infer/onednn feature, OMP_NUM_THREADS=8, RAYON_NUM_THREADS=8, OMP_WAIT_POLICY=PASSIVE. No supplied diagnostic bridge.",
+  "production_reference": "Latest optional provider including native GELU, LayerNorm, and attention scratch passed bundled_questions_match_julia_collate_predict_and_action with the actual checkpoint (7.30 s)."
+}

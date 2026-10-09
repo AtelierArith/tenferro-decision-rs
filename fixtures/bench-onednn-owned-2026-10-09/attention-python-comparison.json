@@ -1,0 +1,60 @@
+{
+  "status": "All measured shapes beat both available upstream Python medians; correctness and required gates passed",
+  "rows": [
+    {
+      "length": 8,
+      "batch": 1,
+      "rust_ms": [
+        68.017967,
+        69.74438099999999
+      ],
+      "python_ms": [
+        86.04642999125645,
+        98.93601201474667
+      ],
+      "max_python_logits_error": 2.682209014892578e-06,
+      "max_python_action_logits_error": 0.001708984375
+    },
+    {
+      "length": 16,
+      "batch": 1,
+      "rust_ms": [
+        77.22175800000001,
+        75.779556
+      ],
+      "python_ms": [
+        106.79913102649152
+      ],
+      "max_python_logits_error": 1.9073486328125e-06,
+      "max_python_action_logits_error": 0.00048828125
+    },
+    {
+      "length": 64,
+      "batch": 1,
+      "rust_ms": [
+        133.97674,
+        135.92307300000002
+      ],
+      "python_ms": [
+        136.81666704360396,
+        148.48219702253118
+      ],
+      "max_python_logits_error": 2.592802047729492e-06,
+      "max_python_action_logits_error": 0.00048828125
+    },
+    {
+      "length": 8,
+      "batch": 8,
+      "rust_ms": [
+        130.310014,
+        129.827347
+      ],
+      "python_ms": [
+        137.63997901696712,
+        148.26705702580512
+      ],
+      "max_python_logits_error": 2.4437904357910156e-06,
+      "max_python_action_logits_error": 0.0009765625
+    }
+  ]
+}

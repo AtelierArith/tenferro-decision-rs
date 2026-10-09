@@ -1,0 +1,6 @@
+rows=8 host_geglu_ms=0.08265199999999999
+rows=16 host_geglu_ms=0.15517699999999998
+rows=64 host_geglu_ms=0.58492
+rows=8 host_norm_ms=0.014977
+rows=16 host_norm_ms=0.029624
+rows=64 host_norm_ms=0.115553

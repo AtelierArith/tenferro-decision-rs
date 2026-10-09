@@ -1,0 +1,35 @@
+{
+  "status": "Both Rust runs beat original Python for every measured shape; required gates passed",
+  "threads": 8,
+  "warmup": 5,
+  "iterations": 15,
+  "rows": [
+    {
+      "length": 8,
+      "batch": 1,
+      "rust_ms": 108.16019,
+      "python_ms": 131.30947103491053,
+      "python_over_rust": 1.2140277401039192,
+      "max_logit_error": 8.58306884765625e-06,
+      "rust_repeat_ms": 108.29042799999999
+    },
+    {
+      "length": 16,
+      "batch": 1,
+      "rust_ms": 109.911787,
+      "python_ms": 143.48976401379332,
+      "python_over_rust": 1.3054993275088258,
+      "max_logit_error": 1.4781951904296875e-05,
+      "rust_repeat_ms": 109.105638
+    },
+    {
+      "length": 64,
+      "batch": 1,
+      "rust_ms": 172.988833,
+      "python_ms": 196.1686720023863,
+      "python_over_rust": 1.1339961580201325,
+      "max_logit_error": 1.0967254638671875e-05,
+      "rust_repeat_ms": 169.738301
+    }
+  ]
+}

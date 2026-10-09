@@ -99,7 +99,7 @@ impl ExtensionOp for LayaAttentionBlockOp {
 fn execute_laya_attention_block_in_session(
     op: &LayaAttentionBlockOp,
     session: &mut dyn BackendSession,
-    _caches: &mut tenferro_runtime::ExtensionCacheStore,
+    caches: &mut tenferro_runtime::ExtensionCacheStore,
     inputs: &[TensorRead<'_>],
 ) -> tenferro_tensor::Result<Vec<Tensor>> {
     if inputs.len() != 2 {
@@ -139,7 +139,25 @@ fn execute_laya_attention_block_in_session(
         return Err(tensor_error("keep", "keep must be (L, L, B)"));
     }
     let mut out = vec![0.0f32; op.hidden * length * batch];
-    cpu_kernels::laya_attention_block_into(
+    let key = tenferro_runtime::ExtensionCacheKey::new(
+        LAYA_ATTENTION_BLOCK_FAMILY_ID,
+        "head_workspaces",
+        u64::from(op.rope_base_bits),
+    );
+    if caches
+        .get::<cpu_kernels::LayaAttentionWorkspace>(&key)
+        .is_none()
+    {
+        caches.put_with_retained_bytes(
+            key,
+            cpu_kernels::LayaAttentionWorkspace::default(),
+            cpu_kernels::LayaAttentionWorkspace::retained_bytes,
+        );
+    }
+    let workspace = caches
+        .get_mut::<cpu_kernels::LayaAttentionWorkspace>(&key)
+        .ok_or_else(|| tensor_error("cache", "attention workspace unavailable"))?;
+    cpu_kernels::laya_attention_block_with_workspace(
         qkv,
         keep,
         op.hidden,
@@ -148,7 +166,9 @@ fn execute_laya_attention_block_in_session(
         batch,
         f32::from_bits(op.rope_base_bits),
         &mut out,
+        workspace,
     );
+
     Ok(vec![Tensor::from_vec_col_major(
         vec![op.hidden, length, batch],
         out,

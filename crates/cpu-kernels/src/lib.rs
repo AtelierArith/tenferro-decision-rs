@@ -762,6 +762,50 @@ pub fn jeff_full_attention_into(
     });
 }
 
+/// Reusable attention head buffers and one RoPE table; no input/output data
+/// escapes a forward. Use separate instances for concurrently running calls.
+#[derive(Debug, Default)]
+pub struct LayaAttentionWorkspace {
+    heads: Vec<LayaHeadWorkspace>,
+    rope_key: Option<(usize, usize, u32)>,
+    cos: Vec<f32>,
+    sin: Vec<f32>,
+}
+#[derive(Debug, Default)]
+struct LayaHeadWorkspace {
+    q: Vec<f32>,
+    k: Vec<f32>,
+    v: Vec<f32>,
+    probabilities: Vec<f32>,
+    mixed: Vec<f32>,
+}
+impl LayaAttentionWorkspace {
+    /// Owned buffer capacities, including unused head slots after shrinkage.
+    pub fn retained_bytes(&self) -> usize {
+        let floats = self
+            .cos
+            .capacity()
+            .saturating_add(self.sin.capacity())
+            .saturating_add(
+                self.heads
+                    .iter()
+                    .map(|h| {
+                        h.q.capacity()
+                            .saturating_add(h.k.capacity())
+                            .saturating_add(h.v.capacity())
+                            .saturating_add(h.probabilities.capacity())
+                            .saturating_add(h.mixed.capacity())
+                    })
+                    .sum::<usize>(),
+            );
+        floats.saturating_mul(size_of::<f32>()).saturating_add(
+            self.heads
+                .capacity()
+                .saturating_mul(size_of::<LayaHeadWorkspace>()),
+        )
+    }
+}
+
 /// into `q`/`k`/`v`, apply ModernBERT RoPE to `q`/`k`, and run masked scaled
 /// dot-product attention, returning `(d, length, batch)`.
 ///
@@ -781,6 +825,32 @@ pub fn laya_attention_block_into(
     batch: usize,
     rope_base: f32,
     out: &mut [f32],
+) {
+    laya_attention_block_with_workspace(
+        qkv,
+        keep,
+        d,
+        heads,
+        length,
+        batch,
+        rope_base,
+        out,
+        &mut LayaAttentionWorkspace::default(),
+    );
+}
+
+/// Same computation as [`laya_attention_block_into`] with caller-owned scratch.
+#[allow(clippy::too_many_arguments)]
+pub fn laya_attention_block_with_workspace(
+    qkv: &[f32],
+    keep: &[bool],
+    d: usize,
+    heads: usize,
+    length: usize,
+    batch: usize,
+    rope_base: f32,
+    out: &mut [f32],
+    workspace: &mut LayaAttentionWorkspace,
 ) {
     let n = d
         .checked_mul(length)
@@ -803,18 +873,18 @@ pub fn laya_attention_block_into(
 
     // RoPE tables `(length, half)`, built once and shared across heads.
     let use_rope = rope_base != 0.0;
-    let mut cos = Vec::new();
-    let mut sin = Vec::new();
-    if use_rope {
-        cos = vec![0.0f32; length * half];
-        sin = vec![0.0f32; length * half];
+    let rope_key = (length, hd, rope_base.to_bits());
+    if use_rope && workspace.rope_key != Some(rope_key) {
+        workspace.cos.resize(length * half, 0.);
+        workspace.sin.resize(length * half, 0.);
         for l in 0..length {
             for i in 0..half {
-                let theta = (l as f32) * rope_base.powf(-2.0 * (i as f32) / (hd as f32));
-                cos[l * half + i] = theta.cos();
-                sin[l * half + i] = theta.sin();
+                let theta = (l as f32) * rope_base.powf(-2. * (i as f32) / (hd as f32));
+                workspace.cos[l * half + i] = theta.cos();
+                workspace.sin[l * half + i] = theta.sin();
             }
         }
+        workspace.rope_key = Some(rope_key);
     }
 
     // Share the union of each query tile's allowed key span across heads.
@@ -879,194 +949,210 @@ pub fn laya_attention_block_into(
     let qkv_addr = qkv.as_ptr() as usize;
     let keep_addr = keep.as_ptr() as usize;
     let out_addr = out.as_mut_ptr() as usize;
-    let cos_addr = cos.as_ptr() as usize;
-    let sin_addr = sin.as_ptr() as usize;
-    (0..batch * heads).into_par_iter().for_each(|bh| {
-        // SAFETY: each task owns one `(batch, head)` pair — a disjoint feature
-        // band of `out` — and only reads `qkv`/`keep`/`cos`/`sin`.
-        let b = bh / heads;
-        let head = bh % heads;
-        let feat = head * hd;
-        unsafe {
-            let qkv = qkv_addr as *const f32;
-            let keep = keep_addr as *const bool;
-            let out = out_addr as *mut f32;
-            let mut q = vec![0.0f32; length * hd];
-            let mut k = vec![0.0f32; length * hd];
-            let mut v = vec![0.0f32; length * hd];
-            // split qkv -> q/k/v head band
-            for l in 0..length {
-                let src = 3 * d * (l + length * b) + feat;
-                let dst = l * hd;
-                for i in 0..hd {
-                    q[dst + i] = *qkv.add(src + i);
-                    k[dst + i] = *qkv.add(src + d + i);
-                    v[dst + i] = *qkv.add(src + 2 * d + i);
-                }
-            }
-            if use_rope {
-                let cos = cos_addr as *const f32;
-                let sin = sin_addr as *const f32;
+    let cos_addr = workspace.cos.as_ptr() as usize;
+    let sin_addr = workspace.sin.as_ptr() as usize;
+    workspace.heads.resize_with(
+        workspace.heads.len().max(batch * heads),
+        LayaHeadWorkspace::default,
+    );
+    workspace.heads[..batch * heads]
+        .par_iter_mut()
+        .enumerate()
+        .for_each(|(bh, scratch)| {
+            // SAFETY: each task owns one `(batch, head)` pair — a disjoint feature
+            // band of `out` — and only reads `qkv`/`keep`/`cos`/`sin`.
+            let b = bh / heads;
+            let head = bh % heads;
+            let feat = head * hd;
+            unsafe {
+                let qkv = qkv_addr as *const f32;
+                let keep = keep_addr as *const bool;
+                let out = out_addr as *mut f32;
+                let LayaHeadWorkspace {
+                    q,
+                    k,
+                    v,
+                    probabilities,
+                    mixed,
+                } = scratch;
+                q.resize(length * hd, 0.);
+                k.resize(length * hd, 0.);
+                v.resize(length * hd, 0.);
+                // split qkv -> q/k/v head band
                 for l in 0..length {
-                    let row = l * hd;
-                    let table = l * half;
-                    for i in 0..half {
-                        let c = *cos.add(table + i);
-                        let s = *sin.add(table + i);
-                        let a = q[row + i];
-                        let bb = q[row + i + half];
-                        q[row + i] = a * c - bb * s;
-                        q[row + i + half] = a * s + bb * c;
-                        let a = k[row + i];
-                        let bb = k[row + i + half];
-                        k[row + i] = a * c - bb * s;
-                        k[row + i + half] = a * s + bb * c;
+                    let src = 3 * d * (l + length * b) + feat;
+                    let dst = l * hd;
+                    for i in 0..hd {
+                        q[dst + i] = *qkv.add(src + i);
+                        k[dst + i] = *qkv.add(src + d + i);
+                        v[dst + i] = *qkv.add(src + 2 * d + i);
                     }
                 }
-            }
-            // For longer sequences, use library GEMM for QKᵀ and PV. Query
-            // tiles bound scratch at O(64 * length), rather than length².
-            // A nonfinite V needs the scalar path: masked zero probabilities
-            // must not turn excluded NaNs/infinities into 0 * NaN in dense PV.
-            if use_gemm && dense_batches[b] && v.iter().all(|value| value.is_finite()) {
-                let score_size = tile
-                    .checked_mul(max_keys)
-                    .expect("attention workspace overflow");
-                let mut probabilities = vec![0.0f32; score_size];
-                let mut mixed = vec![0.0f32; tile * hd];
-                for (index, start) in (0..length).step_by(tile).enumerate() {
-                    let queries = (length - start).min(tile);
-                    let (key_start, key_end, _) = key_ranges[b * tiles + index];
-                    let keys = key_end - key_start;
-                    if keys == 0 {
-                        // Match the scalar path's all-masked softmax semantics.
+                if use_rope {
+                    let cos = cos_addr as *const f32;
+                    let sin = sin_addr as *const f32;
+                    for l in 0..length {
+                        let row = l * hd;
+                        let table = l * half;
+                        for i in 0..half {
+                            let c = *cos.add(table + i);
+                            let s = *sin.add(table + i);
+                            let a = q[row + i];
+                            let bb = q[row + i + half];
+                            q[row + i] = a * c - bb * s;
+                            q[row + i + half] = a * s + bb * c;
+                            let a = k[row + i];
+                            let bb = k[row + i + half];
+                            k[row + i] = a * c - bb * s;
+                            k[row + i + half] = a * s + bb * c;
+                        }
+                    }
+                }
+                // For longer sequences, use library GEMM for QKᵀ and PV. Query
+                // tiles bound scratch at O(64 * length), rather than length².
+                // A nonfinite V needs the scalar path: masked zero probabilities
+                // must not turn excluded NaNs/infinities into 0 * NaN in dense PV.
+                if use_gemm && dense_batches[b] && v.iter().all(|value| value.is_finite()) {
+                    let score_size = tile
+                        .checked_mul(max_keys)
+                        .expect("attention workspace overflow");
+                    probabilities.resize(score_size, 0.);
+                    mixed.resize(tile * hd, 0.);
+                    for (index, start) in (0..length).step_by(tile).enumerate() {
+                        let queries = (length - start).min(tile);
+                        let (key_start, key_end, _) = key_ranges[b * tiles + index];
+                        let keys = key_end - key_start;
+                        if keys == 0 {
+                            // Match the scalar path's all-masked softmax semantics.
+                            for local in 0..queries {
+                                let destination = feat + d * (start + local + length * b);
+                                for i in 0..hd {
+                                    *out.add(destination + i) = f32::NAN;
+                                }
+                            }
+                            continue;
+                        }
+                        // The outer Rayon task owns this head; these SGEMMs are
+                        // single-threaded, with disjoint owned scratch matrices.
+                        matrixmultiply::sgemm(
+                            queries,
+                            hd,
+                            keys,
+                            1.0,
+                            q.as_ptr().add(start * hd),
+                            hd as isize,
+                            1,
+                            k.as_ptr().add(key_start * hd),
+                            1,
+                            hd as isize,
+                            0.0,
+                            probabilities.as_mut_ptr(),
+                            keys as isize,
+                            1,
+                        );
+                        for local in 0..queries {
+                            let query = start + local;
+                            let row = &mut probabilities[local * keys..(local + 1) * keys];
+                            let mut max = f32::NEG_INFINITY;
+                            for (key, value) in row.iter_mut().enumerate() {
+                                *value =
+                                    if *keep.add(query + length * (key_start + key + length * b)) {
+                                        *value * scale
+                                    } else {
+                                        f32::NEG_INFINITY
+                                    };
+                                if *value > max {
+                                    max = *value;
+                                }
+                            }
+                            let mut sum = 0.0f32;
+                            for value in row.iter_mut() {
+                                *value = if value.is_finite() {
+                                    (*value - max).exp()
+                                } else {
+                                    0.0
+                                };
+                                sum += *value;
+                            }
+                            for value in row {
+                                *value /= sum;
+                            }
+                        }
+                        matrixmultiply::sgemm(
+                            queries,
+                            keys,
+                            hd,
+                            1.0,
+                            probabilities.as_ptr(),
+                            keys as isize,
+                            1,
+                            v.as_ptr().add(key_start * hd),
+                            hd as isize,
+                            1,
+                            0.0,
+                            mixed.as_mut_ptr(),
+                            hd as isize,
+                            1,
+                        );
                         for local in 0..queries {
                             let destination = feat + d * (start + local + length * b);
-                            for i in 0..hd {
-                                *out.add(destination + i) = f32::NAN;
-                            }
-                        }
-                        continue;
-                    }
-                    // The outer Rayon task owns this head; these SGEMMs are
-                    // single-threaded, with disjoint owned scratch matrices.
-                    matrixmultiply::sgemm(
-                        queries,
-                        hd,
-                        keys,
-                        1.0,
-                        q.as_ptr().add(start * hd),
-                        hd as isize,
-                        1,
-                        k.as_ptr().add(key_start * hd),
-                        1,
-                        hd as isize,
-                        0.0,
-                        probabilities.as_mut_ptr(),
-                        keys as isize,
-                        1,
-                    );
-                    for local in 0..queries {
-                        let query = start + local;
-                        let row = &mut probabilities[local * keys..(local + 1) * keys];
-                        let mut max = f32::NEG_INFINITY;
-                        for (key, value) in row.iter_mut().enumerate() {
-                            *value = if *keep.add(query + length * (key_start + key + length * b)) {
-                                *value * scale
-                            } else {
-                                f32::NEG_INFINITY
-                            };
-                            if *value > max {
-                                max = *value;
-                            }
-                        }
-                        let mut sum = 0.0f32;
-                        for value in row.iter_mut() {
-                            *value = if value.is_finite() {
-                                (*value - max).exp()
-                            } else {
-                                0.0
-                            };
-                            sum += *value;
-                        }
-                        for value in row {
-                            *value /= sum;
+                            std::ptr::copy_nonoverlapping(
+                                mixed.as_ptr().add(local * hd),
+                                out.add(destination),
+                                hd,
+                            );
                         }
                     }
-                    matrixmultiply::sgemm(
-                        queries,
-                        keys,
-                        hd,
-                        1.0,
-                        probabilities.as_ptr(),
-                        keys as isize,
-                        1,
-                        v.as_ptr().add(key_start * hd),
-                        hd as isize,
-                        1,
-                        0.0,
-                        mixed.as_mut_ptr(),
-                        hd as isize,
-                        1,
-                    );
-                    for local in 0..queries {
-                        let destination = feat + d * (start + local + length * b);
-                        std::ptr::copy_nonoverlapping(
-                            mixed.as_ptr().add(local * hd),
-                            out.add(destination),
-                            hd,
-                        );
-                    }
+                    return;
                 }
-                return;
-            }
-            // masked scaled dot-product attention for this head
-            let mut probs = vec![0.0f32; length];
-            for query in 0..length {
-                let qo = query * hd;
-                let mut max = f32::NEG_INFINITY;
-                for (key, prob) in probs.iter_mut().enumerate() {
-                    if !*keep.add(query + length * (key + length * b)) {
-                        *prob = f32::NEG_INFINITY;
-                        continue;
+                // masked scaled dot-product attention for this head
+                probabilities.resize(length, 0.);
+                let probs = probabilities;
+                for query in 0..length {
+                    let qo = query * hd;
+                    let mut max = f32::NEG_INFINITY;
+                    for (key, prob) in probs.iter_mut().enumerate() {
+                        if !*keep.add(query + length * (key + length * b)) {
+                            *prob = f32::NEG_INFINITY;
+                            continue;
+                        }
+                        let ko = key * hd;
+                        let mut acc = 0.0f32;
+                        for i in 0..hd {
+                            acc += q[qo + i] * k[ko + i];
+                        }
+                        let score = acc * scale;
+                        *prob = score;
+                        if score > max {
+                            max = score;
+                        }
                     }
-                    let ko = key * hd;
-                    let mut acc = 0.0f32;
+                    let mut sum = 0.0f32;
+                    for value in probs.iter_mut() {
+                        *value = if value.is_finite() {
+                            (*value - max).exp()
+                        } else {
+                            0.0
+                        };
+                        sum += *value;
+                    }
+                    let o_base = feat + d * (query + length * b);
                     for i in 0..hd {
-                        acc += q[qo + i] * k[ko + i];
+                        *out.add(o_base + i) = 0.0;
                     }
-                    let score = acc * scale;
-                    *prob = score;
-                    if score > max {
-                        max = score;
-                    }
-                }
-                let mut sum = 0.0f32;
-                for value in probs.iter_mut() {
-                    *value = if value.is_finite() {
-                        (*value - max).exp()
-                    } else {
-                        0.0
-                    };
-                    sum += *value;
-                }
-                let o_base = feat + d * (query + length * b);
-                for i in 0..hd {
-                    *out.add(o_base + i) = 0.0;
-                }
-                for (key, &raw) in probs.iter().enumerate() {
-                    let prob = raw / sum;
-                    if prob == 0.0 {
-                        continue;
-                    }
-                    let vo = key * hd;
-                    for i in 0..hd {
-                        *out.add(o_base + i) += v[vo + i] * prob;
+                    for (key, &raw) in probs.iter().enumerate() {
+                        let prob = raw / sum;
+                        if prob == 0.0 {
+                            continue;
+                        }
+                        let vo = key * hd;
+                        for i in 0..hd {
+                            *out.add(o_base + i) += v[vo + i] * prob;
+                        }
                     }
                 }
             }
-        }
-    });
+        });
 }
 
 #[cfg(test)]
@@ -1160,6 +1246,46 @@ mod tests {
                     }
                 }
             }
+        }
+    }
+
+    #[test]
+    fn laya_attention_workspace_reuses_only_scratch_across_inputs() {
+        let mut workspace = LayaAttentionWorkspace::default();
+        let mut state = 654321u64;
+        let mut retained = 0;
+        for (length, batch, heads, base) in [
+            (8, 8, 2, 10000.0),
+            (65, 2, 2, 10000.0),
+            (3, 1, 1, 160000.0),
+            (32, 3, 4, 0.0),
+            (8, 8, 2, 10000.0),
+            (65, 2, 2, 160000.0),
+        ] {
+            let d = 8;
+            let qkv: Vec<f32> = (0..3 * d * length * batch)
+                .map(|_| lcg(&mut state))
+                .collect();
+            let keep: Vec<bool> = (0..length * length * batch).map(|i| i % 7 != 0).collect();
+            let mut expected = vec![0.0; d * length * batch];
+            let mut actual = vec![f32::NAN; expected.len()];
+            laya_attention_block_into(&qkv, &keep, d, heads, length, batch, base, &mut expected);
+            laya_attention_block_with_workspace(
+                &qkv,
+                &keep,
+                d,
+                heads,
+                length,
+                batch,
+                base,
+                &mut actual,
+                &mut workspace,
+            );
+            for (a, e) in actual.iter().zip(&expected) {
+                assert!(a.to_bits() == e.to_bits() || (a.is_nan() && e.is_nan()));
+            }
+            assert!(workspace.retained_bytes() >= retained);
+            retained = workspace.retained_bytes();
         }
     }
 
@@ -1275,3 +1401,6 @@ mod tests {
         }
     }
 }
+
+#[cfg(feature = "onednn")]
+pub mod prepared_projection;

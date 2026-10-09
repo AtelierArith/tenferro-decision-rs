@@ -226,3 +226,38 @@ hardware validation and does not establish complete GPU model integration.
 Validation: workspace tests (including the actual Laya production reference)
 and ordinary/CUDA-feature workspace Clippy passed. The explicit native-mask
 CUDA gate failed before computation because `libcuda` is absent.
+
+
+## Owned optional oneDNN CPU extensions (2026-10-09)
+
+The `laya-infer/onednn` feature routes CPU F32 projections through a prepared
+extension op. Its model-owned packed weights do not retain an `EagerRuntime`;
+cloned tensor caches share preparation without creating a runtime cycle.
+Session cache entries own reusable projected activations and aligned native
+scratch. The native provider uses standard oneDNN inner product, erf GELU,
+binary multiplication and LayerNorm primitives with strict F32 math; it contains
+no bespoke GEMM or SIMD arithmetic. Non-CPU sessions retain tenferro composition.
+
+Native primitives use user-provided scratch and complete execution before
+clearing borrowed data handles. This is required for sequential execution on a
+thread different from the preparation thread; library-managed scratch cannot
+supply that guarantee in every oneDNN build (see the
+[oneDNN scratchpad contract](https://uxlfoundation.github.io/oneDNN/dev_guide_attributes_scratchpad.html)).
+A mutable prepared primitive is serialized by its owner. Projection and gated
+plan caches are bounded to 32 shapes. LayerNorm is selected only for width 1024,
+at least 16 columns, and a positive finite epsilon; other shapes use the existing
+CPU extension. Its shape-plan cache is also bounded to 32 entries.
+
+Laya attention retains per-head Q/K/V, probability and mixed-value buffers in
+session caches separated by RoPE base. Input and mask data are read afresh on
+every call. Tests exercise growing and shrinking shapes, changing heads, masks,
+RoPE settings and inputs. Final output tensors own independent storage.
+
+The owned-provider benchmark fixture retains raw samples and upstream Python
+outputs. Two attention-workspace runs beat the measured upstream Python at L8
+B1, L64 B1 and L8 B8; the L64 margin is small. The actual bundled Julia question
+and action reference passes with these changes. Workspace formatting, all-target Clippy and tests passed; oneDNN-enabled
+workspace Clippy and related release tests passed. Jeff also beats fresh
+upstream Python across all three measured shapes in two Rust runs. No device
+performance claim follows from these CPU measurements. Build instructions are
+in the README.
