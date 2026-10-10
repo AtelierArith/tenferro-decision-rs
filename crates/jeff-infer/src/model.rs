@@ -24,7 +24,7 @@ use decision_core::{DecisionError, Result};
 use tenferro_ad::{EagerSession, EagerTensor};
 use tenferro_ext::{
     EagerSessionGatedSiluExt, EagerSessionJeffAttentionExt, EagerSessionLinearExt,
-    EagerSessionRmsNormExt,
+    EagerSessionRmsNormExt, Fusion,
 };
 use tenferro_gated_delta::{
     EagerSessionGatedDeltaExt, GatedDeltaConfig, GatedDeltaOp, GatedDeltaWeights,
@@ -44,6 +44,62 @@ pub enum DeltaKernel {
     /// The fully tensor-native chunked formulation. Backend-portable, but ~1.8x
     /// slower on CPU.
     TensorNative,
+    /// The CUDA layer: tenferro projections/readout around the raw CUDA
+    /// convolution, recurrent scan and norm/gate stages
+    /// (`tenferro_gated_delta::cuda_request`), all device resident. Large key
+    /// widths (> 256) use the raw convolution plus native chunked scan.
+    /// Requires the `cuda` feature and a CUDA session; otherwise the forward
+    /// returns an unsupported error (no CPU fallback).
+    Cuda,
+}
+
+/// Completed CUDA DeltaNet layer workspaces retained across forwards.
+///
+/// Always defined so engines need no feature gates; it is empty without the
+/// `cuda` feature. Cloning yields an empty set (workspaces own exclusive device
+/// scratch), so a cloned engine allocates its own on first use.
+#[derive(Default)]
+pub struct CudaDeltaWorkspaces {
+    #[cfg(feature = "cuda")]
+    layers: Vec<tenferro_gated_delta::cuda_request::CudaLayerWorkspace>,
+}
+
+impl CudaDeltaWorkspaces {
+    /// An empty set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// The number of retained layer workspaces.
+    pub fn len(&self) -> usize {
+        #[cfg(feature = "cuda")]
+        {
+            self.layers.len()
+        }
+        #[cfg(not(feature = "cuda"))]
+        {
+            0
+        }
+    }
+
+    /// Whether no workspace is retained.
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+}
+
+impl Clone for CudaDeltaWorkspaces {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Debug for CudaDeltaWorkspaces {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CudaDeltaWorkspaces")
+            .field("layers", &self.len())
+            .finish()
+    }
 }
 
 /// Shared model dimensions.
@@ -183,20 +239,80 @@ fn linear_host(
     cpu_kernels::matmul_row_major(weight, in_dim, out_dim, x, length)
 }
 
-/// Dense `y = x · W` on the eager session, using the CPU `linear` extension
-/// for F32 CPU sessions and native `dot_general` otherwise. Its weight tensors are cached with
-/// [`TensorCache::col_major`] over the raw safetensors buffer, so the op reads
-/// the natural row-major `(in, out)` weight storage (the fast `matrixmultiply`
-/// orientation); see `cpu_kernels::matmul_col_major_into`.
+/// The cached tensor for a row-major `(in, out)` projection weight, in the
+/// orientation [`linear_tenferro`] expects for this session.
+///
+/// CPU sessions get [`TensorCache::col_major`] over the raw safetensors buffer
+/// with logical shape `(in, out)`: the CPU `linear` extension reads that
+/// storage as the natural row-major weight (the fast `matrixmultiply`
+/// orientation; see `cpu_kernels::matmul_col_major_into`). Other backends get
+/// the same buffer with logical shape `(out, in)`, which *is* `Wᵀ` in
+/// column-major order, so native `dot_general` sees the correct values without
+/// a host transpose.
+fn linear_weight(
+    session: &mut EagerSession<'_>,
+    cache: &mut TensorCache,
+    in_dim: usize,
+    out_dim: usize,
+    data: &[f32],
+) -> tenferro_ad::Result<EagerTensor> {
+    if tenferro_ext::cpu_extensions_supported(session) {
+        cache.col_major(session, vec![in_dim, out_dim], data)
+    } else {
+        cache.col_major(session, vec![out_dim, in_dim], data)
+    }
+}
+
+/// Several row-major `(in, out_i)` projections sharing one input, stacked as
+/// one device `(Σ out_i, in)` weight (the [`linear_weight`] orientation for
+/// non-CPU sessions), so one GEMM replaces several. The stacked host buffer is
+/// built once and retained by `cache` (keyed by the first part's storage).
+fn stacked_weight(
+    session: &mut EagerSession<'_>,
+    cache: &mut TensorCache,
+    in_dim: usize,
+    parts: &[(&[f32], usize)],
+) -> tenferro_ad::Result<EagerTensor> {
+    let total: usize = parts.iter().map(|(_, out)| out).sum();
+    let stacked = cache.prepared_host(parts[0].0, &[total, in_dim], || {
+        let mut stacked = Vec::with_capacity(total * in_dim);
+        for row in 0..in_dim {
+            for (data, out) in parts {
+                stacked.extend_from_slice(&data[row * out..(row + 1) * out]);
+            }
+        }
+        Ok(stacked)
+    })?;
+    cache.col_major(session, vec![total, in_dim], &stacked)
+}
+
+/// Dense `y = x · W` on the eager session for a weight from [`linear_weight`]:
+/// the CPU `linear` extension for F32 CPU sessions, native `dot_general` over
+/// `(in, out)` for other CPU dtypes, and native `dot_general` contracting the
+/// `(out, in)` weight's second axis on other backends.
 fn linear_tenferro(
     session: &mut EagerSession<'_>,
     x: &EagerTensor,
     weight: &EagerTensor,
 ) -> tenferro_ad::Result<EagerTensor> {
-    if x.dtype() == tenferro_tensor::DType::F32 && tenferro_ext::cpu_extensions_supported(session) {
-        session.linear(x, weight)
+    if tenferro_ext::cpu_extensions_supported(session) {
+        if x.dtype() == tenferro_tensor::DType::F32 {
+            session.linear(x, weight)
+        } else {
+            tenferro_infer::linear::linear(session, x, weight)
+        }
     } else {
-        tenferro_infer::linear::linear(session, x, weight)
+        let rank = x.shape().len();
+        session.dot_general(
+            x,
+            weight,
+            tenferro_ad::DotGeneralConfig {
+                lhs_contracting_dims: [rank - 1].as_slice().into(),
+                rhs_contracting_dims: [1].as_slice().into(),
+                lhs_batch_dims: [].as_slice().into(),
+                rhs_batch_dims: [].as_slice().into(),
+            },
+        )
     }
 }
 
@@ -533,33 +649,94 @@ fn linear_col(
     session.transpose(&y, &[1, 0])
 }
 
+/// The `(length, length)` causal-and-active mask of the composed attention
+/// path (`keep[t, s] = s <= t && mask[s] != 0`), built once per forward and
+/// shared by every full-attention layer: a Bool keep-mask on CPU sessions and
+/// an additive F32 score bias elsewhere (no Bool broadcast on the device).
+fn attention_keep_mask(
+    session: &mut EagerSession<'_>,
+    mask: &[f32],
+) -> tenferro_ad::Result<EagerTensor> {
+    let length = mask.len();
+    // Column-major `(t, s)`: element `t + s * length`.
+    let mut col = vec![false; length * length];
+    for s in 0..length {
+        if mask[s] != 0.0 {
+            for t in s..length {
+                col[t + s * length] = true;
+            }
+        }
+    }
+    if tenferro_ext::cpu_extensions_supported(session) {
+        session.constant_from_host(tenferro_ad::Tensor::from_vec_col_major(
+            vec![length, length],
+            col,
+        )?)
+    } else {
+        tenferro_infer::attention::keep_bias_f32(session, vec![length, length], &col)
+    }
+}
+
 /// Full attention over `x` in `(length, hidden)` orientation, returning
-/// `(length, hidden)`.
+/// `(length, hidden)`. `keep` is the composed path's prepared
+/// [`attention_keep_mask`]; it is built here when absent.
+#[allow(clippy::too_many_arguments)]
 fn full_attention_tenferro(
     session: &mut EagerSession<'_>,
     cache: &mut TensorCache,
+    fused: &mut Fusion,
     w: &FullAttentionWeights,
     cfg: &JeffConfig,
     x: &EagerTensor,
     mask: &[f32],
+    mask_t: Option<&EagerTensor>,
+    keep: Option<&EagerTensor>,
     length: usize,
 ) -> tenferro_ad::Result<EagerTensor> {
     let hd = cfg.head_dim;
     let heads = cfg.heads;
     let width = hd * heads;
 
-    // Linear weights are cached with `col_major` (raw row-major `(in, out)`
-    // storage) because the `linear` extension op reads that storage directly;
-    // see `linear_tenferro`.
-    let q_w = cache.col_major(session, vec![cfg.hidden, width], &w.q)?;
-    let gate_w = cache.col_major(session, vec![cfg.hidden, width], &w.gate)?;
-    let k_w = cache.col_major(session, vec![cfg.hidden, width], &w.k)?;
-    let v_w = cache.col_major(session, vec![cfg.hidden, width], &w.v)?;
-    let o_w = cache.col_major(session, vec![width, cfg.hidden], &w.o)?;
-    let q_norm = cache.col(session, vec![hd, 1], &w.q_norm)?;
-    let k_norm = cache.col(session, vec![hd, 1], &w.k_norm)?;
-    let q_norm = session.reshape(&q_norm, vec![hd])?;
-    let k_norm = session.reshape(&k_norm, vec![hd])?;
+    // Linear weights reuse the raw row-major `(in, out)` storage; see
+    // `linear_weight` for the per-backend logical orientation.
+    let o_w = linear_weight(session, cache, width, cfg.hidden, &w.o)?;
+    let q_norm = cache.col_major(session, vec![hd], &w.q_norm)?;
+    let k_norm = cache.col_major(session, vec![hd], &w.k_norm)?;
+
+    if let (Some(scope), Some(active)) = (fused.scope(), mask_t) {
+        // One stacked q|k|v|gate GEMM, then one CUDA kernel pair: per-head
+        // norms + partial RoPE, and causal masked attention with the gate.
+        let qkvg_w = stacked_weight(
+            session,
+            cache,
+            cfg.hidden,
+            &[
+                (&w.q, width),
+                (&w.k, width),
+                (&w.v, width),
+                (&w.gate, width),
+            ],
+        )?;
+        let qkvg = linear_tenferro(session, x, &qkvg_w)?; // (length, 4 width)
+        let merged = scope.jeff_attention(
+            session,
+            &qkvg,
+            &q_norm,
+            &k_norm,
+            active,
+            heads,
+            hd,
+            w.rotary_dim,
+            w.rope_theta as f64,
+            cfg.eps as f64,
+        )?;
+        return linear_tenferro(session, &merged, &o_w);
+    }
+
+    let q_w = linear_weight(session, cache, cfg.hidden, width, &w.q)?;
+    let gate_w = linear_weight(session, cache, cfg.hidden, width, &w.gate)?;
+    let k_w = linear_weight(session, cache, cfg.hidden, width, &w.k)?;
+    let v_w = linear_weight(session, cache, cfg.hidden, width, &w.v)?;
 
     // Linear projections via the `linear` extension op.
     let q = linear_tenferro(session, x, &q_w)?; // (length, width)
@@ -605,30 +782,19 @@ fn full_attention_tenferro(
         let q = session.reshape(&q, vec![1, heads, length, hd])?;
         let k = session.reshape(&k, vec![1, heads, length, hd])?;
         let v = session.reshape(&v, vec![1, heads, length, hd])?;
-        let mut keep = vec![false; length * length];
-        for t in 0..length {
-            for s in 0..length {
-                keep[t * length + s] = s <= t && mask[s] != 0.0;
-            }
-        }
-        let mask_t = {
-            let mut col = vec![false; length * length];
-            for r in 0..length {
-                for c in 0..length {
-                    col[r + c * length] = keep[r * length + c];
-                }
-            }
-            if tenferro_ext::cpu_extensions_supported(session) {
-                session.constant_from_host(tenferro_ad::Tensor::from_vec_col_major(
-                    vec![length, length],
-                    col,
-                )?)?
-            } else {
-                tenferro_infer::input::bool_tensor_native(session, vec![length, length], &col)?
+        let built;
+        let mask_t = match keep {
+            Some(keep) => keep,
+            None => {
+                built = attention_keep_mask(session, mask)?;
+                &built
             }
         };
-        let attended =
-            tenferro_infer::attention::attention(session, &q, &k, &v, Some(&mask_t), None)?;
+        let attended = if tenferro_ext::cpu_extensions_supported(session) {
+            tenferro_infer::attention::attention(session, &q, &k, &v, Some(mask_t), None)?
+        } else {
+            tenferro_infer::attention::attention_with_bias(session, &q, &k, &v, mask_t, None)?
+        };
         let attended = session.reshape(&attended, vec![heads, length, hd])?;
         let gate = to_heads(session, &gate)?;
         let gate = activation::sigmoid(session, &gate)?;
@@ -693,6 +859,9 @@ pub fn forward_tenferro_cached(
 }
 
 /// [`forward_tenferro_cached`] with an explicit [`DeltaKernel`].
+///
+/// [`DeltaKernel::Cuda`] allocates fresh CUDA layer workspaces per call; use
+/// [`forward_tenferro_device`] to retain them across forwards.
 #[allow(clippy::too_many_arguments)]
 pub fn forward_tenferro_cached_kernel(
     workspace: &mut GatedDeltaWorkspace,
@@ -704,43 +873,216 @@ pub fn forward_tenferro_cached_kernel(
     mask: &[f32],
     kernel: DeltaKernel,
 ) -> tenferro_ad::Result<Vec<f32>> {
+    forward_tenferro_device(
+        workspace,
+        &mut CudaDeltaWorkspaces::new(),
+        cache,
+        session,
+        cfg,
+        weights,
+        ids,
+        mask,
+        kernel,
+    )
+}
+
+/// The tenferro forward on any admitted backend, retaining the host DeltaNet
+/// workspace, the CUDA layer workspaces and the weight cache across calls.
+///
+/// Weights are prepared once per runtime through `cache` (uploaded on first
+/// use for a device runtime); per call only the token ids and mask are
+/// uploaded and the `(options,)` logits are downloaded. With
+/// [`DeltaKernel::Cuda`] the whole forward runs inside one scoped CUDA request
+/// (`with_cuda_request_cached`), which fences once after the readout.
+#[allow(clippy::too_many_arguments)]
+pub fn forward_tenferro_device(
+    workspace: &mut GatedDeltaWorkspace,
+    cuda: &mut CudaDeltaWorkspaces,
+    cache: &mut TensorCache,
+    session: &mut EagerSession<'_>,
+    cfg: &JeffConfig,
+    weights: &JeffWeights,
+    ids: &[i64],
+    mask: &[f32],
+    kernel: DeltaKernel,
+) -> tenferro_ad::Result<Vec<f32>> {
     weights.validate(cfg).map_err(config_error)?;
     let length = ids.len();
-    if mask.len() != length {
+    if mask.len() != length || length == 0 {
         return Err(config_error(DecisionError::invalid_field(
             "jeff.mask",
-            "mask length must match the token length",
+            "mask length must match the non-empty token length",
         )));
     }
+    let logits = match kernel {
+        DeltaKernel::HostRecurrent | DeltaKernel::TensorNative => forward_core(
+            session,
+            cache,
+            cfg,
+            weights,
+            ids,
+            mask,
+            DeltaRunner::Session { workspace, kernel },
+        )?,
+        DeltaKernel::Cuda => forward_cuda(session, cuda, cache, cfg, weights, ids, mask)?,
+    };
+    extract(session, &logits, 1, weights.options)
+}
+
+#[cfg(feature = "cuda")]
+fn forward_cuda(
+    session: &mut EagerSession<'_>,
+    cuda: &mut CudaDeltaWorkspaces,
+    cache: &mut TensorCache,
+    cfg: &JeffConfig,
+    weights: &JeffWeights,
+    ids: &[i64],
+    mask: &[f32],
+) -> tenferro_ad::Result<EagerTensor> {
+    let workspaces = std::mem::take(&mut cuda.layers);
+    let (workspaces, logits) = tenferro_gated_delta::cuda_request::with_cuda_request_cached(
+        session,
+        workspaces,
+        |request, session| {
+            forward_core(
+                session,
+                cache,
+                cfg,
+                weights,
+                ids,
+                mask,
+                DeltaRunner::Cuda(request),
+            )
+        },
+    )?;
+    cuda.layers = workspaces;
+    Ok(logits)
+}
+
+#[cfg(not(feature = "cuda"))]
+fn forward_cuda(
+    _session: &mut EagerSession<'_>,
+    _cuda: &mut CudaDeltaWorkspaces,
+    _cache: &mut TensorCache,
+    _cfg: &JeffConfig,
+    _weights: &JeffWeights,
+    _ids: &[i64],
+    _mask: &[f32],
+) -> tenferro_ad::Result<EagerTensor> {
+    Err(tenferro_ad::Error::TensorRuntime(
+        tenferro_tensor::Error::unsupported(
+            "jeff-infer",
+            "DeltaKernel::Cuda requires the `cuda` feature",
+        ),
+    ))
+}
+
+/// How [`forward_core`] runs each Gated DeltaNet layer.
+enum DeltaRunner<'a> {
+    /// A session formulation: the `GatedDelta` extension op or tensor-native.
+    Session {
+        workspace: &'a mut GatedDeltaWorkspace,
+        kernel: DeltaKernel,
+    },
+    /// The raw CUDA layer inside a scoped request.
+    #[cfg(feature = "cuda")]
+    Cuda(&'a mut tenferro_gated_delta::cuda_request::CudaRequest),
+}
+
+/// The forward up to the `(1, options)` logits tensor, without downloading.
+fn forward_core(
+    session: &mut EagerSession<'_>,
+    cache: &mut TensorCache,
+    cfg: &JeffConfig,
+    weights: &JeffWeights,
+    ids: &[i64],
+    mask: &[f32],
+    mut delta: DeltaRunner<'_>,
+) -> tenferro_ad::Result<EagerTensor> {
+    let length = ids.len();
+    let cpu = tenferro_ext::cpu_extensions_supported(session);
+    // Fused CUDA kernels for norms, gated SiLU and attention (inactive on CPU).
+    let mut fused = Fusion::begin(session)?;
 
     // Embedding: gather rows of (vocab, hidden) by token ids. The row-major
     // `(hidden, vocab)` table is already the column-major `(vocab, hidden)`
     // tensor, so no transpose is needed. `embedding` returns `(length, hidden)`,
     // the orientation the whole forward stays in — rms_norm normalizes the last
     // axis and `linear` contracts the last axis, so no per-layer transposes.
-    let table = cache.col_major(session, vec![weights.vocab, cfg.hidden], &weights.embedding)?;
-    let ids_t = session.constant_from_host(tenferro_ad::Tensor::from_vec_col_major(
-        vec![length],
-        ids.to_vec(),
-    )?)?;
-    let mut hidden = embedding::embedding(session, &table, &ids_t)?; // (length, hidden)
+    let ids_tensor = |session: &mut EagerSession<'_>| {
+        session.constant_from_host(tenferro_ad::Tensor::from_vec_col_major(
+            vec![length],
+            ids.to_vec(),
+        )?)
+    };
+    let mut hidden = if let Some(scope) = fused.scope() {
+        // Fused gather from the original row-major table (uploaded once):
+        // no host transpose and no device permute of the ~1 GB table.
+        scope.embedding_rows(session, &weights.embedding, cfg.hidden, weights.vocab, ids)?
+    } else if cpu {
+        let table =
+            cache.col_major(session, vec![weights.vocab, cfg.hidden], &weights.embedding)?;
+        let ids_t = ids_tensor(session)?;
+        embedding::embedding(session, &table, &ids_t)? // (length, hidden)
+    } else {
+        // Device backends gather from a `(hidden, vocab)` table whose token
+        // columns are contiguous (transposed once on the host when cached):
+        // gathering strided rows of `(vocab, hidden)` made the CUDA provider
+        // permute the whole ~1 GB table on every forward.
+        let table = cache.col(session, vec![cfg.hidden, weights.vocab], &weights.embedding)?;
+        let ids_t = ids_tensor(session)?;
+        session.gather(
+            &table,
+            &ids_t,
+            tenferro_ad::GatherConfig {
+                offset_dims: vec![1],
+                collapsed_slice_dims: vec![1],
+                start_index_map: vec![1],
+                index_vector_dim: 1,
+                slice_sizes: vec![cfg.hidden, 1],
+            },
+        )? // (length, hidden)
+    };
     // Share the request mask across all Delta layers and both formulations.
     let mask_t = session.constant_from_host(tenferro_ad::Tensor::from_vec_col_major(
         vec![length],
         mask.to_vec(),
     )?)?;
+    // The composed (non-CPU) attention path shares one causal/active mask.
+    let has_full = weights
+        .layers
+        .iter()
+        .any(|layer| matches!(layer.attention, AttentionWeights::Full(_)));
+    let keep = if !cpu && has_full && !fused.is_active() {
+        Some(attention_keep_mask(session, mask)?)
+    } else {
+        None
+    };
 
     for layer in &weights.layers {
-        let input_norm = cache.col(session, vec![cfg.hidden, 1], &layer.input_norm)?;
-        let input_norm = session.reshape(&input_norm, vec![cfg.hidden])?;
-        let normalized = rms_norm_tenferro(session, &hidden, &input_norm, true, cfg.eps as f64)?;
+        // Rank-1 weights need no reshape (a device reshape copies).
+        let input_norm = cache.col_major(session, vec![cfg.hidden], &layer.input_norm)?;
+        let normalized =
+            rms_norm_device(session, &mut fused, &hidden, &input_norm, cfg.eps as f64)?;
 
         let mixed = match &layer.attention {
-            AttentionWeights::Full(w) => {
-                full_attention_tenferro(session, cache, w, cfg, &normalized, mask, length)?
-            }
-            AttentionWeights::Delta { weights, config } => match kernel {
-                DeltaKernel::TensorNative => {
+            AttentionWeights::Full(w) => full_attention_tenferro(
+                session,
+                cache,
+                &mut fused,
+                w,
+                cfg,
+                &normalized,
+                mask,
+                Some(&mask_t),
+                keep.as_ref(),
+                length,
+            )?,
+            AttentionWeights::Delta { weights, config } => match &mut delta {
+                DeltaRunner::Session {
+                    workspace,
+                    kernel: DeltaKernel::TensorNative,
+                } => {
                     // The chunked kernel is written for `(hidden, length)`.
                     let normalized_t = session.transpose(&normalized, &[1, 0])?;
                     let tensor_weights = prepare_tensor_weights(session, config, weights, cache)?;
@@ -754,7 +1096,7 @@ pub fn forward_tenferro_cached_kernel(
                     )?;
                     session.transpose(&mixed_t, &[1, 0])?
                 }
-                DeltaKernel::HostRecurrent => {
+                DeltaRunner::Session { .. } => {
                     let kernel_weights = prepare_kernel_weights(session, config, weights, cache)?;
                     let op = GatedDeltaOp::from_config(config);
                     session.gated_delta(
@@ -774,22 +1116,62 @@ pub fn forward_tenferro_cached_kernel(
                         ],
                     )?
                 }
+                #[cfg(feature = "cuda")]
+                DeltaRunner::Cuda(request) => {
+                    let tensor_weights =
+                        tenferro_gated_delta::cuda_layer::prepare_time_first_weights(
+                            session, config, weights, cache,
+                        )?;
+                    request.layer_time_first(
+                        session,
+                        config,
+                        &tensor_weights,
+                        &normalized,
+                        &mask_t,
+                    )?
+                }
             },
         };
         let residual = session.add(&hidden, &mixed)?; // (length, hidden)
 
-        let post_norm = cache.col(session, vec![cfg.hidden, 1], &layer.post_norm)?;
-        let post_norm = session.reshape(&post_norm, vec![cfg.hidden])?;
-        let normalized2 = rms_norm_tenferro(session, &residual, &post_norm, true, cfg.eps as f64)?;
+        // Rank-1 weights need no reshape (a device reshape copies).
+        let post_norm = cache.col_major(session, vec![cfg.hidden], &layer.post_norm)?;
+        let normalized2 =
+            rms_norm_device(session, &mut fused, &residual, &post_norm, cfg.eps as f64)?;
 
-        let gate_w =
-            cache.col_major(session, vec![cfg.hidden, cfg.intermediate], &layer.mlp.gate)?;
-        let up_w = cache.col_major(session, vec![cfg.hidden, cfg.intermediate], &layer.mlp.up)?;
-        let down_w =
-            cache.col_major(session, vec![cfg.intermediate, cfg.hidden], &layer.mlp.down)?;
-        let gate = linear_tenferro(session, &normalized2, &gate_w)?; // (length, intermediate)
-        let up = linear_tenferro(session, &normalized2, &up_w)?;
-        let gated = gated_silu_tenferro(session, &gate, &up)?;
+        let down_w = linear_weight(
+            session,
+            cache,
+            cfg.intermediate,
+            cfg.hidden,
+            &layer.mlp.down,
+        )?;
+        let gated = if let Some(scope) = fused.scope() {
+            // One stacked gate|up GEMM and one fused SiLU-gate kernel.
+            let gu_w = stacked_weight(
+                session,
+                cache,
+                cfg.hidden,
+                &[
+                    (&layer.mlp.gate, cfg.intermediate),
+                    (&layer.mlp.up, cfg.intermediate),
+                ],
+            )?;
+            let gu = linear_tenferro(session, &normalized2, &gu_w)?; // (length, 2 intermediate)
+            scope.gated_silu_stacked(session, &gu)?
+        } else {
+            let gate_w = linear_weight(
+                session,
+                cache,
+                cfg.hidden,
+                cfg.intermediate,
+                &layer.mlp.gate,
+            )?;
+            let up_w = linear_weight(session, cache, cfg.hidden, cfg.intermediate, &layer.mlp.up)?;
+            let gate = linear_tenferro(session, &normalized2, &gate_w)?; // (length, intermediate)
+            let up = linear_tenferro(session, &normalized2, &up_w)?;
+            gated_silu_tenferro(session, &gate, &up)?
+        };
         let mlp = linear_tenferro(session, &gated, &down_w)?; // (length, hidden)
         hidden = session.add(&residual, &mlp)?;
     }
@@ -803,13 +1185,35 @@ pub fn forward_tenferro_cached_kernel(
             strides: vec![1, 1],
         },
     )?; // (1, hidden)
-    let final_norm = cache.col(session, vec![cfg.hidden, 1], &weights.final_norm)?;
-    let final_norm = session.reshape(&final_norm, vec![cfg.hidden])?;
-    let last_normed = rms_norm_tenferro(session, &last, &final_norm, true, cfg.eps as f64)?; // (1, hidden)
+    // Rank-1 weights need no reshape (a device reshape copies).
+    let final_norm = cache.col_major(session, vec![cfg.hidden], &weights.final_norm)?;
+    let last_normed = rms_norm_device(session, &mut fused, &last, &final_norm, cfg.eps as f64)?; // (1, hidden)
 
-    let readout = cache.col_major(session, vec![cfg.hidden, weights.options], &weights.readout)?;
+    let readout = linear_weight(
+        session,
+        cache,
+        cfg.hidden,
+        weights.options,
+        &weights.readout,
+    )?;
     let logits = linear_tenferro(session, &last_normed, &readout)?; // (1, options)
-    extract(session, &logits, 1, weights.options)
+    fused.finish()?;
+    Ok(logits)
+}
+
+/// Centered RMSNorm over the last axis: the fused CUDA kernel when active,
+/// else [`rms_norm_tenferro`].
+fn rms_norm_device(
+    session: &mut EagerSession<'_>,
+    fused: &mut Fusion,
+    x: &EagerTensor,
+    weight: &EagerTensor,
+    eps: f64,
+) -> tenferro_ad::Result<EagerTensor> {
+    match fused.scope() {
+        Some(scope) => scope.rms_norm_last(session, x, weight, true, eps),
+        None => rms_norm_tenferro(session, x, weight, true, eps),
+    }
 }
 
 fn config_error(error: DecisionError) -> tenferro_ad::Error {
@@ -964,7 +1368,16 @@ mod tests {
                         )?)?;
                     let mut cache = TensorCache::new();
                     let out = full_attention_tenferro(
-                        session, &mut cache, &w, &cfg, &x_t, &mask, length,
+                        session,
+                        &mut cache,
+                        &mut Fusion::inactive(),
+                        &w,
+                        &cfg,
+                        &x_t,
+                        &mask,
+                        None,
+                        None,
+                        length,
                     )?;
                     let host = session.duplicate_value(&out)?;
                     let values = host.as_slice::<f32>()?;

@@ -443,6 +443,42 @@ fn attention_masked_multi_head_matches_reference() {
     assert_close(out.as_slice::<f64>().unwrap(), &expected, 1e-12);
 }
 
+#[test]
+fn attention_with_bias_matches_bool_mask() {
+    // (B, H, L, hd) = (2, 2, 3, 2) in f32, mask (L, L, B) with a hole.
+    let shape = vec![2usize, 2, 3, 2];
+    let n: usize = shape.iter().product();
+    let data = |salt: f32| -> Vec<f32> {
+        (0..n)
+            .map(|i| ((i as f32 * 0.37 + salt).sin()) * 0.8)
+            .collect()
+    };
+    let keep: Vec<bool> = (0..3 * 3 * 2)
+        .map(|i| {
+            let (r, c) = (i % 3, (i / 3) % 3);
+            c <= r && !(c == 1 && i >= 9)
+        })
+        .collect();
+    let (masked, biased) = run(|s| {
+        let q = s.constant_from(Tensor::from_vec_col_major(shape.clone(), data(0.1))?)?;
+        let k = s.constant_from(Tensor::from_vec_col_major(shape.clone(), data(0.7))?)?;
+        let v = s.constant_from(Tensor::from_vec_col_major(shape.clone(), data(1.3))?)?;
+        let mask = s.constant_from(Tensor::from_vec_col_major(vec![3, 3, 2], keep.clone())?)?;
+        let bias = ti::attention::keep_bias_f32(s, vec![3, 3, 2], &keep)?;
+        let a = ti::attention::attention(s, &q, &k, &v, Some(&mask), None)?;
+        let b = ti::attention::attention_with_bias(s, &q, &k, &v, &bias, None)?;
+        Ok((s.duplicate_value(&a)?, s.duplicate_value(&b)?))
+    });
+    for (a, b) in masked
+        .as_slice::<f32>()
+        .unwrap()
+        .iter()
+        .zip(biased.as_slice::<f32>().unwrap())
+    {
+        assert!((a - b).abs() <= 1e-6, "{a} vs {b}");
+    }
+}
+
 // ------------------------------------------------------------------- Attention
 
 #[test]

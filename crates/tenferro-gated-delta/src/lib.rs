@@ -17,8 +17,10 @@
 //! - [`extension`]: the `GatedDelta` tenferro extension op
 //! - [`gated_delta`]: the direct entry point dispatching on a plan
 //!
-//! The optional `cuda` feature exposes compiled raw CUDA kernel handles.
-//! Full device-resident layer dispatch and hardware parity are still pending.
+//! The optional `cuda` feature exposes compiled raw CUDA kernels and scoped
+//! layer requests (`cuda_request`); `jeff-infer`'s CUDA forward runs its
+//! DeltaNet layers through `CudaRequest::layer_time_first` (hardware-validated
+//! on an RTX 3060).
 
 pub mod chunked;
 pub mod config;

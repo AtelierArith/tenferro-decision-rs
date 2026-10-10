@@ -12,6 +12,9 @@ authors.workspace = true
 default = []
 onednn = ["tenferro-ext/onednn"]
 hub = ["dep:hf-fetch"]
+# CUDA execution of the tenferro forward (`Device::Cuda`). Needs the CUDA
+# driver at run time; tests touching hardware are `#[ignore]`d.
+cuda = ["tenferro-ext/cuda", "tenferro-ad/cuda"]
 
 [dependencies]
 hf-fetch = { workspace = true, optional = true }
@@ -31,3 +34,7 @@ tenferro-cpu.workspace = true
 rayon.workspace = true
 bench-suite = { path = "../bench-suite" }
 hf-fetch.workspace = true
+
+[[example]]
+name = "bench_laya_cuda"
+required-features = ["cuda"]

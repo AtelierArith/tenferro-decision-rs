@@ -38,6 +38,7 @@ use tenferro_ext::{
 };
 #[cfg(not(feature = "onednn"))]
 use tenferro_ext::{EagerSessionGemmBiasExt, EagerSessionGemmExt, EagerSessionGemmGegluExt};
+use tenferro_ext::{FusedActivation, Fusion};
 use tenferro_infer::{attention, norm, rope};
 
 use crate::config::{AgentConfig, EncoderConfig, LayerKind};
@@ -1053,11 +1054,20 @@ fn slice_axis(
 fn layer_norm_feature_first(
     session: &mut EagerSession<'_>,
     cache: &mut TensorCache,
+    fused: &mut Fusion,
     x: &EagerTensor,
     ln: &LayerNormWeights,
     width: usize,
     eps: f64,
 ) -> tenferro_ad::Result<EagerTensor> {
+    if let Some(scope) = fused.scope() {
+        let weight = cache.col_major(session, vec![width], &ln.weight)?;
+        let bias = match &ln.bias {
+            Some(bias) => Some(cache.col_major(session, vec![width], bias)?),
+            None => None,
+        };
+        return scope.layer_norm_first(session, x, &weight, bias.as_ref(), eps);
+    }
     // Feature-first LayerNorm is one fused `cpu-kernels` pass; the eager
     // `norm::layer_norm` would transpose→normalize→transpose plus a handful of
     // elementwise/reduction ops per norm.
@@ -1119,6 +1129,51 @@ fn prepared_linear(
         .map(|b| cache.col_major(session, vec![out_dim], b))
         .transpose()?;
     session.prepared_gemm(x, &weights, bias.as_ref(), geglu)
+}
+
+/// Feature-first linear followed by `act` (bias included): one native GEMM
+/// producing `(out, ...)` directly plus one fused bias/activation kernel when
+/// fusion is active; otherwise [`linear_feature_first`] and the composed
+/// activation.
+fn linear_act_feature_first(
+    session: &mut EagerSession<'_>,
+    cache: &mut TensorCache,
+    fused: &mut Fusion,
+    x: &EagerTensor,
+    linear: &LinearWeights,
+    out_dim: usize,
+    act: FusedActivation,
+) -> tenferro_ad::Result<EagerTensor> {
+    if let Some(scope) = fused.scope() {
+        let in_dim = x.shape()[0];
+        let weight = cache.col_major(session, vec![in_dim, out_dim], &linear.weight)?;
+        // `Wᵀ x` with the contracted axes first on both sides gives
+        // `(out, ...)` without a transpose.
+        let y = session.dot_general(
+            &weight,
+            x,
+            DotGeneralConfig {
+                lhs_contracting_dims: [0].as_slice().into(),
+                rhs_contracting_dims: [0].as_slice().into(),
+                lhs_batch_dims: [].as_slice().into(),
+                rhs_batch_dims: [].as_slice().into(),
+            },
+        )?;
+        let bias = match &linear.bias {
+            Some(bias) => Some(cache.col_major(session, vec![out_dim], bias)?),
+            None => None,
+        };
+        if bias.is_none() && act == FusedActivation::Identity {
+            return Ok(y);
+        }
+        return scope.bias_act_first(session, &y, bias.as_ref(), act);
+    }
+    let y = linear_feature_first(session, cache, x, linear, out_dim)?;
+    match act {
+        FusedActivation::Identity => Ok(y),
+        FusedActivation::GeluErf => gelu_erf_cached(session, cache, &y),
+        FusedActivation::Relu => relu_tensor(session, &y),
+    }
 }
 
 fn linear_feature_first(
@@ -1204,6 +1259,8 @@ fn relu_tensor(
 fn attention_block_tenferro(
     session: &mut EagerSession<'_>,
     cache: &mut TensorCache,
+    fused: &mut Fusion,
+    score_bias: Option<&EagerTensor>,
     hidden: usize,
     num_heads: usize,
     rope_base: Option<f64>,
@@ -1215,11 +1272,46 @@ fn attention_block_tenferro(
     batch: usize,
 ) -> tenferro_ad::Result<EagerTensor> {
     let hd = hidden / num_heads;
+    if let (true, Some(score_bias)) = (fused.is_active(), score_bias) {
+        let qkv = linear_act_feature_first(
+            session,
+            cache,
+            fused,
+            x,
+            in_proj,
+            3 * hidden,
+            FusedActivation::Identity,
+        )?; // (3d, L, B)
+        let scope = fused.scope().expect("active fusion");
+        let attended = scope.laya_attention(
+            session,
+            &qkv,
+            score_bias,
+            hidden,
+            num_heads,
+            rope_base.unwrap_or(0.0),
+        )?;
+        return linear_act_feature_first(
+            session,
+            cache,
+            fused,
+            &attended,
+            out_proj,
+            hidden,
+            FusedActivation::Identity,
+        );
+    }
     let qkv = linear_feature_first(session, cache, x, in_proj, 3 * hidden)?; // (3d, L, B)
-    let mask = tensor_bool(session, vec![length, length, batch], keep)?;
-    let attended = if qkv.dtype() == tenferro_tensor::DType::F32
-        && tenferro_ext::cpu_extensions_supported(session)
-    {
+    let cpu = tenferro_ext::cpu_extensions_supported(session);
+    // CPU sessions select keys with a Bool mask; other backends add an F32
+    // score bias instead (the pinned CUDA provider cannot materialize a
+    // broadcast Bool tensor).
+    let mask = if cpu {
+        tensor_bool(session, vec![length, length, batch], keep)?
+    } else {
+        tenferro_infer::attention::keep_bias_f32(session, vec![length, length, batch], keep)?
+    };
+    let attended = if qkv.dtype() == tenferro_tensor::DType::F32 && cpu {
         // Fused split + RoPE + masked attention, all in the feature-first
         // `(d, L, B)` layout, so no transposes are materialized.
         session.laya_attention_block(&qkv, &mask, hidden, num_heads, rope_base.unwrap_or(0.0))?
@@ -1243,16 +1335,22 @@ fn attention_block_tenferro(
             ),
             None => (q, k),
         };
-        let attended = attention::attention(session, &q, &k, &v, Some(&mask), None)?;
+        let attended = if cpu {
+            attention::attention(session, &q, &k, &v, Some(&mask), None)?
+        } else {
+            attention::attention_with_bias(session, &q, &k, &v, &mask, None)?
+        };
         let attended = session.transpose(&attended, &[3, 1, 2, 0])?;
         session.reshape(&attended, vec![hidden, length, batch])?
     };
     linear_feature_first(session, cache, &attended, out_proj, hidden)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn encoder_tensor(
     session: &mut EagerSession<'_>,
     cache: &mut TensorCache,
+    fused: &mut Fusion,
     cfg: &EncoderConfig,
     weights: &ModernBertWeights,
     ids: &[i64],
@@ -1265,30 +1363,57 @@ fn encoder_tensor(
     let vocab = weights.tok_embeddings.len() / d;
     let eps = cfg.norm_eps;
 
-    let table = cache.col_major(session, vec![d, vocab], &weights.tok_embeddings)?;
-    let ids_t = tensor_col_i64(session, vec![length, batch], ids)?;
-    let mut x = session.gather(
-        &table,
-        &ids_t,
-        GatherConfig {
-            offset_dims: vec![0],
-            collapsed_slice_dims: vec![1],
-            start_index_map: vec![1],
-            index_vector_dim: 2,
-            slice_sizes: vec![d, 1],
-        },
-    )?; // (d, L, B)
-    x = layer_norm_feature_first(session, cache, &x, &weights.embed_norm, d, eps)?;
+    let mut x = if let Some(scope) = fused.scope() {
+        // Fused gather from the host table (uploaded once): the native gather
+        // permuted the whole table on every forward.
+        let x = scope.embedding_columns(session, &weights.tok_embeddings, d, vocab, ids)?;
+        session.reshape(&x, vec![d, length, batch])?
+    } else {
+        let table = cache.col_major(session, vec![d, vocab], &weights.tok_embeddings)?;
+        let ids_t = tensor_col_i64(session, vec![length, batch], ids)?;
+        session.gather(
+            &table,
+            &ids_t,
+            GatherConfig {
+                offset_dims: vec![0],
+                collapsed_slice_dims: vec![1],
+                start_index_map: vec![1],
+                index_vector_dim: 2,
+                slice_sizes: vec![d, 1],
+            },
+        )? // (d, L, B)
+    };
+    x = layer_norm_feature_first(session, cache, fused, &x, &weights.embed_norm, d, eps)?;
+    // Fused attention takes an additive score bias; build one per layer kind.
+    let mut biases: Vec<(LayerKind, EagerTensor)> = Vec::new();
 
     for layer in &weights.layers {
         let attn_input = match &layer.attn_norm {
-            Some(ln) => layer_norm_feature_first(session, cache, &x, ln, d, eps)?,
+            Some(ln) => layer_norm_feature_first(session, cache, fused, &x, ln, d, eps)?,
             None => x.clone(),
         };
         let keep = build_mask(cfg, layer.kind, mask, length, batch);
+        let score_bias = if fused.is_active() {
+            match biases.iter().find(|(kind, _)| *kind == layer.kind) {
+                Some((_, bias)) => Some(bias.clone()),
+                None => {
+                    let bias = tenferro_infer::attention::keep_bias_f32(
+                        session,
+                        vec![length, length, batch],
+                        &keep,
+                    )?;
+                    biases.push((layer.kind, bias.clone()));
+                    Some(bias)
+                }
+            }
+        } else {
+            None
+        };
         let attended = attention_block_tenferro(
             session,
             cache,
+            fused,
+            score_bias.as_ref(),
             d,
             layer.num_heads,
             Some(layer.rope_base),
@@ -1301,8 +1426,22 @@ fn encoder_tensor(
         )?;
         let z = session.add(&x, &attended)?;
 
-        let hn = layer_norm_feature_first(session, cache, &z, &layer.mlp_norm, d, eps)?;
-        let g = if hn.dtype() == tenferro_tensor::DType::F32
+        let hn = layer_norm_feature_first(session, cache, fused, &z, &layer.mlp_norm, d, eps)?;
+        let g = if fused.is_active() {
+            let u = linear_act_feature_first(
+                session,
+                cache,
+                fused,
+                &hn,
+                &layer.wi,
+                2 * intermediate,
+                FusedActivation::Identity,
+            )?;
+            fused
+                .scope()
+                .expect("active fusion")
+                .geglu_first(session, &u, intermediate)?
+        } else if hn.dtype() == tenferro_tensor::DType::F32
             && tenferro_ext::cpu_extensions_supported(session)
             && hn.shape()[1..].iter().product::<usize>() >= 16
         {
@@ -1335,17 +1474,27 @@ fn encoder_tensor(
                 session.mul(&activated, &gate)?
             }
         };
-        let down = linear_feature_first(session, cache, &g, &layer.wo_mlp, d)?;
+        let down = linear_act_feature_first(
+            session,
+            cache,
+            fused,
+            &g,
+            &layer.wo_mlp,
+            d,
+            FusedActivation::Identity,
+        )?;
         x = session.add(&z, &down)?;
     }
 
-    layer_norm_feature_first(session, cache, &x, &weights.final_norm, d, eps)
+    layer_norm_feature_first(session, cache, fused, &x, &weights.final_norm, d, eps)
 }
 
 #[allow(clippy::too_many_arguments)]
 fn head_layer_tenferro(
     session: &mut EagerSession<'_>,
     cache: &mut TensorCache,
+    fused: &mut Fusion,
+    score_bias: Option<&EagerTensor>,
     cfg: &EncoderConfig,
     layer: &HeadLayerWeights,
     x: &EagerTensor,
@@ -1355,10 +1504,12 @@ fn head_layer_tenferro(
 ) -> tenferro_ad::Result<EagerTensor> {
     let d = cfg.hidden_size;
     let eps = cfg.norm_eps;
-    let n = layer_norm_feature_first(session, cache, x, &layer.norm1, d, eps)?;
+    let n = layer_norm_feature_first(session, cache, fused, x, &layer.norm1, d, eps)?;
     let attended = attention_block_tenferro(
         session,
         cache,
+        fused,
+        score_bias,
         d,
         layer.num_heads,
         None,
@@ -1370,11 +1521,26 @@ fn head_layer_tenferro(
         batch,
     )?;
     let z = session.add(x, &attended)?;
-    let hn = layer_norm_feature_first(session, cache, &z, &layer.norm2, d, eps)?;
+    let hn = layer_norm_feature_first(session, cache, fused, &z, &layer.norm2, d, eps)?;
     let ff = layer.linear1.weight.len() / d;
-    let u = linear_feature_first(session, cache, &hn, &layer.linear1, ff)?;
-    let r = relu_tensor(session, &u)?;
-    let y = linear_feature_first(session, cache, &r, &layer.linear2, d)?;
+    let r = linear_act_feature_first(
+        session,
+        cache,
+        fused,
+        &hn,
+        &layer.linear1,
+        ff,
+        FusedActivation::Relu,
+    )?;
+    let y = linear_act_feature_first(
+        session,
+        cache,
+        fused,
+        &r,
+        &layer.linear2,
+        d,
+        FusedActivation::Identity,
+    )?;
     session.add(&z, &y)
 }
 
@@ -1480,7 +1646,9 @@ pub fn forward_encoder_tenferro_cached(
         )));
     }
     weights.validate(cfg).map_err(to_ad_error)?;
-    let h = encoder_tensor(session, cache, cfg, weights, ids, mask, batch)?;
+    let mut fused = Fusion::begin(session)?;
+    let h = encoder_tensor(session, cache, &mut fused, cfg, weights, ids, mask, batch)?;
+    fused.finish()?;
     extract_col(session, &h)
 }
 
@@ -1567,16 +1735,45 @@ pub fn forward_tenferro_cached(
         )));
     }
 
-    let encoder_output =
-        encoder_tensor(session, cache, encoder, &weights.encoder, ids, mask, batch)?;
+    // Fused CUDA kernels (inactive on CPU). The scope is completed before the
+    // host pooling readout.
+    let mut fused = Fusion::begin(session)?;
+    let encoder_output = encoder_tensor(
+        session,
+        cache,
+        &mut fused,
+        encoder,
+        &weights.encoder,
+        ids,
+        mask,
+        batch,
+    )?;
     let te = gather_type_emb(session, cache, &weights.type_emb, qtype, d, batch)?;
     let te = session.broadcast_in_dim(&te, &[d, length, batch], &[0, 2])?;
     let mut h = session.add(&encoder_output, &te)?;
 
     let head_keep = build_mask(encoder, LayerKind::FullAttention, mask, length, batch);
+    let head_bias = if fused.is_active() {
+        Some(tenferro_infer::attention::keep_bias_f32(
+            session,
+            vec![length, length, batch],
+            &head_keep,
+        )?)
+    } else {
+        None
+    };
     for layer in &weights.head {
         h = head_layer_tenferro(
-            session, cache, encoder, layer, &h, &head_keep, length, batch,
+            session,
+            cache,
+            &mut fused,
+            head_bias.as_ref(),
+            encoder,
+            layer,
+            &h,
+            &head_keep,
+            length,
+            batch,
         )?;
     }
 
@@ -1584,14 +1781,30 @@ pub fn forward_tenferro_cached(
     let s0 = layer_norm_feature_first(
         session,
         cache,
+        &mut fused,
         &markers,
         &weights.scorer_norm,
         d,
         encoder.norm_eps,
     )?;
-    let s1 = linear_feature_first(session, cache, &s0, &weights.scorer1, d)?;
-    let g1 = gelu_erf_cached(session, cache, &s1)?;
-    let s2 = linear_feature_first(session, cache, &g1, &weights.scorer2, 1)?;
+    let g1 = linear_act_feature_first(
+        session,
+        cache,
+        &mut fused,
+        &s0,
+        &weights.scorer1,
+        d,
+        FusedActivation::GeluErf,
+    )?;
+    let s2 = linear_act_feature_first(
+        session,
+        cache,
+        &mut fused,
+        &g1,
+        &weights.scorer2,
+        1,
+        FusedActivation::Identity,
+    )?;
     let s2 = session.reshape(&s2, vec![k_count, batch])?;
     let raw_logits = extract_col(session, &s2)?;
     let (logits, features) = pool_host(&raw_logits, marker_mask, k_count, batch);
@@ -1610,9 +1823,25 @@ pub fn forward_tenferro_cached(
     }
     let pooled = tensor_col(session, vec![d + 4, batch], &pooled)?;
     let action_hidden = weights.act1.weight.len() / (d + 4);
-    let a1 = linear_feature_first(session, cache, &pooled, &weights.act1, action_hidden)?;
-    let g2 = gelu_erf_cached(session, cache, &a1)?;
-    let action = linear_feature_first(session, cache, &g2, &weights.act2, agent.action_count())?;
+    let g2 = linear_act_feature_first(
+        session,
+        cache,
+        &mut fused,
+        &pooled,
+        &weights.act1,
+        action_hidden,
+        FusedActivation::GeluErf,
+    )?;
+    let action = linear_act_feature_first(
+        session,
+        cache,
+        &mut fused,
+        &g2,
+        &weights.act2,
+        agent.action_count(),
+        FusedActivation::Identity,
+    )?;
+    fused.finish()?;
     let action = extract_col(session, &action)?;
     Ok((logits, action))
 }

@@ -261,3 +261,66 @@ workspace Clippy and related release tests passed. Jeff also beats fresh
 upstream Python across all three measured shapes in two Rust runs. No device
 performance claim follows from these CPU measurements. Build instructions are
 in the README.
+
+
+## CUDA execution (2026-10-10)
+
+`Device::Cuda` runs the same `forward_tenferro` code on tenferro-gpu
+(RTX 3060, CUDA 13 devcontainer). Weights are prepared once per runtime in
+the engine's `TensorCache` (plus per-thread fused-kernel copies) and stay on
+the device; a call uploads ids/masks and downloads logits.
+
+### What dominated, and what changed
+
+Profiles (`nsys`, Jeff parcel L101) drove the work:
+
+| step | events / forward | GPU busy | warm median (quiet host) |
+|---|---:|---:|---:|
+| first working device path (composed eager ops) | 3284 | 66 ms | 130 ms |
+| + fused norm / SiLU / attention kernels | 1056 → 934 | 41 ms | 48 ms |
+| + embedding gather fix, `(out, in)` DeltaNet weights | 812 | 36 ms | 39 ms |
+| + tiled recurrent scan, stacked q/k/v/g, gate/up, qkv/z/a/b GEMMs | 728 | 34 ms | 38 ms |
+
+- Composed RMSNorm/LayerNorm/GELU/attention were ~25–60 tiny launches each
+  (plus scalar uploads); one fused NVRTC kernel replaces each chain
+  (`tenferro_ext::cuda_fused`, selected through `Fusion`).
+- Native `gather` permuted the whole embedding table (1 GB for Jeff, 6.3 ms)
+  every forward; a fused gather reads the original host layout.
+- `dot_general` with `(in, out)` weights produced an extra output permute;
+  `(out, in)` weights map to a transpose flag of the same GEMM.
+- The original recurrent scan reloaded and renormalized Q/K uncoalesced in
+  every warp (1.6 ms/layer at L101); tiling through shared memory gives
+  0.47 ms/layer.
+
+### Measured (RTX 3060, release, warm median, includes upload/readout/sync)
+
+Host load average 18–29 from unrelated jobs during this run (min in
+parentheses). A later run at load average 6–9 (10 warmup, 50 iterations)
+measured: Jeff parcel trimmed 37.9 ms, full L256 79.7 ms, L8 27.0 ms, L64
+28.7 ms; Laya L8B1 26.5 ms, L64B1 29.5 ms, L8B8 27.8 ms.
+
+| workload | CUDA | CPU host_opt | CPU tenferro |
+|---|---:|---:|---:|
+| Jeff parcel B1/L256 (101 active, trimmed) | 48.3 ms (43.7) | 661 ms | 789 ms |
+| Jeff parcel full L256 (padding kept) | 76.2 ms (74.9) | — | — |
+| Jeff synthetic L8 | 44.2 ms (32.6) | 162 ms | 351 ms |
+| Jeff synthetic L64 | 32.9 ms (31.5) | 470 ms | 637 ms |
+| Laya L8B1 | 40.2 ms (30.7) | — | 146 ms |
+| Laya L64B1 | 47.3 ms (43.8) | — | 365 ms |
+| Laya L8B8 | 41.2 ms (31.7) | — | 373 ms |
+
+(The CPU columns ran on the same loaded host and are slower than the quiet
+numbers in `21_SPEED_COMPARISON.md`.) For reference, JeffClient.jl's
+QwenDecisionCore CUDA path measures 47.5 ms full-sequence / 25.9 ms trimmed
+on this GPU: the trimmed Rust path is ~1.5x slower, the full-sequence one
+~1.6x.
+
+### Remaining cost
+
+At L8 GPU work is ~10 ms but the forward takes ~31 ms: the remaining time is
+host-side tenferro eager dispatch (~700 launches/forward: cuBLAS/cuTENSOR
+plans, output allocation, small activation copies) and one
+`cuEventSynchronize` per raw-CUDA session (`with_raw` flushes CubeCL).
+Further gains need either fewer eager ops (e.g. fused residual add + norm,
+device marker pooling for Laya, persistent cuBLAS handles behind a fused
+GEMM op) or tenferro-side changes recorded in `19_TENFERRO_FEEDBACK.md`.

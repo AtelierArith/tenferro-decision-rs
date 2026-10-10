@@ -10,7 +10,9 @@ use crate::{
     GatedDeltaConfig, GatedDeltaTensorWeights,
     cuda::CudaKernels,
     cuda_chunked_layer::{CudaChunkedWorkspace, PendingChunkedLayer, enqueue_chunked_layer},
-    cuda_layer::{CudaRecurrentWorkspace, PendingRecurrentLayer, enqueue_recurrent_layer},
+    cuda_layer::{
+        ActivationLayout, CudaRecurrentWorkspace, PendingRecurrentLayer, enqueue_recurrent_layer,
+    },
 };
 
 /// Completed layer workspaces in request order. Private buffers remain disjoint.
@@ -85,6 +87,39 @@ impl CudaRequest {
         }
     }
 
+    /// [`Self::layer`] for a time-first `x [length, hidden]`, returning
+    /// `[length, hidden]`, with stacked `(out, in)` projection weights from
+    /// [`crate::cuda_layer::prepare_time_first_weights`]. Key widths above 256
+    /// (the large-key chunked formulation) are rejected. The recurrent formulation consumes this layout
+    /// directly (no transposes); the large-key chunked formulation transposes
+    /// around its feature-first adapter.
+    pub fn layer_time_first(
+        &mut self,
+        session: &mut EagerSession<'_>,
+        cfg: &GatedDeltaConfig,
+        weights: &GatedDeltaTensorWeights,
+        x: &EagerTensor,
+        mask: &EagerTensor,
+    ) -> Result<EagerTensor> {
+        if cfg.key_dim <= 256 {
+            self.recurrent_layer_with_layout(
+                session,
+                cfg,
+                weights,
+                x,
+                mask,
+                ActivationLayout::TimeFirstStacked,
+            )
+        } else {
+            Err(tenferro_tensor::Error::unsupported(
+                "cuda_request",
+                "time-first stacked layers support key widths up to 256; use the \
+                 feature-first chunked layer for larger keys",
+            )
+            .into())
+        }
+    }
+
     /// Enqueue raw recurrent stages plus native projections/readout without a
     /// host fence. Workspaces are consumed in layer order; a changed formulation
     /// replaces that slot. Matching workspaces must have the current shape/runtime.
@@ -95,6 +130,25 @@ impl CudaRequest {
         weights: &GatedDeltaTensorWeights,
         x: &EagerTensor,
         mask: &EagerTensor,
+    ) -> Result<EagerTensor> {
+        self.recurrent_layer_with_layout(
+            session,
+            cfg,
+            weights,
+            x,
+            mask,
+            ActivationLayout::FeatureFirst,
+        )
+    }
+
+    fn recurrent_layer_with_layout(
+        &mut self,
+        session: &mut EagerSession<'_>,
+        cfg: &GatedDeltaConfig,
+        weights: &GatedDeltaTensorWeights,
+        x: &EagerTensor,
+        mask: &EagerTensor,
+        layout: ActivationLayout,
     ) -> Result<EagerTensor> {
         if self.failed {
             return Err(failed_request());
@@ -111,6 +165,7 @@ impl CudaRequest {
             mask,
             self.kernels.as_ref().expect("owned module").clone(),
             workspace,
+            layout,
         )
         .map(|(pending, output)| (PendingLayer::Recurrent(Box::new(pending)), output));
         self.retain(result)
@@ -282,4 +337,91 @@ pub fn with_cuda_chunked_request<R: Send>(
         })
         .collect();
     Ok((kernels, workspaces, result))
+}
+
+thread_local! {
+    // Compiled modules are `!Send`, so they cannot live in an engine that
+    // crosses threads or in a `Send` extension cache. CUDA eager sessions run
+    // their callback on the calling thread, so a thread-local owner is the
+    // narrowest cache that survives across requests. Entries are matched by
+    // runtime identity; a module is only taken out while one request runs and
+    // is returned after that request's completion fence.
+    static KERNEL_CACHE: std::cell::RefCell<Vec<CudaKernels>> =
+        const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// Retained modules per thread (distinct CUDA runtimes).
+const MAX_CACHED_MODULES: usize = 4;
+
+/// The NVRTC virtual architecture for this session's device:
+/// `TENFERRO_CUDA_ARCH` when set, else the device's compute capability.
+pub fn cuda_arch(session: &mut EagerSession<'_>) -> Result<String> {
+    if let Ok(arch) = std::env::var("TENFERRO_CUDA_ARCH") {
+        if !arch.is_empty() {
+            return Ok(arch);
+        }
+    }
+    let device =
+        with_cuda_exec_session(session.backend_session(), |cuda| cuda.runtime().device_id())
+            .ok_or_else(|| {
+                tenferro_tensor::Error::unsupported("cuda_arch", "CUDA execution session required")
+            })?;
+    let devices = tenferro_gpu::cuda::cuda_devices().map_err(|error| {
+        tenferro_tensor::Error::unsupported("cuda_arch", format!("device discovery: {error}"))
+    })?;
+    let info = devices
+        .iter()
+        .find(|info| info.id() == device)
+        .ok_or_else(|| {
+            tenferro_tensor::Error::unsupported("cuda_arch", "session device not discovered")
+        })?;
+    let capability = info.compute_capability();
+    Ok(format!("compute_{}{}", capability.major, capability.minor))
+}
+
+/// [`with_cuda_request`] using a per-thread compiled module for this runtime.
+///
+/// The first request on a thread/runtime compiles the kernels with NVRTC
+/// ([`cuda_arch`]); later requests reuse the module. A failed request drops its
+/// module (after the request's own completion handling), so the next request
+/// recompiles. Workspaces are returned for the caller to retain.
+pub fn with_cuda_request_cached<R: Send>(
+    session: &mut EagerSession<'_>,
+    workspaces: Vec<CudaLayerWorkspace>,
+    callback: impl FnOnce(&mut CudaRequest, &mut EagerSession<'_>) -> Result<R> + Send,
+) -> Result<(Vec<CudaLayerWorkspace>, R)> {
+    let identity = with_cuda_exec_session(session.backend_session(), |cuda| {
+        cuda.runtime().runtime_identity()
+    })
+    .ok_or_else(|| {
+        tenferro_tensor::Error::unsupported("cuda_request", "CUDA execution session required")
+    })?;
+    let cached = KERNEL_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        cache
+            .iter()
+            .position(|kernels| *kernels.runtime_identity() == identity)
+            .map(|index| cache.swap_remove(index))
+    });
+    let kernels = match cached {
+        Some(kernels) => kernels,
+        None => {
+            let arch = cuda_arch(session)?;
+            with_cuda_exec_session(session.backend_session(), |cuda| {
+                cuda.with_raw("gated_delta_compile", |raw| {
+                    CudaKernels::compile(raw, &arch)
+                })
+            })
+            .expect("CUDA session checked above")?
+        }
+    };
+    let (kernels, workspaces, result) = with_cuda_request(session, kernels, workspaces, callback)?;
+    KERNEL_CACHE.with(|cache| {
+        let mut cache = cache.borrow_mut();
+        if cache.len() >= MAX_CACHED_MODULES {
+            cache.remove(0);
+        }
+        cache.push(kernels);
+    });
+    Ok((workspaces, result))
 }

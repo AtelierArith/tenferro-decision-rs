@@ -8,7 +8,8 @@
 //! [`JeffBackend`] selects the forward: the default `Auto` picks the optimized
 //! host path ([`forward_host_opt_with`]); `Host` runs the all-host oracle
 //! ([`forward_reference_with`]); `Tenferro` is the backend-portable path (slower
-//! on CPU today).
+//! on CPU today) and the only one that runs on a [`Device::Cuda`] runtime
+//! ([`JeffEngine::with_device`] / [`JeffEngine::load_with_device`]).
 //!
 //! Row `i` of the prepared state answers question `i`, so the batch and the
 //! [`QuestionSet`] must have the same length. Each question selects its own
@@ -27,14 +28,15 @@ use decision_core::{
     Answer, DecisionEngine, DecisionError, PreparedState, Question, QuestionSet, Result, State,
 };
 use tenferro_ad::EagerRuntime;
-use tenferro_cpu::CpuBackend;
+pub use tenferro_ext::Device;
 use tenferro_gated_delta::GatedDeltaWorkspace;
 use tenferro_infer::TensorCache;
 
 use crate::config::DecisionConfig;
 use crate::host_opt::{HostOptWorkspace, forward_host_opt_with};
 use crate::model::{
-    DeltaKernel, JeffConfig, JeffWeights, forward_reference_with, forward_tenferro_cached_kernel,
+    CudaDeltaWorkspaces, DeltaKernel, JeffConfig, JeffWeights, forward_reference_with,
+    forward_tenferro_device,
 };
 use crate::readout::{choice_answer, noul_answer, score_answer};
 
@@ -67,10 +69,14 @@ pub struct JeffEngine {
     decision: DecisionConfig,
     weights: JeffWeights,
     backend: JeffBackend,
-    /// The tenferro runtime the tenferro forward runs on (CPU today).
+    /// The device of `runtime`.
+    device: Device,
+    /// The tenferro runtime the tenferro forward runs on.
     runtime: Arc<EagerRuntime>,
     /// DeltaNet scratch reused across rows.
     workspace: GatedDeltaWorkspace,
+    /// CUDA DeltaNet layer workspaces reused across rows ([`DeltaKernel::Cuda`]).
+    cuda_workspaces: CudaDeltaWorkspaces,
     /// Activation buffers for the host-optimized forward.
     host_opt: HostOptWorkspace,
     /// Weight tensors cached across rows (tenferro backend).
@@ -107,14 +113,16 @@ impl JeffEngine {
                 ),
             ));
         }
-        let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).map_err(backend_error)?;
+        let runtime = Device::Cpu.runtime().map_err(backend_error)?;
         Ok(Self {
             config,
             decision,
             weights,
             backend,
+            device: Device::Cpu,
             runtime,
             workspace: GatedDeltaWorkspace::new(),
+            cuda_workspaces: CudaDeltaWorkspaces::new(),
             host_opt: HostOptWorkspace::new(),
             cache: TensorCache::new(),
             delta_kernel: DeltaKernel::default(),
@@ -132,6 +140,17 @@ impl JeffEngine {
         } else {
             Ok(engine)
         }
+    }
+
+    /// Load a local checkpoint and run it on `device`.
+    ///
+    /// [`Device::Cpu`] keeps the default forward; a CUDA device selects the
+    /// tenferro forward with the CUDA DeltaNet layer (see [`Self::with_device`]).
+    pub fn load_with_device(
+        directory: impl AsRef<std::path::Path>,
+        device: Device,
+    ) -> Result<Self> {
+        Self::load(directory)?.with_device(device)
     }
 
     /// Resolve a Hub snapshot and load it with the default forward backend.
@@ -189,6 +208,42 @@ impl JeffEngine {
     pub fn with_delta_kernel(mut self, kernel: DeltaKernel) -> Self {
         self.delta_kernel = kernel;
         self
+    }
+
+    /// Run the engine on `device`, replacing its tenferro runtime.
+    ///
+    /// Weights are uploaded to the new runtime once, on the first forward, and
+    /// stay resident (cached) for later calls; each call then uploads only the
+    /// token ids and mask and downloads the readout logits.
+    ///
+    /// Only the tenferro forward runs on a GPU, so a CUDA device switches the
+    /// backend to [`JeffBackend::Tenferro`] with [`DeltaKernel::Cuda`].
+    /// Selecting [`Device::Cpu`] restores the CPU runtime and, if the CUDA
+    /// DeltaNet kernel was selected, the default kernel. Creating a CUDA
+    /// runtime fails (without CPU fallback) when the `cuda` feature is off or
+    /// no device is available.
+    pub fn with_device(mut self, device: Device) -> Result<Self> {
+        self.runtime = device.runtime().map_err(backend_error)?;
+        self.device = device;
+        self.cache = TensorCache::new();
+        self.cuda_workspaces = CudaDeltaWorkspaces::new();
+        if device.is_cuda() {
+            self.backend = JeffBackend::Tenferro;
+            self.delta_kernel = DeltaKernel::Cuda;
+        } else if self.delta_kernel == DeltaKernel::Cuda {
+            self.delta_kernel = DeltaKernel::default();
+        }
+        Ok(self)
+    }
+
+    /// The device the tenferro forward runs on.
+    pub fn device(&self) -> Device {
+        self.device
+    }
+
+    /// The selected Gated DeltaNet formulation of the tenferro forward.
+    pub fn delta_kernel(&self) -> DeltaKernel {
+        self.delta_kernel
     }
 
     /// The selected forward.
@@ -249,8 +304,9 @@ impl JeffEngine {
             JeffBackend::Tenferro => self
                 .runtime
                 .with_eager_session(|session| {
-                    forward_tenferro_cached_kernel(
+                    forward_tenferro_device(
                         &mut self.workspace,
+                        &mut self.cuda_workspaces,
                         &mut self.cache,
                         session,
                         &self.config,
@@ -308,7 +364,7 @@ impl JeffEngine {
 /// Map a tenferro backend-construction error into a decision error.
 fn backend_error(error: tenferro_ad::Error) -> DecisionError {
     DecisionError::Backend {
-        message: format!("failed to create the tenferro CPU runtime: {error}"),
+        message: format!("failed to create the tenferro runtime: {error}"),
         source: Some(Box::new(error)),
     }
 }
