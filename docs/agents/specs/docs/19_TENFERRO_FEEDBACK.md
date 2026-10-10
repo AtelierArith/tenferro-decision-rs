@@ -218,3 +218,32 @@ Hardware validation of the CUDA engines (pinned `471c427`, RTX 3060) found:
   now cached directly.
 - **Per-op host overhead** (~40 µs per eager op incl. cuBLAS/cuTENSOR plan
   lookup and allocation) bounds small-batch latency once kernels are fused.
+
+
+## Raw single-stream CUDA forward (2026-10-11)
+
+Removing the ~25 ms per-call floor of the CUDA engines meant running each
+forward in one `CudaExecSession::with_raw` scope (see `23_TENFERRO_NATIVE.md`,
+"Raw single-stream CUDA forward"). What the pinned seam (`471c427`) lacked:
+
+- **No BLAS through the raw seam.** `raw::Session` exposes the stream
+  (`StreamRef::raw_handle`) but no cuBLAS handle, so the extension creates its
+  own (cudarc 0.19, the same crate and features tenferro-gpu uses) per thread
+  and runtime and binds it to the captured stream. A `Session::cublas()` (or a
+  raw GEMM entry point) would avoid a second handle per runtime.
+- **CubeCL's memory pool never returns memory.** The CubeCL client is
+  process-global per device and keeps freed pages reserved. Weights parked in
+  `alloc_output` tensors by one engine stay reserved after it drops, so a
+  second engine in the same process (e.g. consecutive hardware tests) ran out
+  of the 12 GB device. The raw path therefore allocates its persistent buffers
+  with `cuMemAlloc` on the retained primary context and frees them on drop. A
+  public pool trim (`memory_cleanup`) or an allocation API outside the pool
+  would let extensions stay inside tenferro's allocator.
+- **Kernel arguments.** `KernelArg::DevicePtr` is only constructible from a
+  `TensorRef`/`TensorMut`; buffers addressed by offset inside an arena are
+  passed as `KernelArg::u64` (ABI-identical). A `KernelArg::device_ptr(u64)`
+  escape (unsafe) would document that use.
+- **Dynamic shared memory above 48 KB** needs `cuFuncSetAttribute`, which the
+  raw `Function` does not expose; the raw kernels stay within 48 KB.
+- **Entry cost.** `with_raw` still flushes CubeCL with a host barrier on
+  entry; with one scope per forward this is negligible.

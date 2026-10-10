@@ -43,6 +43,30 @@ impl Device {
     }
 }
 
+/// How an engine runs its forward on a CUDA device.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum CudaPath {
+    /// One raw single-stream scope per forward ([`crate::raw_exec`]): cuBLAS
+    /// and NVRTC kernels on tenferro's stream, with weights and scratch
+    /// resident. Engines fall back to [`Self::Native`] for models the raw
+    /// path does not support. The default.
+    #[default]
+    Raw,
+    /// The tenferro-native eager forward (backend-portable).
+    Native,
+}
+
+impl CudaPath {
+    /// [`CudaPath::Raw`], or [`CudaPath::Native`] when
+    /// `TENFERRO_DECISION_CUDA_PATH=native`.
+    pub fn from_env() -> Self {
+        match std::env::var("TENFERRO_DECISION_CUDA_PATH").as_deref() {
+            Ok("native") => CudaPath::Native,
+            _ => CudaPath::Raw,
+        }
+    }
+}
+
 impl std::fmt::Display for Device {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {

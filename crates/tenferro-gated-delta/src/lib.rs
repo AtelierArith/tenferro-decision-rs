@@ -37,6 +37,8 @@ pub mod extension;
 pub mod layer;
 pub mod ops;
 pub mod plan;
+#[cfg(feature = "cuda")]
+pub mod raw;
 pub mod recurrent;
 pub mod reference;
 pub mod tensor_layer;
