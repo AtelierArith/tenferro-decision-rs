@@ -1,0 +1,92 @@
+{
+  "architecture": "x86_64",
+  "blas_config": "LBTConfig([ILP64] libopenblas64_.so)",
+  "blas_threads": 1,
+  "checkpoint": "0f212b3e72acb4dde3f7da61e925d6ab7f819990",
+  "cpu_model": "AMD Ryzen 9 PRO 8945HS w/ Radeon 780M Graphics",
+  "julia_threads": 8,
+  "julia_version": "1.13.1",
+  "load_ms": 4797.731424,
+  "os": "Linux",
+  "runtime": "julia-cpu",
+  "shapes": [
+    {
+      "batch": 1,
+      "iterations": 15,
+      "length": 8,
+      "ms_mean": 78.48108266666668,
+      "ms_median": 75.99561,
+      "ms_min": 75.419206,
+      "samples_ms": [
+        92.131674,
+        82.626979,
+        75.946961,
+        75.830451,
+        84.268907,
+        81.066927,
+        75.613558,
+        75.419206,
+        78.975328,
+        76.115437,
+        75.817528,
+        75.878908,
+        75.99561,
+        75.484795,
+        76.043971
+      ]
+    },
+    {
+      "batch": 1,
+      "iterations": 15,
+      "length": 16,
+      "ms_mean": 89.40508673333332,
+      "ms_median": 84.368627,
+      "ms_min": 83.568835,
+      "samples_ms": [
+        83.568835,
+        95.956067,
+        84.368627,
+        83.744892,
+        84.226674,
+        95.588479,
+        83.733921,
+        86.324966,
+        111.672318,
+        92.00728,
+        84.002388,
+        84.289478,
+        95.390921,
+        84.203664,
+        91.997791
+      ]
+    },
+    {
+      "batch": 1,
+      "iterations": 15,
+      "length": 64,
+      "ms_mean": 172.4279921333333,
+      "ms_median": 168.120683,
+      "ms_min": 153.164284,
+      "samples_ms": [
+        153.164284,
+        153.812378,
+        157.90877,
+        191.320869,
+        168.120683,
+        160.508389,
+        170.554968,
+        175.896045,
+        193.270797,
+        239.43776,
+        168.730405,
+        184.819608,
+        161.372522,
+        153.984485,
+        153.517919
+      ]
+    }
+  ],
+  "warmup": 5,
+  "source_revision": "d190d56",
+  "measurement_note": "Julia benchmark adds raw samples and CPU/BLAS metadata; computation unchanged."
+}

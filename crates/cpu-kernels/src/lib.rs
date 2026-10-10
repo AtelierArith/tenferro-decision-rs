@@ -707,6 +707,20 @@ pub fn jeff_full_attention_into(
                     }
                 }
             }
+            if try_causal_attention_gemm_into(
+                &qh,
+                &kh,
+                &vh,
+                std::slice::from_raw_parts(gate.add(feat * length), head_dim * length),
+                mask,
+                length,
+                head_dim,
+                true,
+                true,
+                std::slice::from_raw_parts_mut(out.add(feat * length), head_dim * length),
+            ) {
+                return;
+            }
             let mut probs = vec![0.0f32; length];
             let mut oh = vec![0.0f32; head_dim];
             for query in 0..length {
@@ -1404,3 +1418,281 @@ mod tests {
 
 #[cfg(feature = "onednn")]
 pub mod prepared_projection;
+
+pub mod packed_projection;
+
+/// Projection provider for Jeff's existing feature-by-token CPU path.
+pub trait RowMajorProjection {
+    /// Compute `weightᵀ * x`, optionally adding the current output.
+    #[allow(clippy::too_many_arguments)]
+    fn project(
+        &mut self,
+        weight: &[f32],
+        input: usize,
+        output: usize,
+        x: &[f32],
+        length: usize,
+        y: &mut [f32],
+        accumulate: bool,
+    ) -> Result<(), String>;
+}
+
+/// The existing portable GEMM provider, without constant preparation.
+#[derive(Default)]
+pub struct PortableProjection;
+impl RowMajorProjection for PortableProjection {
+    #[allow(clippy::too_many_arguments)]
+    fn project(
+        &mut self,
+        weight: &[f32],
+        input: usize,
+        output: usize,
+        x: &[f32],
+        length: usize,
+        y: &mut [f32],
+        accumulate: bool,
+    ) -> Result<(), String> {
+        if accumulate {
+            matmul_row_major_add_into(weight, input, output, x, length, y);
+        } else {
+            matmul_row_major_into(weight, input, output, x, length, y);
+        }
+        Ok(())
+    }
+}
+
+/// Library GEMM contractions for a single normalized, rotated attention head.
+/// Returns false for short inputs or nonfinite Q/K/V, where callers retain their
+/// scalar formulation. `token_major` describes Q/K/V; gate/output stay feature
+/// major. Empty-row handling preserves the caller's existing formulation.
+#[allow(clippy::too_many_arguments)]
+pub fn try_causal_attention_gemm_into(
+    q: &[f32],
+    k: &[f32],
+    v: &[f32],
+    gate: &[f32],
+    mask: &[f32],
+    length: usize,
+    width: usize,
+    token_major: bool,
+    empty_rows_are_zero: bool,
+    output: &mut [f32],
+) -> bool {
+    if length < 32 || width == 0 || !q.iter().chain(k).chain(v).all(|value| value.is_finite()) {
+        return false;
+    }
+    let extent = length
+        .checked_mul(width)
+        .expect("attention dimensions overflow");
+    assert_eq!(q.len(), extent, "query length");
+    assert_eq!(k.len(), extent, "key length");
+    assert_eq!(v.len(), extent, "value length");
+    assert_eq!(gate.len(), extent, "gate length");
+    assert_eq!(output.len(), extent, "output length");
+    assert_eq!(mask.len(), length, "mask length");
+    let (token_stride, channel_stride) = if token_major {
+        (width as isize, 1)
+    } else {
+        (1, length as isize)
+    };
+    let score_extent = length
+        .checked_mul(length)
+        .expect("attention score dimensions overflow");
+    let mut probabilities = vec![0.; score_extent];
+    // SAFETY: all matrices describe the checked single-head slices. Q/K and
+    // scores are disjoint, with scores in row-major (query,key) order.
+    unsafe {
+        matrixmultiply::sgemm(
+            length,
+            width,
+            length,
+            1. / (width as f32).sqrt(),
+            q.as_ptr(),
+            token_stride,
+            channel_stride,
+            k.as_ptr(),
+            channel_stride,
+            token_stride,
+            0.,
+            probabilities.as_mut_ptr(),
+            length as isize,
+            1,
+        );
+    }
+    for (query, row) in probabilities.chunks_exact_mut(length).enumerate() {
+        let mut max = f32::NEG_INFINITY;
+        for (key, score) in row.iter_mut().enumerate() {
+            if key > query || mask[key] == 0. {
+                *score = f32::NEG_INFINITY;
+            }
+            max = max.max(*score);
+        }
+        let mut sum = 0.;
+        for score in row.iter_mut() {
+            *score = if score.is_finite() {
+                (*score - max).exp()
+            } else {
+                0.
+            };
+            sum += *score;
+        }
+        for score in row {
+            *score = if sum == 0. && empty_rows_are_zero {
+                0.
+            } else {
+                *score / sum
+            };
+        }
+    }
+    // SAFETY: V is (channel,key), P^T (key,query), output (channel,query).
+    // The exclusive output slice belongs to one attention head.
+    unsafe {
+        matrixmultiply::sgemm(
+            width,
+            length,
+            length,
+            1.,
+            v.as_ptr(),
+            channel_stride,
+            token_stride,
+            probabilities.as_ptr(),
+            1,
+            length as isize,
+            0.,
+            output.as_mut_ptr(),
+            length as isize,
+            1,
+        );
+    }
+    for (out, g) in output.iter_mut().zip(gate) {
+        *out *= 1. / (1. + (-g).exp());
+    }
+    true
+}
+
+#[cfg(test)]
+mod attention_gemm_tests {
+    use super::*;
+    #[test]
+    #[should_panic(expected = "query length")]
+    fn causal_gemm_rejects_malformed_slices_before_library_execution() {
+        try_causal_attention_gemm_into(
+            &[0.; 31],
+            &[0.; 32],
+            &[0.; 32],
+            &[0.; 32],
+            &[1.; 32],
+            32,
+            1,
+            true,
+            true,
+            &mut [0.; 32],
+        );
+    }
+    #[test]
+    fn causal_gemm_matches_scalar_for_layouts_masks_and_empty_rows() {
+        let (length, width) = (33usize, 7usize);
+        let q: Vec<f32> = (0..length * width)
+            .map(|i| (i % 19) as f32 * 0.02 - 0.18)
+            .collect();
+        let k: Vec<f32> = (0..length * width)
+            .map(|i| (i % 23) as f32 * 0.02 - 0.22)
+            .collect();
+        let v: Vec<f32> = (0..length * width)
+            .map(|i| (i % 29) as f32 * 0.03 - 0.42)
+            .collect();
+        let gate = vec![0.5; length * width];
+        let mask: Vec<f32> = (0..length)
+            .map(|i| if i < 3 || i % 5 == 0 { 0. } else { 1. })
+            .collect();
+        for empty_zero in [false, true] {
+            let mut expected = vec![0.; length * width];
+            for query in 0..length {
+                let mut scores = vec![f32::NEG_INFINITY; length];
+                for key in 0..=query {
+                    if mask[key] != 0. {
+                        let mut sum = 0.;
+                        for channel in 0..width {
+                            sum += q[channel * length + query] * k[channel * length + key];
+                        }
+                        scores[key] = sum / (width as f32).sqrt();
+                    }
+                }
+                let max = scores.iter().copied().fold(f32::NEG_INFINITY, f32::max);
+                let mut sum = 0.;
+                for score in &mut scores {
+                    *score = if score.is_finite() {
+                        (*score - max).exp()
+                    } else {
+                        0.
+                    };
+                    sum += *score;
+                }
+                for channel in 0..width {
+                    let mut acc = 0.;
+                    for key in 0..length {
+                        acc += v[channel * length + key] * scores[key];
+                    }
+                    let value = if sum == 0. && empty_zero {
+                        0.
+                    } else {
+                        acc / sum
+                    };
+                    expected[channel * length + query] = value / (1.0 + (-0.5f32).exp());
+                }
+            }
+            for token_major in [false, true] {
+                let convert = |data: &[f32]| {
+                    let mut result = vec![0.; data.len()];
+                    for channel in 0..width {
+                        for token in 0..length {
+                            result[token * width + channel] = data[channel * length + token];
+                        }
+                    }
+                    result
+                };
+                let (qh, kh, vh) = if token_major {
+                    (convert(&q), convert(&k), convert(&v))
+                } else {
+                    (q.clone(), k.clone(), v.clone())
+                };
+                let mut actual = vec![f32::NAN; length * width];
+                assert!(try_causal_attention_gemm_into(
+                    &qh,
+                    &kh,
+                    &vh,
+                    &gate,
+                    &mask,
+                    length,
+                    width,
+                    token_major,
+                    empty_zero,
+                    &mut actual
+                ));
+                for (a, b) in actual.iter().zip(&expected) {
+                    assert!(if b.is_nan() {
+                        a.is_nan()
+                    } else {
+                        (a - b).abs() < 2e-6
+                    });
+                }
+            }
+        }
+        let mut nonfinite = v.clone();
+        nonfinite[0] = f32::INFINITY;
+        let mut output = vec![17.; length * width];
+        assert!(!try_causal_attention_gemm_into(
+            &q,
+            &k,
+            &nonfinite,
+            &gate,
+            &mask,
+            length,
+            width,
+            false,
+            true,
+            &mut output
+        ));
+        assert!(output.iter().all(|v| *v == 17.));
+    }
+}

@@ -1,0 +1,35 @@
+{
+  "exit_code": 0,
+  "duration_s": 32.179,
+  "poll_interval_s": 0.5,
+  "observations": 63,
+  "heavy_other_process_threshold_cores": 0.25,
+  "max_other_cpu_cores": 1.036,
+  "heavy_other_process_observations": [
+    {
+      "elapsed_s": 21.968,
+      "processes": [
+        {
+          "pid": 336834,
+          "process": "codex",
+          "cpu_cores": 0.254
+        }
+      ]
+    },
+    {
+      "elapsed_s": 22.48,
+      "processes": [
+        {
+          "pid": 42830,
+          "process": "codex",
+          "cpu_cores": 0.313
+        },
+        {
+          "pid": 336834,
+          "process": "codex",
+          "cpu_cores": 0.469
+        }
+      ]
+    }
+  ]
+}

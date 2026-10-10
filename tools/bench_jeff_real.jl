@@ -22,10 +22,10 @@ function measure(f::Function, warmup::Int, iters::Int)
         f()
         push!(samples, (time_ns() - start) / 1e6)
     end
-    sort!(samples)
     Dict(
         "ms_median" => median(samples),
-        "ms_min" => first(samples),
+        "ms_min" => minimum(samples),
+        "samples_ms" => samples,
         "ms_mean" => mean(samples),
         "iterations" => iters,
     )
@@ -57,6 +57,10 @@ out = Dict(
     "warmup" => WARMUP,
     "shapes" => shapes,
     "julia_version" => string(VERSION),
+    "cpu_model" => first(Sys.cpu_info()).model,
+    "os" => string(Sys.KERNEL),
+    "architecture" => string(Sys.ARCH),
+    "blas_config" => string(BLAS.get_config()),
     "julia_threads" => Threads.nthreads(),
     "blas_threads" => BLAS.get_num_threads(),
 )

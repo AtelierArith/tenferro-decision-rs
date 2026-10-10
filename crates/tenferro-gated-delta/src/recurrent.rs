@@ -16,7 +16,7 @@ use rayon::prelude::*;
 
 use crate::config::GatedDeltaConfig;
 use crate::conv::causal_depthwise_silu_into;
-use crate::layer::{GatedDeltaWeightSlices, GatedDeltaWeights, linear_into, mask_rows_into};
+use crate::layer::{GatedDeltaWeightSlices, GatedDeltaWeights, mask_rows_into};
 use crate::ops::{l2_normalize, rms_noncentered_in_place, sigmoid, silu, softplus};
 use crate::workspace::{GatedDeltaWorkspace, HeadScratch};
 
@@ -41,6 +41,26 @@ pub fn delta_layer_recurrent_slices<'a>(
     x: &[f32],
     mask: &[f32],
     ws: &'a mut GatedDeltaWorkspace,
+) -> decision_core::Result<&'a [f32]> {
+    delta_layer_recurrent_with_projection(
+        cfg,
+        weights,
+        x,
+        mask,
+        ws,
+        &mut cpu_kernels::PortableProjection,
+    )
+}
+
+/// The existing recurrent CPU layer with a prepared projection provider.
+/// The scan and normalization are identical to the portable formulation.
+pub fn delta_layer_recurrent_with_projection<'a>(
+    cfg: &GatedDeltaConfig,
+    weights: &GatedDeltaWeightSlices<'_>,
+    x: &[f32],
+    mask: &[f32],
+    ws: &'a mut GatedDeltaWorkspace,
+    projection: &mut dyn cpu_kernels::RowMajorProjection,
 ) -> decision_core::Result<&'a [f32]> {
     weights.validate(cfg)?;
     let length = mask.len();
@@ -74,14 +94,20 @@ pub fn delta_layer_recurrent_slices<'a>(
     stage!("mask");
 
     ws.qkv_proj.resize(conv_channels * length, 0.0);
-    linear_into(
-        weights.qkv,
-        cfg.hidden,
-        conv_channels,
-        &ws.masked,
-        length,
-        &mut ws.qkv_proj,
-    );
+    projection
+        .project(
+            weights.qkv,
+            cfg.hidden,
+            conv_channels,
+            &ws.masked,
+            length,
+            &mut ws.qkv_proj,
+            false,
+        )
+        .map_err(|message| decision_core::DecisionError::Backend {
+            message,
+            source: None,
+        })?;
     stage!("qkv");
 
     ws.mixed.resize(conv_channels * length, 0.0);
@@ -96,35 +122,53 @@ pub fn delta_layer_recurrent_slices<'a>(
     stage!("conv+silu");
 
     ws.z_proj.resize(value_width * length, 0.0);
-    linear_into(
-        weights.z,
-        cfg.hidden,
-        value_width,
-        &ws.masked,
-        length,
-        &mut ws.z_proj,
-    );
+    projection
+        .project(
+            weights.z,
+            cfg.hidden,
+            value_width,
+            &ws.masked,
+            length,
+            &mut ws.z_proj,
+            false,
+        )
+        .map_err(|message| decision_core::DecisionError::Backend {
+            message,
+            source: None,
+        })?;
     stage!("z");
 
     ws.a_proj.resize(cfg.value_heads * length, 0.0);
-    linear_into(
-        weights.a,
-        cfg.hidden,
-        cfg.value_heads,
-        &ws.masked,
-        length,
-        &mut ws.a_proj,
-    );
+    projection
+        .project(
+            weights.a,
+            cfg.hidden,
+            cfg.value_heads,
+            &ws.masked,
+            length,
+            &mut ws.a_proj,
+            false,
+        )
+        .map_err(|message| decision_core::DecisionError::Backend {
+            message,
+            source: None,
+        })?;
 
     ws.b_proj.resize(cfg.value_heads * length, 0.0);
-    linear_into(
-        weights.b,
-        cfg.hidden,
-        cfg.value_heads,
-        &ws.masked,
-        length,
-        &mut ws.b_proj,
-    );
+    projection
+        .project(
+            weights.b,
+            cfg.hidden,
+            cfg.value_heads,
+            &ws.masked,
+            length,
+            &mut ws.b_proj,
+            false,
+        )
+        .map_err(|message| decision_core::DecisionError::Backend {
+            message,
+            source: None,
+        })?;
     stage!("ab");
 
     ws.beta.resize(cfg.value_heads * length, 0.0);
@@ -169,14 +213,20 @@ pub fn delta_layer_recurrent_slices<'a>(
     stage!("out-copy");
 
     ws.output.resize(cfg.hidden * length, 0.0);
-    linear_into(
-        weights.out_proj,
-        value_width,
-        cfg.hidden,
-        &ws.out,
-        length,
-        &mut ws.output,
-    );
+    projection
+        .project(
+            weights.out_proj,
+            value_width,
+            cfg.hidden,
+            &ws.out,
+            length,
+            &mut ws.output,
+            false,
+        )
+        .map_err(|message| decision_core::DecisionError::Backend {
+            message,
+            source: None,
+        })?;
     stage!("out_proj");
     let _ = lap;
     Ok(&ws.output)

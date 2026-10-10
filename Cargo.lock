@@ -404,6 +404,7 @@ version = "0.1.0"
 dependencies = [
  "cc",
  "matrixmultiply",
+ "nano-gemm",
  "rayon",
 ]
 

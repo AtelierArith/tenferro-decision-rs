@@ -422,3 +422,79 @@ question/action reference with the actual checkpoint. Raw inputs, versions,
 samples and outputs are retained in
 [`bench-onednn-owned-2026-10-09`](../../../../fixtures/bench-onednn-owned-2026-10-09)
 and [`bench-python-final-2026-10-09`](../../../../fixtures/bench-python-final-2026-10-09).
+
+
+## Historical oneDNN Julia audit (2026-10-09)
+
+Remeasurement against the actual issue's Julia target, on Ryzen 9 PRO 8945HS,
+F32, eight runtime threads, five warmups and 15 samples, sequential processes:
+
+| shape | Julia Laya | Rust native Laya, oneDNN 3.1.1 |
+|---|---:|---:|
+| L8 B1 | 70.118 ms | 66.226 ms |
+| L64 B1 | 122.474 ms | 133.145 ms |
+| L8 B8 | 119.013 ms | 136.588 ms |
+
+Julia Jeff measured 75.996 / 84.369 / 168.121 ms for L8 / L16 / L64.
+These are fresh Julia measurements, not fresh Rust Jeff measurements. The
+previous Python comparison does not establish closure of the Julia gap.
+At that revision, long-sequence and batched Laya still missed the Julia target;
+this audit did not establish closure of issue #2. Rust Laya also checks each measured output against its host oracle;
+maximum observed absolute output error was 0.005859375 (the benchmark's
+scale-aware tolerance passed). No new upstream-output comparison was run here.
+
+The Julia harness now retains samples in acquisition order and reports CPU,
+OS, architecture and BLAS configuration. Rust metadata comes from bench-suite.
+Raw reports are in
+[`bench-julia-current-2026-10-09`](../../../../fixtures/bench-julia-current-2026-10-09).
+
+## Default CPU comparison without oneDNN (2026-10-10)
+
+The default CPU implementation now prepares immutable packed F32 projections
+through a tenferro extension using pinned nano-gemm library kernels. Laya uses
+these projections in its cached native forward. Jeff's Auto/HostOpt engine owns
+its checkpoint and prepared projections for up to 16 tokens; longer inputs use
+the existing portable provider and library GEMM attention contractions. The
+host oracle and the native composition for other backends remain the parity
+and portability paths. No oneDNN library is needed by either measured binary.
+
+Ryzen 9 PRO 8945HS, Linux x86_64, F32, eight threads per runtime, five warmups,
+15 timed forwards per shape, two sequential independent runs. Loading and
+lazy preparation are excluded. Rust metadata is captured by bench-suite;
+Julia reports its CPU/OS/version and actual BLAS configuration. The original
+prepared inputs and checkpoint snapshots match across runtimes.
+
+| model / shape | Rust run 1 / 2 | Julia run 1 / 2 | Rust / Julia, paired runs |
+|---|---:|---:|---:|
+| Laya L8 B1 | 63.35 / 61.90 ms | 70.48 / 71.41 ms | 0.90 / 0.87 |
+| Laya L16 B1 | 67.38 / 68.29 ms | 69.26 / 69.36 ms | 0.97 / 0.98 |
+| Laya L64 B1 | 128.41 / 116.94 ms | 122.68 / 123.89 ms | 1.05 / 0.94 |
+| Laya L8 B8 | 119.86 / 123.00 ms | 119.72 / 120.15 ms | 1.00 / 1.02 |
+| Jeff L8 B1 | 59.10 / 58.92 ms | 75.85 / 83.28 ms | 0.78 / 0.71 |
+| Jeff L16 B1 | 71.07 / 72.43 ms | 85.62 / 93.52 ms | 0.83 / 0.77 |
+| Jeff L64 B1 | 166.15 / 168.57 ms | 163.24 / 159.59 ms | 1.02 / 1.06 |
+
+The original multi-fold CPU gap is reduced to near parity across the measured
+production shapes. Rust is consistently faster at Laya L8/L16 and Jeff L8/L16;
+long-input/batch cases can be up to 5.6% slower. These results do not establish
+that Rust is universally faster. Compared with the earlier published portable
+Laya L64 medians of 178.2/179.0 ms and default Jeff L8 of 108.2/108.3 ms, the new
+paths are substantially faster. Those historical runs used different warmup
+conditions, so they are context, not a controlled attribution of this change.
+
+All Rust benchmark outputs are compared with the host oracle; both independent
+runs retain identical outputs. Maximum combined Laya logit/action error is
+0.00244140625 and maximum Jeff logit error is 0.000026226044, within existing
+scale-aware tolerances. Available production Laya question/action parity,
+explicit Jeff production-reference/engine parity, and Jeff Text/Json integration
+tests pass. Formatting, all-target workspace Clippy and workspace tests pass.
+
+The process monitor recorded no competing model, Julia or compilation jobs.
+The first Rust Laya run includes two brief Codex CPU bursts and the first Jeff
+run one brief kache daemon burst. The remaining six runs have no process above
+0.25 cores per sampling interval. Sequential order and thermal/
+scheduler drift limit small-difference claims. Earlier overlapping diagnostic
+runs are excluded. Raw samples, outputs, monitor records, source fingerprints
+and reproduction commands are in
+[`bench-packed-cpu-2026-10-10`](../../../../fixtures/bench-packed-cpu-2026-10-10).
+This CPU comparison makes no CUDA, WebGPU, Apple GPU or Apple Silicon claim.

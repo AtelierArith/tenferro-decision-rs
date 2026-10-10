@@ -41,6 +41,9 @@ def main() -> None:
     def ratio(a, b):
         return f"{a / b:.2f}×" if (a is not None and b) else "—"
 
+    def optional_median(report, key):
+        return (report.get(key) or {}).get("ms_median")
+
     def label(length, batch):
         return f"L{length}" if batch == 1 else f"L{length} B{batch}"
 
@@ -59,6 +62,29 @@ def main() -> None:
         f"`blas_threads={blas_threads}` (Jeff) / `{laya_blas_threads}` (Laya)."
     )
     print()
+
+    # Report the CPU paths selected by the production engines, separately from
+    # the reference and diagnostic implementations below.
+    prepared_laya_path = os.path.join(out, "rust_laya_prepared.json")
+    if os.path.isfile(prepared_laya_path):
+        prepared_laya = load("rust_laya_prepared.json")
+        print("### Production CPU forwards (ms, median)")
+        print()
+        print("| model | shape | Julia | Rust production | Rust / Julia |")
+        print("|---|---|---:|---:|---:|")
+        for shape in rust_jeff["shapes"]:
+            length, batch = shape["length"], shape["batch"]
+            j = by_shape(julia_jeff, length, batch)
+            rm = shape.get("prepared_cpu", {}).get("ms_median")
+            jm = j["ms_median"] if j else None
+            print(f"| Jeff | {label(length, batch)} | {ms(jm)} | {ms(rm)} | {ratio(rm, jm)} |")
+        for shape in prepared_laya["rows"]:
+            length, batch = shape["length"], shape["batch"]
+            j = by_shape(julia_laya, length, batch)
+            jm = j["ms_median"] if j else None
+            rm = shape["tenferro_ms"]
+            print(f"| Laya | {label(length, batch)} | {ms(jm)} | {ms(rm)} | {ratio(rm, jm)} |")
+        print()
 
     for name, rust, julia in (("jeff", rust_jeff, julia_jeff), ("laya", rust_laya, julia_laya)):
         filename = f"python_{name}.json"
@@ -125,9 +151,9 @@ def main() -> None:
             j8_ms = min(v for v in (j8_ms, a8["ms_median"]) if v is not None)
     jeff_tenferro = [
         ("Rust host_opt (L8)", host8_ms),
-        ("Rust tenferro `HostRecurrent` (cached)", rust_jeff.get("tenferro_cached_forward_8", {}).get("ms_median")),
-        ("Rust tenferro `TensorNative` (cached)", rust_jeff.get("tenferro_native_forward_8", {}).get("ms_median")),
-        ("Rust tenferro `HostRecurrent` (fresh cache)", rust_jeff.get("tenferro_forward_8", {}).get("ms_median")),
+        ("Rust tenferro `HostRecurrent` (cached)", optional_median(rust_jeff, "tenferro_cached_forward_8")),
+        ("Rust tenferro `TensorNative` (cached)", optional_median(rust_jeff, "tenferro_native_forward_8")),
+        ("Rust tenferro `HostRecurrent` (fresh cache)", optional_median(rust_jeff, "tenferro_forward_8")),
     ]
     print("### Jeff L8 — Rust host vs Rust tenferro")
     print()

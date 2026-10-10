@@ -18,6 +18,7 @@ pub mod config;
 pub mod engine;
 pub mod host_opt;
 pub mod model;
+pub mod prepared_cpu;
 pub mod readout;
 pub mod tokenizer;
 

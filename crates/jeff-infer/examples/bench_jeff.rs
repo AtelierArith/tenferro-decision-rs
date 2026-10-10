@@ -43,14 +43,19 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let dir = args
         .get(1)
-        .expect("usage: bench_jeff <checkpoint_dir> [warmup iters]");
+        .expect("usage: bench_jeff <checkpoint_dir> [warmup iters] [--host-only]");
     let warmup: usize = args.get(2).map(|s| s.parse().unwrap()).unwrap_or(2);
     let iters: usize = args.get(3).map(|s| s.parse().unwrap()).unwrap_or(5);
+
+    assert!(iters > 0, "at least one measured iteration required");
+    let host_only = args.iter().any(|arg| arg == "--host-only");
 
     let start = Instant::now();
     let checkpoint = load_checkpoint(dir).expect("load checkpoint");
     let load_ms = start.elapsed().as_secs_f64() * 1000.0;
-    let (cfg, weights) = (checkpoint.config, checkpoint.weights);
+    let (cfg, weights) = (checkpoint.config, std::sync::Arc::new(checkpoint.weights));
+    let mut prepared =
+        jeff_infer::prepared_cpu::PreparedCpuModel::from_shared(cfg, weights.clone()).unwrap();
 
     let mut shapes = Vec::new();
     let mut host_opt_ws = HostOptWorkspace::new();
@@ -96,6 +101,32 @@ fn main() {
         }
         value["host_opt_logits"] = json!([actual]);
         value["max_host_reference_output_error"] = json!(max_error);
+        {
+            let mut workspace = HostOptWorkspace::new();
+            for _ in 0..warmup {
+                prepared.forward(&mut workspace, &ids, &mask).unwrap();
+            }
+            let mut samples = Vec::new();
+            for _ in 0..iters {
+                let timer = Instant::now();
+                prepared.forward(&mut workspace, &ids, &mask).unwrap();
+                samples.push(timer.elapsed().as_secs_f64() * 1000.);
+            }
+            let actual = prepared.forward(&mut workspace, &ids, &mask).unwrap();
+            let mut max_error = 0.0f32;
+            for (a, b) in actual.iter().zip(&oracle) {
+                assert!(a.is_finite() && b.is_finite());
+                let error = (a - b).abs();
+                assert!(
+                    error <= 2e-4 + b.abs() * 2e-5,
+                    "prepared CPU output error {error}"
+                );
+                max_error = max_error.max(error);
+            }
+            value["prepared_cpu"] = stats(samples);
+            value["prepared_cpu_logits"] = json!([actual]);
+            value["max_prepared_reference_output_error"] = json!(max_error);
+        }
         shapes.push(value);
     }
 
@@ -136,9 +167,21 @@ fn main() {
         value["cache_entries"] = json!(cache.len());
         value
     };
-    let tenferro = time(false, DeltaKernel::default());
-    let tenferro_cached = time(true, DeltaKernel::HostRecurrent);
-    let tenferro_native = time(true, DeltaKernel::TensorNative);
+    let tenferro = if host_only {
+        serde_json::Value::Null
+    } else {
+        time(false, DeltaKernel::default())
+    };
+    let tenferro_cached = if host_only {
+        serde_json::Value::Null
+    } else {
+        time(true, DeltaKernel::HostRecurrent)
+    };
+    let tenferro_native = if host_only {
+        serde_json::Value::Null
+    } else {
+        time(true, DeltaKernel::TensorNative)
+    };
 
     let mut metadata = bench_suite::BenchMetadata::capture();
     metadata.profile = Some(
@@ -154,6 +197,8 @@ fn main() {
         "runtime": "rust-cpu",
         "metadata": metadata,
         "rayon_threads": rayon::current_num_threads(),
+        "prepared_cpu_provider": "nano-gemm-packed, <=16 tokens; portable GEMM otherwise",
+        "host_only": host_only,
         "checkpoint": dir,
         "load_ms": load_ms,
         "warmup": warmup,

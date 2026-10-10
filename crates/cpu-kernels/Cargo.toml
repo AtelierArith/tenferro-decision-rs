@@ -17,6 +17,7 @@ openblas = []
 
 [dependencies]
 matrixmultiply.workspace = true
+nano-gemm = { version = "=0.2.2", features = ["x86-v4"] }
 rayon.workspace = true
 
 [build-dependencies]

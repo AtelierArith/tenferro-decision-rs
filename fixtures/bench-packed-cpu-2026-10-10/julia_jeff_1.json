@@ -1,0 +1,92 @@
+{
+  "architecture": "x86_64",
+  "blas_config": "LBTConfig([ILP64] libopenblas64_.so)",
+  "blas_threads": 1,
+  "checkpoint": "0f212b3e72acb4dde3f7da61e925d6ab7f819990",
+  "cpu_model": "AMD Ryzen 9 PRO 8945HS w/ Radeon 780M Graphics",
+  "julia_threads": 8,
+  "julia_version": "1.13.1",
+  "load_ms": 4261.51359,
+  "os": "Linux",
+  "runtime": "julia-cpu",
+  "shapes": [
+    {
+      "batch": 1,
+      "iterations": 15,
+      "length": 8,
+      "ms_mean": 82.51771346666668,
+      "ms_median": 75.844896,
+      "ms_min": 75.2592,
+      "samples_ms": [
+        107.495353,
+        75.2592,
+        112.830288,
+        78.47209,
+        83.538761,
+        75.469356,
+        94.05809,
+        75.723954,
+        77.800954,
+        78.710719,
+        75.519903,
+        75.729615,
+        75.541604,
+        75.844896,
+        75.770919
+      ]
+    },
+    {
+      "batch": 1,
+      "iterations": 15,
+      "length": 16,
+      "ms_mean": 89.02110760000001,
+      "ms_median": 85.61997,
+      "ms_min": 83.686375,
+      "samples_ms": [
+        83.991932,
+        83.686375,
+        85.61997,
+        114.952944,
+        86.757554,
+        83.94293,
+        84.048643,
+        83.776802,
+        89.725091,
+        90.468645,
+        87.938808,
+        84.50122,
+        98.643802,
+        92.267842,
+        84.994056
+      ]
+    },
+    {
+      "batch": 1,
+      "iterations": 15,
+      "length": 64,
+      "ms_mean": 169.68224139999998,
+      "ms_median": 163.239437,
+      "ms_min": 155.096794,
+      "samples_ms": [
+        155.096794,
+        163.239437,
+        157.477225,
+        158.241049,
+        189.249826,
+        160.414763,
+        199.333199,
+        163.081178,
+        162.604766,
+        167.532447,
+        189.291027,
+        165.914783,
+        156.771234,
+        172.864137,
+        184.121756
+      ]
+    }
+  ],
+  "warmup": 5,
+  "checkpoint_revision": "0f212b3e72acb4dde3f7da61e925d6ab7f819990",
+  "measurement_note": "Measured working-tree implementation atop d190d56417a0d6a95aee3486b53121f96fc7d813; source-digests.json identifies the measured source. Forward timing excludes model loading and warmed preparation."
+}

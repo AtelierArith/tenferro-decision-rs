@@ -198,6 +198,21 @@ M2 Max (12 cores, macOS 26, Julia 1.13.1, rustc 1.98.1, release build):
   Jeff "OpenBLAS" rows were really Accelerate/`BLAS=8`; update
   `QwenDecisionCore` (`Pkg.update`) to get the audited default.
 
+### CPU projection providers
+
+The default build uses owned, packed F32 weights and runtime-dispatched
+`nano-gemm` kernels through tenferro extension operations. Laya's CPU forward
+uses these projections; Jeff's production CPU path uses them for up to 16
+tokens, with the existing portable projection provider for longer inputs.
+Prepared weights and plans are reused across forwards. No oneDNN installation
+is needed for this path; other tenferro backends use the existing composition.
+
+Two measured eight-thread CPU runs reach 0.71–1.06 times the corresponding
+Julia forward medians across the production shapes. Long-input/batch cases
+remain near parity and can be 5.6% slower. See
+[`fixtures/bench-packed-cpu-2026-10-10`](fixtures/bench-packed-cpu-2026-10-10)
+for raw samples and reproduction commands.
+
 ### Optional oneDNN CPU provider
 
 Build Laya with `--features onednn` to use the owned oneDNN F32 projection,

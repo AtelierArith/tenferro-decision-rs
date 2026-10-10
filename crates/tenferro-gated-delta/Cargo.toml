@@ -15,7 +15,7 @@ cuda = ["dep:tenferro-gpu", "tenferro-ad/cuda", "tenferro-linalg/cuda"]
 [dependencies]
 decision-core.workspace = true
 cpu-kernels.workspace = true
-pulp.workspace = true
+pulp = { workspace = true, features = ["x86-v4"] }
 rayon.workspace = true
 tenferro-ad.workspace = true
 tenferro-runtime.workspace = true

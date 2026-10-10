@@ -1,0 +1,9 @@
+{
+  "exit_code": 0,
+  "duration_s": 11.807,
+  "poll_interval_s": 0.5,
+  "observations": 23,
+  "heavy_other_process_threshold_cores": 0.25,
+  "max_other_cpu_cores": 0.194,
+  "heavy_other_process_observations": []
+}

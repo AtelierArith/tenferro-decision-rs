@@ -6,7 +6,7 @@
 //! with [`crate::readout`].
 //!
 //! [`JeffBackend`] selects the forward: the default `Auto` picks the optimized
-//! host path ([`forward_host_opt_with`]); `Host` runs the all-host oracle
+//! CPU path with prepared tenferro projection extensions; `Host` runs the all-host oracle
 //! ([`forward_reference_with`]); `Tenferro` is the backend-portable path (slower
 //! on CPU today).
 //!
@@ -32,7 +32,7 @@ use tenferro_gated_delta::GatedDeltaWorkspace;
 use tenferro_infer::TensorCache;
 
 use crate::config::DecisionConfig;
-use crate::host_opt::{HostOptWorkspace, forward_host_opt_with};
+use crate::host_opt::HostOptWorkspace;
 use crate::model::{
     DeltaKernel, JeffConfig, JeffWeights, forward_reference_with, forward_tenferro_cached_kernel,
 };
@@ -41,9 +41,8 @@ use crate::readout::{choice_answer, noul_answer, score_answer};
 /// Which forward the engine runs.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum JeffBackend {
-    /// The optimized host forward ([`HostOpt`]). The production default: after
-    /// the `pulp` SIMD scan and the row-blocked host GEMM, it is the fastest at
-    /// every measured length.
+    /// The production CPU forward ([`HostOpt`]), with a SIMD recurrent scan
+    /// and prepared tenferro projection extensions for short inputs.
     ///
     /// [`HostOpt`]: JeffBackend::HostOpt
     #[default]
@@ -52,7 +51,8 @@ pub enum JeffBackend {
     Host,
     /// The host-optimized forward: same math as [`JeffBackend::Host`] but rayon
     /// parallel (tokens/heads/elements) with a reusable workspace, ported from
-    /// the Julia native CPU runtime. The fastest CPU path.
+    /// the Julia native CPU runtime, with prepared tenferro projections for
+    /// short inputs and the portable provider for longer sequences.
     HostOpt,
     /// The tenferro-native forward — backend-portable, with the DeltaNet
     /// running through the fused host recurrent kernel (`GatedDelta` extension
@@ -65,7 +65,8 @@ pub enum JeffBackend {
 pub struct JeffEngine {
     config: JeffConfig,
     decision: DecisionConfig,
-    weights: JeffWeights,
+    weights: Arc<JeffWeights>,
+    prepared_cpu: crate::prepared_cpu::PreparedCpuModel,
     backend: JeffBackend,
     /// The tenferro runtime the tenferro forward runs on (CPU today).
     runtime: Arc<EagerRuntime>,
@@ -108,7 +109,11 @@ impl JeffEngine {
             ));
         }
         let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).map_err(backend_error)?;
+        let weights = Arc::new(weights);
+        let prepared_cpu =
+            crate::prepared_cpu::PreparedCpuModel::from_shared(config, weights.clone())?;
         Ok(Self {
+            prepared_cpu,
             config,
             decision,
             weights,
@@ -241,7 +246,7 @@ impl JeffEngine {
             .collect();
         match self.backend {
             JeffBackend::Auto | JeffBackend::HostOpt => {
-                forward_host_opt_with(&mut self.host_opt, &self.config, &self.weights, ids, &mask)
+                self.prepared_cpu.forward(&mut self.host_opt, ids, &mask)
             }
             JeffBackend::Host => {
                 forward_reference_with(&mut self.workspace, &self.config, &self.weights, ids, &mask)

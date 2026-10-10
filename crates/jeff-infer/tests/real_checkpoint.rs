@@ -129,6 +129,21 @@ fn forward_matches_production_reference() {
         );
         assert!(diff < 1e-3 * scale, "native logits differ by {diff}");
     }
+    let mut prepared = jeff_infer::prepared_cpu::PreparedCpuModel::new(cfg, weights).unwrap();
+    let mut workspace = jeff_infer::host_opt::HostOptWorkspace::new();
+    for request in 0..2 {
+        let actual = prepared.forward(&mut workspace, &ids, &mask).unwrap();
+        assert_eq!(actual.len(), expected.len());
+        let diff = actual
+            .iter()
+            .zip(&expected)
+            .map(|(a, b)| (a - b).abs())
+            .fold(0.0f32, f32::max);
+        eprintln!(
+            "production Jeff prepared CPU request {request}: logit diff {diff} (scale {scale})"
+        );
+        assert!(diff < 1e-4 * scale, "prepared CPU logits differ by {diff}");
+    }
 }
 
 #[test]

@@ -179,6 +179,8 @@ fn main() {
             "warmup": warmup, "iters": iters, "rows": rows,
             "metadata": metadata,
             "rayon_threads": rayon::current_num_threads(),
+            "projection_provider": if cfg!(feature = "onednn") { "onednn" } else { "nano-gemm-packed" },
+            "onednn_enabled": cfg!(feature = "onednn"),
         }))
         .unwrap()
     );

@@ -302,3 +302,48 @@ fn tenferro_workspace_reuse_matches_reference() {
         assert!(max_diff <= 2e-2, "workspace reuse diff {max_diff}");
     }
 }
+
+#[test]
+fn prepared_cpu_model_reuses_owned_weights_across_lengths_and_threads() {
+    use jeff_infer::prepared_cpu::PreparedCpuModel;
+    let cfg = JeffConfig {
+        hidden: 32,
+        heads: 2,
+        head_dim: 16,
+        intermediate: 64,
+        eps: 1e-5,
+    };
+    let weights = std::sync::Arc::new(build_weights(&cfg, 12, 33, 71));
+    let mut model = PreparedCpuModel::from_shared(cfg, weights.clone()).unwrap();
+    let mut workspace = HostOptWorkspace::new();
+    let mut retained = None;
+    for length in [8, 16, 3, 1, 17, 32, 8] {
+        let ids: Vec<i64> = (0..length).map(|i| (i % 12) as i64).collect();
+        let mask: Vec<f32> = (0..length)
+            .map(|i| if i % 4 == 2 { 0. } else { 1. })
+            .collect();
+        let expected = forward_reference(&cfg, &weights, &ids, &mask).unwrap();
+        let actual = model.forward(&mut workspace, &ids, &mask).unwrap();
+        for (a, b) in actual.iter().zip(&expected) {
+            assert!((a - b).abs() <= 2e-4 + b.abs() * 2e-5);
+        }
+        if let Some((old, saved)) = &retained {
+            assert_eq!(old, saved);
+        }
+        retained = Some((actual.clone(), actual));
+    }
+    let mut clone = model.clone();
+    drop(model);
+    let expected = forward_reference(&cfg, &weights, &[1, 2, 3], &[1., 1., 1.]).unwrap();
+    drop(weights);
+    let actual = std::thread::spawn(move || {
+        clone
+            .forward(&mut HostOptWorkspace::new(), &[1, 2, 3], &[1., 1., 1.])
+            .unwrap()
+    })
+    .join()
+    .unwrap();
+    for (a, b) in actual.iter().zip(expected) {
+        assert!((a - b).abs() <= 2e-4 + b.abs() * 2e-5);
+    }
+}

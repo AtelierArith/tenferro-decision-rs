@@ -1,0 +1,20 @@
+{
+  "exit_code": 0,
+  "duration_s": 32.248,
+  "poll_interval_s": 0.5,
+  "observations": 63,
+  "heavy_other_process_threshold_cores": 0.25,
+  "max_other_cpu_cores": 0.391,
+  "heavy_other_process_observations": [
+    {
+      "elapsed_s": 15.863,
+      "processes": [
+        {
+          "pid": 1504,
+          "process": "kache",
+          "cpu_cores": 0.312
+        }
+      ]
+    }
+  ]
+}

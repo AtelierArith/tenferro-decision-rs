@@ -24,7 +24,7 @@
 use rayon::prelude::*;
 
 use decision_core::{DecisionError, Result};
-use tenferro_gated_delta::{GatedDeltaWorkspace, delta_layer_recurrent};
+use tenferro_gated_delta::{GatedDeltaWorkspace, delta_layer_recurrent_with_projection};
 
 use crate::model::{AttentionWeights, FullAttentionWeights, JeffConfig, JeffWeights, MlpWeights};
 
@@ -136,17 +136,26 @@ fn full_attention_into(
     cos: &[f32],
     sin: &[f32],
     out: &mut [f32],
-) {
+    projection: &mut dyn cpu_kernels::RowMajorProjection,
+) -> Result<()> {
     let length = mask.len();
     let hd = cfg.head_dim;
     let heads = cfg.heads;
     let width = hd * heads;
     let half = w.rotary_dim / 2;
 
-    cpu_kernels::matmul_row_major_into(&w.q, cfg.hidden, width, x, length, q);
-    cpu_kernels::matmul_row_major_into(&w.gate, cfg.hidden, width, x, length, q_gate);
-    cpu_kernels::matmul_row_major_into(&w.k, cfg.hidden, width, x, length, k);
-    cpu_kernels::matmul_row_major_into(&w.v, cfg.hidden, width, x, length, v);
+    projection
+        .project(&w.q, cfg.hidden, width, x, length, q, false)
+        .map_err(projection_error)?;
+    projection
+        .project(&w.gate, cfg.hidden, width, x, length, q_gate, false)
+        .map_err(projection_error)?;
+    projection
+        .project(&w.k, cfg.hidden, width, x, length, k, false)
+        .map_err(projection_error)?;
+    projection
+        .project(&w.v, cfg.hidden, width, x, length, v, false)
+        .map_err(projection_error)?;
 
     rms_heads_into(q, hd, length, &w.q_norm, cfg.eps, q_norm);
     rms_heads_into(k, hd, length, &w.k_norm, cfg.eps, k_norm);
@@ -161,6 +170,21 @@ fn full_attention_into(
             || vec![0.0f32; length],
             |scores, (head, out_rows)| {
                 let base = head * hd;
+                let band = base * length..(base + hd) * length;
+                if cpu_kernels::try_causal_attention_gemm_into(
+                    &q_norm[band.clone()],
+                    &k_norm[band.clone()],
+                    &v[band.clone()],
+                    &q_gate[band],
+                    mask,
+                    length,
+                    hd,
+                    false,
+                    false,
+                    out_rows,
+                ) {
+                    return;
+                }
                 for query in 0..length {
                     let mut max = f32::NEG_INFINITY;
                     for key in 0..length {
@@ -201,12 +225,16 @@ fn full_attention_into(
             },
         );
 
-    cpu_kernels::matmul_row_major_into(&w.o, width, cfg.hidden, attn_out, length, out);
+    projection
+        .project(&w.o, width, cfg.hidden, attn_out, length, out, false)
+        .map_err(projection_error)?;
+    Ok(())
 }
 
 /// SiLU-gated MLP on a `(hidden, length)` input, **accumulating** the result
 /// into `out` (`out += down(silu(gate) * up)`), so the caller can fuse the
 /// residual add into the down projection.
+#[allow(clippy::too_many_arguments)]
 fn mlp_into(
     mlp: &MlpWeights,
     cfg: &JeffConfig,
@@ -215,21 +243,38 @@ fn mlp_into(
     gate: &mut [f32],
     up: &mut [f32],
     out: &mut [f32],
-) {
-    cpu_kernels::matmul_row_major_into(&mlp.gate, cfg.hidden, cfg.intermediate, x, length, gate);
-    cpu_kernels::matmul_row_major_into(&mlp.up, cfg.hidden, cfg.intermediate, x, length, up);
+    projection: &mut dyn cpu_kernels::RowMajorProjection,
+) -> Result<()> {
+    projection
+        .project(
+            &mlp.gate,
+            cfg.hidden,
+            cfg.intermediate,
+            x,
+            length,
+            gate,
+            false,
+        )
+        .map_err(projection_error)?;
+    projection
+        .project(&mlp.up, cfg.hidden, cfg.intermediate, x, length, up, false)
+        .map_err(projection_error)?;
     gate.par_iter_mut().zip(up.par_iter()).for_each(|(g, u)| {
         let value = *g;
         *g = (value / (1.0 + (-value).exp())) * *u;
     });
-    cpu_kernels::matmul_row_major_add_into(
-        &mlp.down,
-        cfg.intermediate,
-        cfg.hidden,
-        gate,
-        length,
-        out,
-    );
+    projection
+        .project(
+            &mlp.down,
+            cfg.intermediate,
+            cfg.hidden,
+            gate,
+            length,
+            out,
+            true,
+        )
+        .map_err(projection_error)?;
+    Ok(())
 }
 
 /// `out = a + b`, parallel over elements.
@@ -414,6 +459,31 @@ pub fn forward_host_opt_with(
     ids: &[i64],
     mask: &[f32],
 ) -> Result<Vec<f32>> {
+    forward_host_opt_with_projection(
+        ws,
+        cfg,
+        weights,
+        ids,
+        mask,
+        &mut cpu_kernels::PortableProjection,
+    )
+}
+
+fn projection_error(message: String) -> DecisionError {
+    DecisionError::Backend {
+        message,
+        source: None,
+    }
+}
+
+pub(crate) fn forward_host_opt_with_projection(
+    ws: &mut HostOptWorkspace,
+    cfg: &JeffConfig,
+    weights: &JeffWeights,
+    ids: &[i64],
+    mask: &[f32],
+    projection: &mut dyn cpu_kernels::RowMajorProjection,
+) -> Result<Vec<f32>> {
     weights.validate(cfg)?;
     let length = ids.len();
     if mask.len() != length {
@@ -482,10 +552,17 @@ pub fn forward_host_opt_with(
                 &ws.rope_cos,
                 &ws.rope_sin,
                 &mut ws.mixed,
-            ),
+                projection,
+            )?,
             AttentionWeights::Delta { weights, config } => {
-                let mixed =
-                    delta_layer_recurrent(config, weights, &ws.normalized, mask, &mut ws.delta)?;
+                let mixed = delta_layer_recurrent_with_projection(
+                    config,
+                    &weights.slices(),
+                    &ws.normalized,
+                    mask,
+                    &mut ws.delta,
+                    projection,
+                )?;
                 ws.mixed.copy_from_slice(mixed);
             }
         }
@@ -513,7 +590,8 @@ pub fn forward_host_opt_with(
             &mut ws.mlp_gate,
             &mut ws.mlp_up,
             &mut ws.residual,
-        );
+            projection,
+        )?;
         // The down projection accumulated into `residual`, so it now holds
         // `residual + mlp`: the next layer's hidden state. Swap it in.
         std::mem::swap(&mut ws.state, &mut ws.residual);
@@ -542,14 +620,17 @@ pub fn forward_host_opt_with(
             *value = *value * scale * (1.0 + weights.final_norm[d]);
         });
     }
-    cpu_kernels::matmul_row_major_into(
-        &weights.readout,
-        cfg.hidden,
-        weights.options,
-        &ws.last,
-        1,
-        &mut ws.logits,
-    );
+    projection
+        .project(
+            &weights.readout,
+            cfg.hidden,
+            weights.options,
+            &ws.last,
+            1,
+            &mut ws.logits,
+            false,
+        )
+        .map_err(projection_error)?;
 
     Ok(ws.logits.clone())
 }

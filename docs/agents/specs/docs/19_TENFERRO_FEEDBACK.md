@@ -187,3 +187,11 @@ The implementation and lifetime/thread tests are in this repository; no pinned
 tenferro source or submodule is modified. Non-CPU backends retain the native
 composition. A future public tenferro preparation interface could replace this
 CPU-only provider while preserving model-level caching and independent outputs.
+
+The default CPU provider now addresses the same preparation gap without a
+oneDNN dependency: `PackedGemm` owns padded, 32-channel weight blocks and bounded
+nano-gemm plans. Products use the pinned library's runtime-dispatched kernels;
+packing performs layout movement only. It remains a self-hosted CPU extension,
+with backend admission checked before model dispatch and native composition on
+other backends. Prepared resources retain no eager runtime or borrowed model
+pointers. This is another candidate for a future public tenferro preparation API.

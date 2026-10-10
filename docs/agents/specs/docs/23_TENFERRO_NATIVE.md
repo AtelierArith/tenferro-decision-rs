@@ -261,3 +261,16 @@ workspace Clippy and related release tests passed. Jeff also beats fresh
 upstream Python across all three measured shapes in two Rust runs. No device
 performance claim follows from these CPU measurements. Build instructions are
 in the README.
+
+### Default portable CPU packing
+
+`PackedGemm` supplies owned constant packing through nano-gemm without oneDNN.
+Laya's default CPU F32 projections dispatch this extension; all other backends
+keep native composition. Weight preparation and bounded shape plans are reused.
+The pinned tenferro dependency and submodules are unchanged.
+
+Jeff Auto/HostOpt keep the existing CPU scan, norm and MLP formulation, and
+short-input projections now execute through this prepared tenferro extension.
+The prepared model owns immutable checkpoint storage, preventing stale
+source-address cache entries. Jeff's separate Tenferro backend and TensorNative
+DeltaNet path remain available for backend-portable execution.

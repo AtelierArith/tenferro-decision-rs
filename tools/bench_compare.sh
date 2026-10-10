@@ -107,6 +107,9 @@ run env RAYON_NUM_THREADS="$THREADS" \
     ./target/release/examples/bench_jeff "$JEFF" "$WARMUP" "$ITERS" > "$OUT/rust_jeff.json"
 run env RAYON_NUM_THREADS="$THREADS" \
     ./target/release/examples/bench_laya "$LAYA" "$WARMUP" "$ITERS" > "$OUT/rust_laya.json"
+run env RAYON_NUM_THREADS="$THREADS" \
+    ./target/release/examples/bench_laya_tenferro_gap "$LAYA" "$WARMUP" "$ITERS" \
+    > "$OUT/rust_laya_prepared.json"
 
 # Julia: -t N; the scripts set BLAS threads through the package's CPU policy.
 run julia "-t$THREADS" --project=extern/JeffClient.jl \

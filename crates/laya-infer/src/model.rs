@@ -36,8 +36,6 @@ use tenferro_ext::{
     EagerSessionErfExt, EagerSessionGegluExt, EagerSessionLayaAttentionExt,
     EagerSessionLayerNormExt,
 };
-#[cfg(not(feature = "onednn"))]
-use tenferro_ext::{EagerSessionGemmBiasExt, EagerSessionGemmExt, EagerSessionGemmGegluExt};
 use tenferro_infer::{attention, norm, rope};
 
 use crate::config::{AgentConfig, EncoderConfig, LayerKind};
@@ -1121,6 +1119,29 @@ fn prepared_linear(
     session.prepared_gemm(x, &weights, bias.as_ref(), geglu)
 }
 
+/// Linear over axis 0 of an activation `(in, ...)`, returning `(out, ...)`.
+#[cfg(not(feature = "onednn"))]
+fn packed_linear(
+    session: &mut EagerSession<'_>,
+    cache: &mut TensorCache,
+    x: &EagerTensor,
+    linear: &LinearWeights,
+    out_dim: usize,
+    geglu: bool,
+) -> tenferro_ad::Result<EagerTensor> {
+    use tenferro_ext::{EagerSessionPackedGemmExt, PackedGemm};
+    let input = x.shape()[0];
+    let weights = cache.prepared_host(&linear.weight, &[input, out_dim], || {
+        PackedGemm::new(&linear.weight, input, out_dim)
+    })?;
+    let bias = linear
+        .bias
+        .as_ref()
+        .map(|b| cache.col_major(session, vec![out_dim], b))
+        .transpose()?;
+    session.packed_gemm(x, &weights, bias.as_ref(), geglu)
+}
+
 fn linear_feature_first(
     session: &mut EagerSession<'_>,
     cache: &mut TensorCache,
@@ -1132,9 +1153,9 @@ fn linear_feature_first(
     // Feature-first `(in, L, B)` linear is exactly a dense `y = Wᵀ x` over the
     // trailing axes folded into one "length" axis, and the column-major layouts
     // of `(in, L, B)` and `(in, L*B)` coincide, so the reshape below is free.
-    // Use a CPU projection extension: the optional oneDNN build reuses owned
-    // packed weights and plans; the portable build shares the existing library
-    // GEMM with the reference. Other backends use native dot_general below.
+    // Use a CPU projection extension with immutable weights packed for
+    // runtime-dispatched portable library kernels.
+    // Other backends use native dot_general below.
     if x.dtype() == tenferro_tensor::DType::F32 && tenferro_ext::cpu_extensions_supported(session) {
         #[cfg(feature = "onednn")]
         {
@@ -1142,22 +1163,7 @@ fn linear_feature_first(
         }
         #[cfg(not(feature = "onednn"))]
         {
-            let weight = cache.col_major(session, vec![in_dim, out_dim], &linear.weight)?;
-            let trailing = x.shape()[1..].to_vec();
-            let rest: usize = trailing.iter().product();
-            let x2 = session.reshape(x, vec![in_dim, rest])?;
-            // Fold the `(out,)` bias into the GEMM so it is one op instead of a
-            // reshape + broadcast + add over the full activation.
-            let y2 = match &linear.bias {
-                Some(bias) => {
-                    let bias = cache.col_major(session, vec![out_dim], bias)?;
-                    session.gemm_bias(&x2, &weight, &bias)?
-                }
-                None => session.gemm(&x2, &weight)?,
-            }; // (out_dim, rest)
-            let mut out_shape = vec![out_dim];
-            out_shape.extend_from_slice(&trailing);
-            return session.reshape(&y2, out_shape);
+            return packed_linear(session, cache, x, linear, out_dim, false);
         }
     }
 
@@ -1312,15 +1318,7 @@ fn encoder_tensor(
             }
             #[cfg(not(feature = "onednn"))]
             {
-                let weight =
-                    cache.col_major(session, vec![d, 2 * intermediate], &layer.wi.weight)?;
-                let bias = layer
-                    .wi
-                    .bias
-                    .as_ref()
-                    .map(|bias| cache.col_major(session, vec![2 * intermediate], bias))
-                    .transpose()?;
-                session.gemm_geglu(&hn, &weight, bias.as_ref(), intermediate)?
+                packed_linear(session, cache, &hn, &layer.wi, 2 * intermediate, true)?
             }
         } else {
             let u = linear_feature_first(session, cache, &hn, &layer.wi, 2 * intermediate)?;

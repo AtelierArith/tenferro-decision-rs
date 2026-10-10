@@ -271,3 +271,6 @@ fn erf_f64(x: f64) -> f64 {
 mod prepared_gemm;
 #[cfg(feature = "onednn")]
 pub use prepared_gemm::{EagerSessionPreparedGemmExt, PreparedGemm};
+
+mod packed_gemm;
+pub use packed_gemm::{EagerSessionPackedGemmExt, PackedGemm};

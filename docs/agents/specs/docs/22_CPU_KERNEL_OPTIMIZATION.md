@@ -648,3 +648,52 @@ tenferro composition. The pinned tenferro dependency is unchanged.
 Fresh upstream-Python results and pending completion gates are recorded in
 `21_SPEED_COMPARISON.md`; raw diagnostic and full-model evidence is retained in
 `fixtures/bench-onednn-owned-2026-10-09`.
+
+## Portable packed projection implementation (2026-10-09)
+
+The default Laya CPU F32 extension now packs immutable projection weights once
+in 32-output-channel blocks. `nano-gemm = 0.2.2` supplies all arithmetic, including
+runtime selection of AVX-512, AVX2 or its supported scalar/other-architecture
+fallback. There is no oneDNN dependency in this path and no handwritten GEMM
+microkernel. The optional historical oneDNN feature remains separately available.
+
+`PackedGemm` is a tenferro extension operation; non-CPU model execution keeps its
+native composition. The model caches packed weights by immutable source identity
+and shape. Clones share owned packed data without keeping a runtime alive.
+A bounded cache holds full/tail library plans for up to 32 token counts. The
+plan wrapper's Send/Sync contract is audited against the pinned constructor:
+its only pointers reference constant mask tables and static library kernels.
+Session caches reuse expanded GeGLU activations; final tensors retain independent
+storage. Exact existing GeGLU arithmetic is used after the projection.
+
+Jeff's prepared CPU model owns an Arc of immutable checkpoint weights and uses
+the same tenferro projection extension for at most 16 tokens. Larger projections
+keep the existing portable provider: per-projection feature/token conversion
+can outweigh packing benefits there. Those conversions are tiled; they contain
+no model arithmetic. The recurrent CPU scan and existing MLP/norm formulas are
+shared with the host implementation. Its pulp dispatch admits AVX-512 on capable
+CPUs while retaining other implementations. The host oracle is unchanged.
+
+Normalized Jeff attention contracts QK and PV through matrixmultiply at lengths
+of at least 32. The existing tenferro attention extension shares this helper.
+Nonfinite Q/K/V and short sequences retain the scalar contraction. Tests cover
+both storage layouts, causal/sparse masks and the existing empty-row semantics.
+Packed projection tests exercise channel/token tails, accumulation, plan eviction,
+concurrent calls, source ownership and old-output retention.
+
+Validation for the default build passed `cargo fmt --all --check`, all-target
+workspace Clippy with warnings denied, and `cargo test --workspace`, including
+the available Laya production checkpoint. Explicit release-mode Jeff production
+reference and engine tests also passed, as did the ignored Text/Json tokenizer
+integration test. The prepared Jeff CPU path differed from the Julia logit
+reference by at most 0.000020980835 on the committed production fixture, over
+two successive requests. Both release benchmark executables link only system
+runtime libraries, with no oneDNN shared library.
+
+Initial diagnostic model runs are not final speed evidence. Jeff diagnostics
+and the first attempted final Laya run overlapped unrelated Julia/build jobs on
+the shared machine and are excluded. Two later monitored comparisons on
+2026-10-10 record production-path Rust/Julia ratios of 0.71–1.06, with no
+competing model or build jobs. Long-input and batched cases are near parity,
+not universal Rust speed wins. See the speed comparison document and
+`fixtures/bench-packed-cpu-2026-10-10` for both runs and reproduction details.
