@@ -28,7 +28,7 @@ use decision_core::{
     Answer, DecisionEngine, DecisionError, PreparedState, Question, QuestionSet, Result, State,
 };
 use tenferro_ad::EagerRuntime;
-pub use tenferro_ext::Device;
+pub use tenferro_ext::{CudaPath, Device};
 use tenferro_gated_delta::GatedDeltaWorkspace;
 use tenferro_infer::TensorCache;
 
@@ -83,6 +83,11 @@ pub struct JeffEngine {
     cache: TensorCache,
     /// How the tenferro forward runs each Gated DeltaNet layer.
     delta_kernel: DeltaKernel,
+    /// The CUDA execution path.
+    cuda_path: CudaPath,
+    /// Resident device state of the raw CUDA forward.
+    #[cfg(feature = "cuda")]
+    raw: crate::cuda_raw::JeffCudaRaw,
     tokenizer: Option<crate::tokenizer::JeffTokenizer>,
 }
 
@@ -126,6 +131,9 @@ impl JeffEngine {
             host_opt: HostOptWorkspace::new(),
             cache: TensorCache::new(),
             delta_kernel: DeltaKernel::default(),
+            cuda_path: CudaPath::from_env(),
+            #[cfg(feature = "cuda")]
+            raw: crate::cuda_raw::JeffCudaRaw::new(),
             tokenizer: None,
         })
     }
@@ -227,6 +235,10 @@ impl JeffEngine {
         self.device = device;
         self.cache = TensorCache::new();
         self.cuda_workspaces = CudaDeltaWorkspaces::new();
+        #[cfg(feature = "cuda")]
+        {
+            self.raw = crate::cuda_raw::JeffCudaRaw::new();
+        }
         if device.is_cuda() {
             self.backend = JeffBackend::Tenferro;
             self.delta_kernel = DeltaKernel::Cuda;
@@ -239,6 +251,27 @@ impl JeffEngine {
     /// The device the tenferro forward runs on.
     pub fn device(&self) -> Device {
         self.device
+    }
+
+    /// Select how a CUDA device runs the forward (default [`CudaPath::Raw`],
+    /// or `TENFERRO_DECISION_CUDA_PATH=native`). Ignored on the CPU.
+    pub fn with_cuda_path(mut self, path: CudaPath) -> Self {
+        self.cuda_path = path;
+        self
+    }
+
+    /// The CUDA path that runs the forward on a CUDA device: the selected
+    /// one, or [`CudaPath::Native`] when the raw path does not support the
+    /// model or the `cuda` feature is off. Rows longer than
+    /// `cuda_raw::MAX_TOKENS` also run natively.
+    pub fn cuda_path(&self) -> CudaPath {
+        #[cfg(feature = "cuda")]
+        if self.cuda_path == CudaPath::Raw
+            && crate::cuda_raw::JeffCudaRaw::supports(&self.config, &self.weights)
+        {
+            return CudaPath::Raw;
+        }
+        CudaPath::Native
     }
 
     /// The selected Gated DeltaNet formulation of the tenferro forward.
@@ -300,6 +333,26 @@ impl JeffEngine {
             }
             JeffBackend::Host => {
                 forward_reference_with(&mut self.workspace, &self.config, &self.weights, ids, &mask)
+            }
+            #[cfg(feature = "cuda")]
+            JeffBackend::Tenferro
+                if self.device.is_cuda()
+                    && self.cuda_path() == CudaPath::Raw
+                    && ids.len() <= crate::cuda_raw::MAX_TOKENS =>
+            {
+                self.runtime
+                    .with_eager_session(|session| {
+                        crate::cuda_raw::forward_cuda_raw(
+                            &mut self.raw,
+                            session,
+                            &self.config,
+                            &self.weights,
+                            ids,
+                            &mask,
+                        )
+                    })
+                    .map_err(forward_error)?
+                    .map_err(forward_error)
             }
             JeffBackend::Tenferro => self
                 .runtime

@@ -13,11 +13,14 @@
 //! and CPU tenferro engines on the same inputs. `parcel_full_L256` times the
 //! model forward on all 256 positions (left padding kept, masked) with the
 //! same retained device state, for comparison with full-sequence runtimes.
+//! The CUDA engine runs the raw single-stream forward (`jeff_infer::cuda_raw`)
+//! unless `JEFF_BENCH_PATH=native` selects the tenferro-native device forward.
+//! `JEFF_BENCH_ONLY=name[,name]` restricts the run to the named cases.
 
 use std::time::Instant;
 
 use decision_core::PreparedState;
-use jeff_infer::engine::{Device, JeffBackend, JeffEngine};
+use jeff_infer::engine::{CudaPath, Device, JeffBackend, JeffEngine};
 use serde_json::json;
 
 const BASE: [i64; 8] = [2, 100, 1000, 2000, 3000, 4000, 5, 3];
@@ -107,7 +110,15 @@ fn main() {
     let with_cpu = args.iter().any(|arg| arg == "--cpu");
 
     let start = Instant::now();
-    let mut gpu = JeffEngine::load_with_device(dir, Device::Cuda(0)).expect("load on CUDA");
+    let native = std::env::var("JEFF_BENCH_PATH").as_deref() == Ok("native");
+    let path = if native {
+        CudaPath::Native
+    } else {
+        CudaPath::Raw
+    };
+    let mut gpu = JeffEngine::load_with_device(dir, Device::Cuda(0))
+        .expect("load on CUDA")
+        .with_cuda_path(path);
     let load_ms = start.elapsed().as_secs_f64() * 1e3;
     let mut cpu = with_cpu.then(|| {
         let opt = JeffEngine::load(dir).unwrap();
@@ -122,12 +133,22 @@ fn main() {
         (opt, tenferro)
     });
 
+    let only: Option<Vec<String>> = std::env::var("JEFF_BENCH_ONLY")
+        .ok()
+        .map(|list| list.split(',').map(str::to_string).collect());
+    let selected = |name: &str| {
+        only.as_ref()
+            .is_none_or(|list| list.iter().any(|n| n == name))
+    };
     let mut cases = Vec::new();
     for (name, state) in [
         ("parcel_L256_active101", parcel()),
         ("synthetic_L8", synthetic(8)),
         ("synthetic_L64", synthetic(64)),
     ] {
+        if !selected(name) {
+            continue;
+        }
         let (cuda, first_ms) = time(&mut gpu, &state, warmup, iters);
         let mut case = json!({
             "name": name,
@@ -146,7 +167,7 @@ fn main() {
         cases.push(case);
     }
     // Full-sequence parcel forward (no trimming), same device path.
-    {
+    if selected("parcel_full_L256") {
         use jeff_infer::model::{CudaDeltaWorkspaces, DeltaKernel, forward_tenferro_device};
         let state = parcel();
         let ids = state.input_ids[0].clone();
@@ -158,9 +179,20 @@ fn main() {
         let mut workspace = tenferro_gated_delta::GatedDeltaWorkspace::new();
         let mut cuda = CudaDeltaWorkspaces::new();
         let mut cache = tenferro_infer::TensorCache::new();
+        let mut raw = jeff_infer::cuda_raw::JeffCudaRaw::new();
         let mut run = || {
             runtime
                 .with_eager_session(|session| {
+                    if !native {
+                        return jeff_infer::cuda_raw::forward_cuda_raw(
+                            &mut raw,
+                            session,
+                            gpu.config(),
+                            gpu.weights(),
+                            &ids,
+                            &mask,
+                        );
+                    }
                     forward_tenferro_device(
                         &mut workspace,
                         &mut cuda,
@@ -201,6 +233,7 @@ fn main() {
     }
     let out = json!({
         "runtime": "rust-cuda",
+        "cuda_path": if native { "native" } else { "raw" },
         "checkpoint": dir,
         "load_ms": load_ms,
         "warmup": warmup,

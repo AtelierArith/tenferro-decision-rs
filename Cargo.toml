@@ -47,3 +47,7 @@ tenferro-gpu = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4
 tenferro-tensor = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb" }
 tenferro-ad = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb" }
 tenferro-linalg = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb" }
+# Driver/cuBLAS bindings for the raw single-stream CUDA forward. Same version
+# and loading features as tenferro-gpu's own `cudarc`, so no second copy is
+# built; the libraries are loaded at run time.
+cudarc = { version = "0.19", default-features = false, features = ["driver", "runtime", "nvrtc", "cublas", "dynamic-loading", "cuda-12080"] }

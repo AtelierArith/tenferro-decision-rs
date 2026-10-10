@@ -9,13 +9,16 @@
 //! intermediate marker-logit/CLS readouts the model pools on the host, the
 //! final downloads and the synchronization they imply. Checkpoint loading and
 //! the first (weight-upload) call are excluded. `--cpu` also times the CPU
-//! tenferro forward on the same inputs.
+//! tenferro forward on the same inputs. `LAYA_BENCH_PATH=native` times the
+//! tenferro-native device forward instead of the default raw single-stream
+//! forward (`laya_infer::cuda_raw`); the CPU always runs tenferro-native.
 
 use std::sync::Arc;
 use std::time::Instant;
 
 use laya_infer::agent::Device;
 use laya_infer::checkpoint::{LayaCheckpoint, load_checkpoint};
+use laya_infer::cuda_raw::{LayaCudaRaw, forward_cuda_raw};
 use laya_infer::model::{TensorCache, forward_tenferro_cached};
 use serde_json::json;
 use tenferro_ad::EagerRuntime;
@@ -65,15 +68,31 @@ fn stats(mut samples: Vec<f64>) -> serde_json::Value {
 fn time(
     runtime: &Arc<EagerRuntime>,
     cache: &mut TensorCache,
+    raw: Option<&mut LayaCudaRaw>,
     checkpoint: &LayaCheckpoint,
     batch: &Batch,
     warmup: usize,
     iters: usize,
 ) -> (serde_json::Value, f64) {
     let (ids, mask, marker_pos, marker_mask, qtype) = batch;
+    let mut raw = raw;
     let mut run = || {
         runtime
             .with_eager_session(|session| {
+                if let Some(raw) = raw.as_deref_mut() {
+                    return forward_cuda_raw(
+                        raw,
+                        session,
+                        &checkpoint.encoder,
+                        &checkpoint.agent,
+                        &checkpoint.weights,
+                        ids,
+                        mask,
+                        marker_pos,
+                        marker_mask,
+                        qtype,
+                    );
+                }
                 forward_tenferro_cached(
                     session,
                     cache,
@@ -121,6 +140,8 @@ fn main() {
     let gpu = Device::Cuda(0).runtime().expect("CUDA device");
     let cpu = Device::Cpu.runtime().unwrap();
     let mut gpu_cache = TensorCache::new();
+    let native = std::env::var("LAYA_BENCH_PATH").as_deref() == Ok("native");
+    let mut raw_state = LayaCudaRaw::new();
     let mut cpu_cache = TensorCache::new();
 
     // `LAYA_BENCH_SHAPES=8x1,64x1,93x10` (LENGTHxBATCH) overrides the default set.
@@ -138,7 +159,16 @@ fn main() {
     let mut shapes = Vec::new();
     for (length, batch) in shape_list {
         let inputs = make_batch(length, batch);
-        let (cuda, first_ms) = time(&gpu, &mut gpu_cache, &checkpoint, &inputs, warmup, iters);
+        let raw = (!native).then_some(&mut raw_state);
+        let (cuda, first_ms) = time(
+            &gpu,
+            &mut gpu_cache,
+            raw,
+            &checkpoint,
+            &inputs,
+            warmup,
+            iters,
+        );
         let mut shape = json!({
             "length": length,
             "batch": batch,
@@ -149,6 +179,7 @@ fn main() {
             shape["cpu_tenferro"] = time(
                 &cpu,
                 &mut cpu_cache,
+                None,
                 &checkpoint,
                 &inputs,
                 warmup.min(3),
@@ -165,6 +196,7 @@ fn main() {
     }
     let out = json!({
         "runtime": "rust-cuda",
+        "cuda_path": if native { "native" } else { "raw" },
         "checkpoint": dir,
         "load_ms": load_ms,
         "warmup": warmup,
