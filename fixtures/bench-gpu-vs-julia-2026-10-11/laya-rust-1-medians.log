@@ -1,0 +1,6 @@
+L8B1: cuda median 25.24 ms (first 4777 ms)
+L64B1: cuda median 28.01 ms (first 48 ms)
+L8B8: cuda median 26.17 ms (first 77 ms)
+L93B1: cuda median 30.04 ms (first 81 ms)
+L93B10: cuda median 155.27 ms (first 283 ms)
+L512B1: cuda median 265.82 ms (first 316 ms)
