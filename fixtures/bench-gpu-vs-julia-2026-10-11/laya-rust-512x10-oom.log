@@ -1,0 +1,13 @@
+
+thread 'DSD-0-0' (81172) panicked at $CARGO_HOME/git/checkouts/cubecl-d9a94da9c971bf86/ffc017d/crates/cubecl-cuda/src/compute/server.rs:128:35:
+failed to reserve 20971520 bytes of device memory: out of device memory allocating 20971520 bytes
+No backtrace available
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'DSD-0-0' (81172) panicked at $CARGO_HOME/git/checkouts/cubecl-d9a94da9c971bf86/ffc017d/crates/cubecl-cuda/src/compute/stream.rs:101:14:
+called `Result::unwrap()` on an `Err` value: couldn't find resource for that handle: Memory page 0 doesn't exist
+No backtrace available
+
+thread 'main' (81143) panicked at $CARGO_HOME/git/checkouts/cubecl-d9a94da9c971bf86/ffc017d/crates/cubecl-runtime/src/client.rs:209:14:
+called `Result::unwrap()` on an `Err` value: CallError
+exit status 101

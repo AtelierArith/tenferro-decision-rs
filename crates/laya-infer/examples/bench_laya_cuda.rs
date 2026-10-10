@@ -123,8 +123,20 @@ fn main() {
     let mut gpu_cache = TensorCache::new();
     let mut cpu_cache = TensorCache::new();
 
+    // `LAYA_BENCH_SHAPES=8x1,64x1,93x10` (LENGTHxBATCH) overrides the default set.
+    let shape_list: Vec<(usize, usize)> = std::env::var("LAYA_BENCH_SHAPES")
+        .ok()
+        .map(|spec| {
+            spec.split(',')
+                .map(|item| {
+                    let (l, b) = item.split_once('x').expect("LENGTHxBATCH");
+                    (l.trim().parse().unwrap(), b.trim().parse().unwrap())
+                })
+                .collect()
+        })
+        .unwrap_or_else(|| vec![(8, 1), (64, 1), (8, 8)]);
     let mut shapes = Vec::new();
-    for (length, batch) in [(8usize, 1usize), (64, 1), (8, 8)] {
+    for (length, batch) in shape_list {
         let inputs = make_batch(length, batch);
         let (cuda, first_ms) = time(&gpu, &mut gpu_cache, &checkpoint, &inputs, warmup, iters);
         let mut shape = json!({

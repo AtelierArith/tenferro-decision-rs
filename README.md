@@ -254,6 +254,65 @@ tenferro-native forward (`--example bench_laya_tenferro_gap`, all shapes):
 `forward_tenferro` without the tensor cache rebuilds every weight per call
 (272.9 ms at L8 B1, ~6×).
 
+### GPU (CUDA) versus the Julia GPU implementations
+
+Same RTX 3060 (GPU 0, 12 GB, driver 580, sm_86), F32, same inputs, run one
+after another on an idle host. Rust: `--features cuda` examples
+`bench_jeff_cuda` / `bench_laya_cuda` in the CUDA 13 devcontainer. Julia 1.13.1
++ CUDA.jl 6.4: `tools/bench_jeff_cuda_julia.jl` (JeffClient.jl on
+QwenDecisionCore.jl's CUDA extension with the chunked delta rule, QwenDecisionCore.jl
+PR #6) and `tools/bench_laya_cuda_julia.jl`
+(Laya.jl `CUDABackend()`). Every timed call includes the input upload, the
+forward, the readout download and the synchronization it implies; model load
+and the first call are excluded. Warm median of 50 iterations after 10
+warmups, mean of two runs (they agree within a few percent). Raw results:
+[`fixtures/bench-gpu-vs-julia-2026-10-11`](fixtures/bench-gpu-vs-julia-2026-10-11).
+
+Jeff (`mstrasser/Jeff-Qwen3.5-0.8B`; parcel = JeffClient.jl
+`examples/data/parcel_reference.json` case 1, B1/L256 with 101 active tokens):
+
+| input | Julia CUDA | Rust CUDA | Rust / Julia |
+|---|---:|---:|---:|
+| parcel, left padding trimmed (L101) | 25.7 ms | 37.9 ms | 1.47× |
+| parcel, full sequence (L256) | 47.1 ms | 79.1 ms | 1.68× |
+| synthetic L8 | 12.0 ms | 26.5 ms | 2.21× |
+| synthetic L64 | 16.7 ms | 28.0 ms | 1.68× |
+
+Julia trims with `QDC_CUDA_TRIM_PADDING=1` (the Rust engine always trims);
+the full-sequence row keeps the padding on both sides.
+
+Laya (`convaiinnovations/laya`; the fixed prepared batches of `bench_laya`,
+extended with `LAYA_BENCH_SHAPES`; L93/L512 match Laya.jl's short/long
+prompt lengths):
+
+| shape | Julia CUDA | Rust CUDA | Rust / Julia |
+|---|---:|---:|---:|
+| L8 B1 | 8.0 ms | 26.2 ms | 3.3× |
+| L64 B1 | 11.8 ms | 28.2 ms | 2.4× |
+| L8 B8 | 11.8 ms | 27.0 ms | 2.3× |
+| L93 B1 | 16.7 ms | 30.0 ms | 1.8× |
+| L93 B10 | 111.4 ms | 155.2 ms | 1.39× |
+| L512 B1 | 67.2 ms | 267.6 ms | 4.0× |
+| L512 B10 | 580.3 ms | out of device memory | — |
+
+Reading the GPU numbers:
+
+- The Rust paths have a floor of about 25 ms per call regardless of size
+  (L8 vs L64 differ by ~2 ms): tenferro eager costs host time per op
+  (~700 launches per forward) and every `with_raw` synchronizes with
+  `cuEventSynchronize` (recorded in `19_TENFERRO_FEEDBACK.md`). The Julia
+  paths keep work queued and synchronize only at the readout, so small inputs
+  are 2–3× faster there.
+- The gap narrows as the GPU work grows (Laya L93 B10 1.39×, Jeff L101 1.47×),
+  where both sides are bound by the same F32 cuBLAS GEMMs.
+- Long Laya sequences are the exception: at L512 the Rust attention costs
+  ~4× (Laya.jl uses a fused FP32 attention kernel that skips tiles outside the
+  local window and the padding), and L512 B10 exhausts the 12 GB device even
+  in a fresh process, while Laya.jl runs it. Laya.jl also offers Float16
+  (about 2× faster again); the Rust GPU path is F32 only.
+- First calls: Rust Jeff ~9 s and Laya ~5 s (weight upload and NVRTC
+  compilation); the Julia first call is dominated by JIT compilation.
+
 ### Model load
 
 | model | Julia | Rust |
