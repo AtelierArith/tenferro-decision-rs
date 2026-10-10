@@ -50,6 +50,11 @@ impl CudaKernels {
         })
     }
 
+    /// The runtime these handles were loaded on.
+    pub fn runtime_identity(&self) -> &tenferro_gpu::cuda::CudaRuntimeIdentity {
+        &self.runtime
+    }
+
     /// Prepare per-chunk cumulative log decay, beta, pair/tail weights and
     /// final decay factors on device. Source specifies layouts and launch ABI.
     pub fn chunk_decay(&self) -> &Function {
@@ -289,9 +294,13 @@ impl RecurrentGeometry {
                 shared_mem_bytes: 0,
             },
             LaunchConfig {
-                grid: [self.value_heads as u32, self.value_dim as u32, 1],
-                block: [32, 1, 1],
-                shared_mem_bytes: 0,
+                grid: [
+                    self.value_heads as u32,
+                    (self.value_dim as u32).div_ceil(RECURRENT_ROWS_PER_BLOCK),
+                    1,
+                ],
+                block: [32 * RECURRENT_ROWS_PER_BLOCK, 1, 1],
+                shared_mem_bytes: self.recurrent_shared_bytes(),
             },
             LaunchConfig {
                 grid: [(self.length * self.value_heads) as u32, 1, 1],
@@ -299,6 +308,23 @@ impl RecurrentGeometry {
                 shared_mem_bytes: norm_threads * 4,
             },
         ]
+    }
+}
+
+/// Value rows (warps) per recurrent-scan block.
+pub const RECURRENT_ROWS_PER_BLOCK: u32 = 8;
+
+impl RecurrentGeometry {
+    /// Tokens staged per shared-memory tile (at most 32 KiB of Q/K).
+    pub fn tile(&self) -> u32 {
+        if self.key_dim <= 128 { 32 } else { 16 }
+    }
+
+    /// Dynamic shared memory of the recurrent scan: staged Q/K, per-token
+    /// decay factor and beta, and the block's V rows for one tile.
+    pub fn recurrent_shared_bytes(&self) -> u32 {
+        let tile = self.tile();
+        (2 * tile * self.key_dim as u32 + 2 * tile + tile * RECURRENT_ROWS_PER_BLOCK) * 4
     }
 }
 
@@ -443,6 +469,7 @@ impl CudaKernels {
                 KernelArg::tensor(&bias),
             ];
             args.extend(geometry.recurrent_arguments().map(KernelArg::i32));
+            args.push(KernelArg::i32(geometry.tile() as i32));
             session.launch(&self.recurrent, launches[1], &args)?;
             session.launch(
                 &self.norm_gate,
@@ -787,8 +814,12 @@ mod geometry_tests {
             let geometry = RecurrentGeometry::new(length, 256, 128, 4, 8, 4).unwrap();
             assert_eq!(geometry.conv_arguments(), [length as i32, 3072, 4]);
             let launches = geometry.launches();
-            assert_eq!(launches[1].grid, [8, 128, 1]);
-            assert_eq!(launches[1].block, [32, 1, 1]);
+            assert_eq!(launches[1].grid, [8, 16, 1]);
+            assert_eq!(launches[1].block, [256, 1, 1]);
+            assert_eq!(
+                launches[1].shared_mem_bytes,
+                (2 * 16 * 256 + 2 * 16 + 16 * 8) * 4
+            );
             assert_eq!(launches[2].grid, [length as u32 * 8, 1, 1]);
             assert_eq!(launches[2].shared_mem_bytes, 512);
             assert!(launches[0].grid[0] * 256 >= length as u32 * 3072);

@@ -311,5 +311,34 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo bench -p bench-suite
 ```
 
-The MVP targets the tenferro CPU provider (`cpu-faer`); CUDA follows in later
-phases.
+The default build targets the tenferro CPU provider. The optional `cuda`
+feature of `laya-infer` / `jeff-infer` runs the tenferro forward on a CUDA
+device (tenferro-gpu: CubeCL + cuBLAS + cuTENSOR, NVRTC for the repository's
+fused kernels; the driver is loaded at run time):
+
+```rust
+use laya_infer::agent::{Device, LayaEngine};
+use jeff_infer::engine::JeffEngine;
+
+let mut laya = LayaEngine::load_with_device(laya_dir, Device::Cuda(0))?;
+let mut jeff = JeffEngine::load_with_device(jeff_dir, Device::Cuda(0))?;
+// or: JeffEngine::load(dir)?.with_device(Device::Cuda(0))?
+```
+
+Weights are uploaded once (first forward) and stay resident; each call
+uploads only token ids/masks and downloads logits. Without the feature,
+`Device::Cuda` returns an unsupported error (no CPU fallback). The CUDA tests
+are `#[ignore]`d hardware gates; run them in `.devcontainer/` with e.g.
+
+```sh
+CUDA_VISIBLE_DEVICES=0 cargo test --release -p jeff-infer -p laya-infer \
+    -p tenferro-gated-delta -p tenferro-ext \
+    --features jeff-infer/cuda,laya-infer/cuda,tenferro-gated-delta/cuda,tenferro-ext/cuda \
+    -- --ignored --test-threads=1
+cargo run --release -p jeff-infer --features cuda --example bench_jeff_cuda -- <JEFF_DIR> 10 50 --cpu
+cargo run --release -p laya-infer --features cuda --example bench_laya_cuda -- <LAYA_DIR> 10 50 --cpu
+```
+
+`TENFERRO_CUDA_ARCH` overrides the NVRTC architecture (default: the device's
+compute capability); `TENFERRO_DECISION_FUSED=0` disables the fused CUDA
+kernels (A/B measurement). See `docs/agents/specs/docs/23_TENFERRO_NATIVE.md`.

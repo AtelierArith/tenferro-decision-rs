@@ -17,7 +17,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tenferro_ad::EagerRuntime;
-use tenferro_cpu::CpuBackend;
+pub use tenferro_ext::Device;
 
 use crate::calibration::{
     Calibration, LayaDecision, QType, action_probability, choice_answer, noul_answer, score_answer,
@@ -37,7 +37,9 @@ pub struct LayaEngine {
     tokenizer: BpeTokenizer,
     calibration: Calibration,
     batch_size: usize,
-    /// The tenferro runtime the production forward runs on (CPU today).
+    /// The device of `runtime`.
+    device: Device,
+    /// The tenferro runtime the production forward runs on.
     runtime: Arc<EagerRuntime>,
     /// Weight tensors cached across forwards (see [`TensorCache`]).
     cache: TensorCache,
@@ -54,7 +56,7 @@ impl LayaEngine {
     ) -> Result<Self> {
         agent.validate(&encoder)?;
         weights.validate(&encoder, &agent)?;
-        let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).map_err(backend_error)?;
+        let runtime = Device::Cpu.runtime().map_err(backend_error)?;
         Ok(Self {
             encoder,
             agent,
@@ -62,6 +64,7 @@ impl LayaEngine {
             tokenizer,
             calibration,
             batch_size: 16,
+            device: Device::Cpu,
             runtime,
             cache: TensorCache::new(),
         })
@@ -98,6 +101,12 @@ impl LayaEngine {
         Self::from_checkpoint(checkpoint, tokenizer, calibration)
     }
 
+    /// [`Self::load`] and run the tenferro forward on `device`
+    /// (see [`Self::with_device`]).
+    pub fn load_with_device(directory: impl AsRef<Path>, device: Device) -> Result<Self> {
+        Self::load(directory)?.with_device(device)
+    }
+
     /// Resolve a Hub snapshot and load its weights, tokenizer, and calibration.
     ///
     /// Network access is opt-in through the `hub` feature and is delegated to
@@ -124,6 +133,25 @@ impl LayaEngine {
         }
         self.batch_size = batch_size;
         Ok(self)
+    }
+
+    /// Run the tenferro forward on `device`, replacing the runtime.
+    ///
+    /// Weights are uploaded to the new runtime once, on the first forward, and
+    /// stay resident in the engine's tensor cache; each later forward uploads
+    /// the token batch and masks and downloads the logits. Creating a CUDA
+    /// runtime fails (without CPU fallback) when the `cuda` feature is off or
+    /// no device is available.
+    pub fn with_device(mut self, device: Device) -> Result<Self> {
+        self.runtime = device.runtime().map_err(backend_error)?;
+        self.device = device;
+        self.cache = TensorCache::new();
+        Ok(self)
+    }
+
+    /// The device the tenferro forward runs on.
+    pub fn device(&self) -> Device {
+        self.device
     }
 
     /// The encoder configuration.
@@ -289,7 +317,7 @@ fn question_type(question: &Question) -> QType {
 /// Map a tenferro backend-construction error into a decision error.
 fn backend_error(error: tenferro_ad::Error) -> DecisionError {
     DecisionError::Backend {
-        message: format!("failed to create the tenferro CPU runtime: {error}"),
+        message: format!("failed to create the tenferro runtime: {error}"),
         source: Some(Box::new(error)),
     }
 }

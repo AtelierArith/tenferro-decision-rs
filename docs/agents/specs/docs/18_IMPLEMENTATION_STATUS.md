@@ -269,7 +269,7 @@ bundled webpki roots).
 | Area | Blocker |
 |---|---|
 | Laya numerical parity (Phase 2) | Tokenizer and forward (encoder + decision head) match `extern/Laya.jl` on the production `convaiinnovations/laya` checkpoint (logits `1.7e-6`); Jeff's forward matches `extern/JeffClient.jl` on `mstrasser/Jeff-Qwen3.5-0.8B` (`1.8e-5`). Production `system_one`/`predict` parity (prompt rendering + calibration) is verified on the bundled Laya email example; Jeff prepared-token answers match Julia `decide`. |
-| Phase 4 / 7 CUDA | No CUDA hardware here; code can be written but not validated. |
+| Phase 4 / 7 CUDA | Implemented and hardware-validated on an RTX 3060 (CUDA 13 devcontainer); see "CUDA engines (2026-10-10)" below. Remaining gaps listed there. |
 | Phase 8 FP16/BF16 | Deferred by decision: tenferro's public dtype set lacks `F16`/`BF16` at the pinned revision. |
 | Phase 10 Apple GPU | tenferro's WebGPU surface is effectively `dot_general` (F32/C32) plus transpose; most primitives are missing. |
 
@@ -281,3 +281,51 @@ bundled webpki roots).
   bench-suite 1 (201 total). Laya's `real_checkpoint.rs` adds ~45 s when the
   production snapshot is cached (skips otherwise); Jeff's is `#[ignore]`d.
 - `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+
+## CUDA engines (2026-10-10)
+
+Validated on an RTX 3060 (12 GB, compute 8.6) in `.devcontainer/` (CUDA
+13.0.3, cuTENSOR 13), pinned tenferro-rs `471c427`.
+
+- API: `tenferro_ext::Device { Cpu, Cuda(ordinal) }` (re-exported as
+  `laya_infer::agent::Device` / `jeff_infer::engine::Device`);
+  `LayaEngine::{with_device, load_with_device, device}`;
+  `JeffEngine::{with_device, load_with_device, device, delta_kernel}`. A CUDA
+  device selects `JeffBackend::Tenferro` with the new `DeltaKernel::Cuda`.
+  `jeff_infer::model::forward_tenferro_device` retains the host DeltaNet
+  workspace, `CudaDeltaWorkspaces` and the weight cache across calls.
+- Features: `laya-infer/cuda`, `jeff-infer/cuda` (forwarding to
+  `tenferro-ext/cuda`, `tenferro-gated-delta/cuda`, `tenferro-ad/cuda`).
+- Jeff DeltaNet: `CudaRequest::layer_time_first` (time-first activations,
+  stacked `(qkv|z|a|b)` projection from `prepare_time_first_weights`, workspaces
+  resized when the request length changes) inside one
+  `with_cuda_request_cached` scope per forward (module compiled once per
+  thread/runtime). The recurrent scan kernel stages Q/K, gates and V in
+  shared memory per 16/32-token tile (was one uncoalesced warp per row).
+- Fused CUDA kernels (`tenferro_ext::cuda_fused`, `Fusion`): RMSNorm /
+  LayerNorm, gated SiLU (stacked gate|up), GeGLU, bias+activation, embedding
+  gather, Jeff full attention (norm+RoPE prep, causal gated attention) and
+  Laya attention (split+RoPE prep, biased attention).
+- Fixed the three failing `cuda_stages` gates: an F64 state literal in the
+  decay test, and eager `scale_real` (host scalar import) in the raw layer
+  tests, replaced by an explicitly uploaded scalar.
+- Device attention uses an additive F32 bias
+  (`tenferro_infer::attention::attention_with_bias`): the CUDA provider cannot
+  materialize a broadcast Bool mask. Jeff linear weights use `(out, in)` on
+  non-CPU backends (the CPU `(in, out)` cache layout was only correct for the
+  CPU extension).
+- Accuracy (max |Δ|): Jeff production L8 CUDA vs CPU 7.2e-6, vs Julia 7.6e-6;
+  parcel (101 active of 256) vs CPU 9.1e-6, vs PyTorch reference 9.5e-6
+  (scale 18.6); synthetic stacks vs host oracle ≤ 6e-7. Laya logits vs CPU
+  1.1e-6 (B1) / 1.1e-5 (B5 batch), vs Julia 1.7e-6 / 8.6e-6; action relative
+  ≤ 2e-6.
+- Tests: CPU `cargo test --workspace` 252 passed / 0 failed / 3 ignored;
+  with all CUDA features 256 passed; `--ignored` with CUDA features 20 passed
+  (CUDA hardware: gated-delta 9, jeff 3, laya 2, tenferro-ext 3; plus the 3
+  CPU production-Jeff gates).
+- Remaining: warm latency is now bound by tenferro eager per-op host
+  overhead plus GEMM time (see `23_TENFERRO_NATIVE.md`); large-key (>256)
+  DeltaNet is not supported by the time-first layer; Laya marker pooling still
+  round-trips through the host; the first call pays NVRTC compilation and the
+  weight upload (7–15 s for Jeff).
+

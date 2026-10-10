@@ -15,6 +15,17 @@
 
 #![allow(clippy::approx_constant, clippy::excessive_precision)]
 
+#[cfg(feature = "cuda")]
+pub mod cuda_fused;
+mod device;
+#[cfg(not(feature = "cuda"))]
+#[path = "fused_stub.rs"]
+mod fused_scope;
+#[cfg(feature = "cuda")]
+mod fused_scope {
+    pub use crate::cuda_fused::{FusedActivation, FusedScope};
+}
+mod fusion;
 mod gated_silu;
 mod geglu;
 mod gemm;
@@ -27,6 +38,8 @@ mod linear;
 mod native_erf;
 mod rms_norm;
 
+pub use device::Device;
+pub use fusion::{FusedActivation, FusedScope, Fusion};
 pub use gated_silu::{EagerSessionGatedSiluExt, GATED_SILU_FAMILY_ID, GatedSiluOp};
 pub use geglu::{EagerSessionGegluExt, GEGLU_FAMILY_ID, GegluOp};
 pub use gemm::{EagerSessionGemmExt, GEMM_FAMILY_ID, GemmOp};

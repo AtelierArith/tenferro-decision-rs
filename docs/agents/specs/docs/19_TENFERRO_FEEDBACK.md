@@ -187,3 +187,34 @@ The implementation and lifetime/thread tests are in this repository; no pinned
 tenferro source or submodule is modified. Non-CPU backends retain the native
 composition. A future public tenferro preparation interface could replace this
 CPU-only provider while preserving model-level caching and independent outputs.
+
+
+## CUDA engine findings (2026-10-10)
+
+Hardware validation of the CUDA engines (pinned `471c427`, RTX 3060) found:
+
+- **Bool broadcast**: `broadcast_in_dim` + `where_select` on a Bool mask fails
+  in `CudaBackend::to_contiguous_read` (`UnsupportedDType: Bool`). Device
+  attention now adds an F32 score bias instead.
+- **Eager `scale_real`** still imports a host scalar that CUDA cannot read
+  (the cause of two failing `cuda_stages` gates); tests now upload the scalar.
+- **Mixed dtypes**: an F64 state silently promoted the F32 chunked scan to an
+  F64 result on CUDA (CPU would reject it); the test literal was fixed.
+- **`gather` over a `(vocab, hidden)` table** permutes the entire table per
+  call (6.3 ms, 1 GB for Jeff); even a `(hidden, vocab)` table did. A
+  first-class embedding/gather-rows op without the permute would remove the
+  need for the fused kernel.
+- **`dot_general` layout**: contracting a weight's first axis produced an
+  output permute (`cutensor permute_coop`), contracting its second axis did
+  not.
+- **Raw seam costs**: every `CudaExecSession::with_raw` call flushes CubeCL
+  with a `cuEventSynchronize` (measured with an empty closure), and
+  `raw::Session::tensor` only binds owned `TypedTensor`s. Eager constants
+  (`constant_from[_host]`) are pooled views, so they must be copied once
+  before raw use; eager op outputs are owned and bind in place. A
+  non-blocking raw session and a view-binding API would let fused kernels
+  avoid both.
+- **`reshape` of a constant** materializes a copy on CUDA; rank-1 weights are
+  now cached directly.
+- **Per-op host overhead** (~40 µs per eager op incl. cuBLAS/cuTENSOR plan
+  lookup and allocation) bounds small-batch latency once kernels are fused.

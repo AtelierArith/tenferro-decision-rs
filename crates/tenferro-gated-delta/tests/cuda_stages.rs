@@ -431,7 +431,7 @@ fn cuda_decay_preparation_feeds_native_large_key_scan_on_one_session() {
             let z = matrix(session, vd, &z)?;
             let state = session.constant_from_host(Tensor::from_vec_col_major(
                 vec![vd, kd],
-                vec![0.0; vd * kd],
+                vec![0.0f32; vd * kd],
             )?)?;
             let norm = session.constant_from_host(Tensor::from_vec_col_major(vec![vd], norm)?)?;
             let eps =
@@ -815,6 +815,17 @@ fn request_composition_gpu_parity(mixed: bool, key_dim: usize) {
     }
 }
 
+/// Multiply by an explicitly uploaded F32 scalar. The pinned eager
+/// `scale_real` imports a host scalar that the CUDA backend cannot read.
+fn scale(
+    session: &mut tenferro_ad::EagerSession<'_>,
+    x: &tenferro_ad::EagerTensor,
+    factor: f32,
+) -> tenferro_ad::Result<tenferro_ad::EagerTensor> {
+    let factor = session.constant_from_host(Tensor::from_vec_col_major(vec![], vec![factor])?)?;
+    session.mul(x, &factor)
+}
+
 fn full_layer_gpu_parity(path: FullLayerPath) {
     let raw_recurrent = path != FullLayerPath::Native;
     use tenferro_gated_delta::{
@@ -941,7 +952,7 @@ fn full_layer_gpu_parity(path: FullLayerPath) {
                                 .expect("CUDA execution session")?;
                             macro_rules! reuse_cases {
                                 ($run:path) => {{
-                            let first_x = session.scale_real(&x, 0.5)?;
+                            let first_x = scale(session, &x, 0.5)?;
                             let (kernels, workspace, first) = $run(
                                 session, &cfg, &prepared, &first_x, &mask, kernels, None,
                             )?;
@@ -956,9 +967,9 @@ fn full_layer_gpu_parity(path: FullLayerPath) {
                             )?;
                             let mut changed_weights = prepared.clone();
                             if path == FullLayerPath::RawChunked {
-                                changed_weights.conv = session.scale_real(&prepared.conv, 0.5)?;
+                                changed_weights.conv = scale(session, &prepared.conv, 0.5)?;
                             } else {
-                                changed_weights.norm = session.scale_real(&prepared.norm, 2.0)?;
+                                changed_weights.norm = scale(session, &prepared.norm, 2.0)?;
                             }
                             let (_, _, changed) = $run(
                                 session,
