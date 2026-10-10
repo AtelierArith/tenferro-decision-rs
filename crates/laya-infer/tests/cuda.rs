@@ -14,7 +14,8 @@
 use std::path::PathBuf;
 
 use hf_fetch::{CheckpointSpec, Hub};
-use laya_infer::agent::{Device, LayaEngine};
+use laya_infer::agent::{CudaPath, Device, LayaEngine};
+use laya_infer::cuda_raw::{LayaCudaRaw, forward_cuda_raw};
 use laya_infer::model::{TensorCache, forward_tenferro_cached};
 use serde_json::Value;
 
@@ -74,6 +75,8 @@ fn max_diff(a: &[f32], b: &[f32]) -> f32 {
 }
 
 type Batch = (Vec<i64>, Vec<bool>, Vec<i64>, Vec<bool>, Vec<i64>);
+/// Reference marker logits and action logits.
+type Outputs = (Vec<f32>, Vec<f32>);
 
 #[test]
 #[ignore = "requires CUDA hardware and the production Laya checkpoint; run with --release -- --ignored"]
@@ -214,6 +217,196 @@ fn cuda_engine_decisions_match_cpu_engine() {
                 }
                 other => panic!("unexpected answers {other:?}"),
             }
+        }
+    }
+}
+
+fn fixture_cases() -> Vec<(&'static str, Batch, Vec<f32>, Vec<f32>)> {
+    let single = fixture("reference.json");
+    let answers = fixture("answers.json");
+    let batch = &answers["batch"];
+    vec![
+        (
+            "reference-B1",
+            (
+                integers(&single["input_ids"][0]),
+                booleans(&single["attention_mask"][0]),
+                integers(&single["marker_pos"][0]),
+                booleans(&single["marker_mask"][0]),
+                integers(&single["qtype"]),
+            ),
+            floats(&single["logits"][0]),
+            floats(&single["action"][0]),
+        ),
+        (
+            "answers-batch",
+            (
+                integers(&batch["input_ids"]),
+                booleans(&batch["attention_mask"]),
+                integers(&batch["marker_pos"]),
+                booleans(&batch["marker_mask"]),
+                integers(&batch["qtype"]),
+            ),
+            floats(&answers["logits"]),
+            floats(&answers["action"]),
+        ),
+    ]
+}
+
+/// A long padded batch: row 0 fills L, row 1 is padded after `L - 77`
+/// tokens, so sliding-window layers skip key tiles and padded queries keep
+/// every valid key.
+fn long_batch(length: usize) -> Batch {
+    let mut ids = Vec::new();
+    let mut mask = Vec::new();
+    for b in 0..2 {
+        let active = if b == 0 { length } else { length - 77 };
+        for l in 0..length {
+            ids.push(if l < active {
+                100 + ((l * 37 + b * 11) % 40000) as i64
+            } else {
+                50283
+            });
+            mask.push(l < active);
+        }
+    }
+    let marker_pos = vec![1, 140, 250, -1, 3, 120, 200, 210];
+    let marker_mask = vec![true, true, true, false, true, true, true, true];
+    (ids, mask, marker_pos, marker_mask, vec![0, 2])
+}
+
+#[test]
+#[ignore = "requires CUDA hardware and the production Laya checkpoint; run with --release -- --ignored"]
+fn cuda_raw_logits_match_cpu_and_julia() {
+    let Some(dir) = checkpoint_dir() else {
+        eprintln!("skipping: production Laya checkpoint is not present");
+        return;
+    };
+    let engine = LayaEngine::load(&dir).unwrap();
+    assert!(LayaCudaRaw::supports(engine.encoder(), engine.weights()));
+    let cpu = Device::Cpu.runtime().unwrap();
+    let gpu = Device::Cuda(0).runtime().expect("CUDA device required");
+    let mut cases: Vec<(&str, Batch, Option<Outputs>)> = fixture_cases()
+        .into_iter()
+        .map(|(name, batch, logits, action)| (name, batch, Some((logits, action))))
+        .collect();
+    cases.push(("long-L300-B2", long_batch(300), None));
+    let mut cpu_cache = TensorCache::new();
+    let mut raw = LayaCudaRaw::new();
+    for (name, (ids, mask, marker_pos, marker_mask, qtype), julia) in cases {
+        let (cpu_logits, cpu_action) = cpu
+            .with_eager_session(|session| {
+                forward_tenferro_cached(
+                    session,
+                    &mut cpu_cache,
+                    engine.encoder(),
+                    engine.agent(),
+                    engine.weights(),
+                    &ids,
+                    &mask,
+                    &marker_pos,
+                    &marker_mask,
+                    &qtype,
+                )
+            })
+            .unwrap()
+            .unwrap();
+        // Repeat to exercise the resident weights and reused scratch.
+        for request in 0..2 {
+            let (logits, action) = gpu
+                .with_eager_session(|session| {
+                    forward_cuda_raw(
+                        &mut raw,
+                        session,
+                        engine.encoder(),
+                        engine.agent(),
+                        engine.weights(),
+                        &ids,
+                        &mask,
+                        &marker_pos,
+                        &marker_mask,
+                        &qtype,
+                    )
+                })
+                .unwrap()
+                .unwrap();
+            let scale = cpu_action.iter().map(|v| v.abs()).fold(1.0f32, f32::max);
+            let logit_cpu = max_diff(&logits, &cpu_logits);
+            let action_cpu = max_diff(&action, &cpu_action);
+            eprintln!(
+                "{name} request {request}: raw logits vs cpu {logit_cpu:e}; action vs cpu \
+                 {action_cpu:e} (action scale {scale})"
+            );
+            assert!(
+                logit_cpu <= 1e-4,
+                "{name}: logits differ from CPU by {logit_cpu}"
+            );
+            assert!(
+                action_cpu <= 1e-4 * scale,
+                "{name}: action differs from CPU by {action_cpu}"
+            );
+            if let Some((julia_logits, julia_action)) = &julia {
+                let logit_julia = max_diff(&logits, julia_logits);
+                let action_julia = max_diff(&action, julia_action);
+                eprintln!("{name}: raw vs julia logits {logit_julia:e} action {action_julia:e}");
+                assert!(logit_julia <= 1e-4, "{name}: logits differ from Julia");
+                assert!(
+                    action_julia <= 1e-4 * scale,
+                    "{name}: action differs from Julia"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires CUDA hardware and the production Laya checkpoint; run with --release -- --ignored"]
+fn cuda_engine_paths_agree() {
+    use decision_core::{Content, NoulCriteria, NoulQuestion, Question, QuestionSet, State};
+    let Some(dir) = checkpoint_dir() else {
+        eprintln!("skipping: production Laya checkpoint is not present");
+        return;
+    };
+    let mut raw = LayaEngine::load_with_device(&dir, Device::Cuda(0))
+        .expect("CUDA device required")
+        .with_cuda_path(CudaPath::Raw);
+    assert_eq!(raw.cuda_path(), CudaPath::Raw);
+    let mut native = LayaEngine::load_with_device(&dir, Device::Cuda(0))
+        .unwrap()
+        .with_cuda_path(CudaPath::Native);
+    assert_eq!(native.cuda_path(), CudaPath::Native);
+    let state =
+        State::Text("The invoice was paid twice; the customer wants the duplicate back.".into());
+    let mut questions = QuestionSet::new();
+    for (id, text) in [
+        ("double", "Was the invoice paid twice?"),
+        ("refund", "Is a refund requested?"),
+    ] {
+        questions
+            .push(
+                id,
+                Question::Noul(
+                    NoulQuestion::new(
+                        Content::string(text),
+                        NoulCriteria {
+                            truthy: Some(Content::Null),
+                            falsy: None,
+                        },
+                    )
+                    .unwrap(),
+                ),
+            )
+            .unwrap();
+    }
+    let a = raw.decide(&state, &questions).unwrap();
+    let b = native.decide(&state, &questions).unwrap();
+    for (a, b) in a.iter().zip(&b) {
+        assert!((a.action_probability - b.action_probability).abs() < 1e-5);
+        match (&a.answer, &b.answer) {
+            (decision_core::Answer::Noul(a), decision_core::Answer::Noul(b)) => {
+                assert!((a.noul - b.noul).abs() < 1e-5, "{} vs {}", a.noul, b.noul);
+            }
+            other => panic!("unexpected answers {other:?}"),
         }
     }
 }

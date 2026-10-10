@@ -329,3 +329,17 @@ Validated on an RTX 3060 (12 GB, compute 8.6) in `.devcontainer/` (CUDA
   round-trips through the host; the first call pays NVRTC compilation and the
   weight upload (7–15 s for Jeff).
 
+## Raw single-stream CUDA forward (2026-10-11)
+
+On a CUDA device `LayaEngine` and `JeffEngine` now default to
+`CudaPath::Raw` (`tenferro_ext::CudaPath`, re-exported by both engines;
+`with_cuda_path`, `cuda_path()`, `TENFERRO_DECISION_CUDA_PATH=native`): one
+`with_raw` scope per forward running cuBLAS and NVRTC kernels on tenferro's
+stream (`tenferro_ext::raw_exec`, `laya_infer::cuda_raw`,
+`jeff_infer::cuda_raw`, `tenferro_gated_delta::raw`). The tenferro-native
+device forward is unchanged and selectable; it is used automatically when the
+raw path does not support a model (Laya: head_dim 64 and hidden <= 1024; Jeff:
+hidden <= 1024, head_dim a multiple of 32, DeltaNet key_dim <= 256, taps <= 8;
+rows longer than 8192 tokens). Design, measurements and the comparison with
+the Julia GPU runtimes: `23_TENFERRO_NATIVE.md`.
+

@@ -15,6 +15,8 @@
 
 pub mod checkpoint;
 pub mod config;
+#[cfg(feature = "cuda")]
+pub mod cuda_raw;
 pub mod engine;
 pub mod host_opt;
 pub mod model;

@@ -10,7 +10,7 @@ authors.workspace = true
 
 [features]
 default = []
-cuda = ["dep:tenferro-gpu", "tenferro-ad/cuda", "tenferro-linalg/cuda"]
+cuda = ["dep:tenferro-gpu", "dep:tenferro-ext", "tenferro-ext/cuda", "tenferro-ad/cuda", "tenferro-linalg/cuda"]
 
 [dependencies]
 decision-core.workspace = true
@@ -24,5 +24,7 @@ tenferro-tensor.workspace = true
 tenferro-cpu.workspace = true
 tenferro-gpu = { workspace = true, optional = true, features = ["cuda"] }
 tenferro-infer.workspace = true
+# Raw single-stream execution layer for the CUDA DeltaNet mixer (`raw`).
+tenferro-ext = { workspace = true, optional = true }
 
 [dev-dependencies]

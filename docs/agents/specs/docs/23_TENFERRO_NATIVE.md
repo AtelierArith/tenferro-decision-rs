@@ -324,3 +324,72 @@ plans, output allocation, small activation copies) and one
 Further gains need either fewer eager ops (e.g. fused residual add + norm,
 device marker pooling for Laya, persistent cuBLAS handles behind a fused
 GEMM op) or tenferro-side changes recorded in `19_TENFERRO_FEEDBACK.md`.
+
+
+## Raw single-stream CUDA forward (2026-10-11)
+
+The tenferro-native device forward above is launch- and host-bound (a ~25 ms
+floor per call). The raw path (`CudaPath::Raw`, the CUDA default of both
+engines) instead runs the whole forward in **one** `CudaExecSession::with_raw`
+scope, as a self-hosted extension; tenferro-rs is unchanged and the native
+path stays selectable (`CudaPath::Native`, `TENFERRO_DECISION_CUDA_PATH=native`)
+and is the fallback for unsupported models.
+
+- `tenferro_ext::raw_exec`: the scope (`with_raw_exec`), a cuBLAS handle per
+  thread and runtime bound to tenferro's captured stream (cudarc 0.19, as in
+  tenferro-gpu), an NVRTC module cache, async uploads, one synchronizing
+  download, and `DeviceBuffer`s (driver allocations on the primary context,
+  freed on drop; see `19_TENFERRO_FEEDBACK.md` for why not CubeCL's pool).
+  Weights upload once into a few aligned arenas; activations live in one
+  scratch buffer grown to the largest request, so a warm call allocates
+  nothing.
+- Laya (`laya_infer::cuda_raw`, `cuda/laya_raw.cu`): every linear layer is a
+  cuBLAS `N, N` GEMM on transposed weights with residual adds folded in
+  (`beta = 1`); warp-per-column LayerNorm; MLX-exact GELU/GeGLU; a port of
+  Laya.jl's fused FP32 flash attention (64-query blocks, 32-key tiles, RoPE
+  on staging, online softmax, local-window and padding tiles skipped, no score
+  matrix); marker gather/scorer/pooling and the action head on device, one
+  download of logits + actions.
+- Jeff (`jeff_infer::cuda_raw`, `cuda/jeff_raw.cu`,
+  `tenferro_gated_delta::raw` + `cuda/delta_raw.cu`): packed `[qkv|z|a|b]`,
+  `[q|gate|k|v]` (GQA key/value heads de-duplicated) and `[gate|up]`
+  projections stored `(in, out)` for cuBLAS `T, N` (QwenDecisionCore's
+  orientation, measured faster at L8/L256; `TENFERRO_DECISION_JEFF_GEMM=nn`
+  switches), centered RMSNorm with the DeltaNet input mask fused, causal conv +
+  SiLU, Q/K L2 norm, gates, the scan — warp-per-row recurrence below 32 tokens,
+  QwenDecisionCore.jl's chunked WY form (prepare kernel, batched cuBLAS
+  products, blocked triangular inverse, sequential chunk hand-off) from 32 on —
+  RMSNorm·silu(z) gate, per-head norm + partial RoPE (f64 host tables),
+  gated causal attention (8 queries per block sharing K/V reads), and a final
+  full-attention layer computed for the last position only.
+
+Accuracy (max |Δ|, hardware gates): Laya raw logits vs CPU ≤ 7.2e-6 (B1, padded
+B5, padded L300 B2 with sliding-window tile skipping), vs Julia ≤ 2.9e-6;
+actions relative ≤ 1e-6. Jeff raw: Julia L8 vs CPU 6.7e-6 / vs Julia 4.8e-6;
+parcel vs CPU 7.2e-6 / vs PyTorch 1.05e-5 (scale 18.6); synthetic stacks vs the
+host oracle ≤ 6e-6 for both scans at lengths 1–200 with mask holes.
+
+Measurements (RTX 3060, GPU 0, F32, warm median of 50 after 10 warmups,
+including upload/forward/download/sync; Rust raw and Julia alternated, mean of
+two runs; `fixtures/bench-gpu-raw-2026-10-11`):
+
+| row | before (native) | after (raw) | Julia CUDA |
+|---|---:|---:|---:|
+| Jeff parcel trimmed L101 | 37.9 | 24.7 | 25.8 |
+| Jeff parcel full L256 | 79.1 | 45.7 | 47.2 |
+| Jeff synthetic L8 | 26.5 | 9.7 | 12.0 |
+| Jeff synthetic L64 | 28.0 | 15.6 | 16.8 |
+| Laya L8 B1 | 26.2 | 7.2 | 8.0 |
+| Laya L64 B1 | 28.2 | 11.0 | 11.8 |
+| Laya L8 B8 | 27.0 | 11.0 | 11.9 |
+| Laya L93 B1 | 30.0 | 15.8 | 16.8 |
+| Laya L93 B10 | 155.2 | 107.7 | 111.8 |
+| Laya L512 B1 | 267.6 | 63.6 | 67.4 |
+| Laya L512 B10 | OOM | 542.5 | 582.3 |
+
+Where the time goes now: the calls are GPU-bound (Jeff L8: 9.7 ms of kernels
+per 9.7 ms call). Jeff L256 spends ~80% in F32 cuBLAS SGEMM; the NN/TN choice
+alone moves L64 and L256 by ~5% in opposite directions, so per-shape GEMM
+algorithm selection (cublasLt heuristics/autotuning) is the next lever, then a
+bandwidth-optimal skinny GEMM for ≤ 8 tokens (L8 reads ~2 GB of weights at
+~57% of peak bandwidth).

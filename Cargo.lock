@@ -3783,6 +3783,8 @@ name = "tenferro-ext"
 version = "0.1.0"
 dependencies = [
  "cpu-kernels",
+ "cudarc",
+ "rayon",
  "tenferro-ad",
  "tenferro-cpu",
  "tenferro-gpu",
@@ -3801,6 +3803,7 @@ dependencies = [
  "rayon",
  "tenferro-ad",
  "tenferro-cpu",
+ "tenferro-ext",
  "tenferro-gpu",
  "tenferro-infer",
  "tenferro-linalg",

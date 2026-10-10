@@ -17,7 +17,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tenferro_ad::EagerRuntime;
-pub use tenferro_ext::Device;
+pub use tenferro_ext::{CudaPath, Device};
 
 use crate::calibration::{
     Calibration, LayaDecision, QType, action_probability, choice_answer, noul_answer, score_answer,
@@ -43,6 +43,11 @@ pub struct LayaEngine {
     runtime: Arc<EagerRuntime>,
     /// Weight tensors cached across forwards (see [`TensorCache`]).
     cache: TensorCache,
+    /// The CUDA execution path.
+    cuda_path: CudaPath,
+    /// Resident device state of the raw CUDA forward.
+    #[cfg(feature = "cuda")]
+    raw: crate::cuda_raw::LayaCudaRaw,
 }
 
 impl LayaEngine {
@@ -67,6 +72,9 @@ impl LayaEngine {
             device: Device::Cpu,
             runtime,
             cache: TensorCache::new(),
+            cuda_path: CudaPath::from_env(),
+            #[cfg(feature = "cuda")]
+            raw: crate::cuda_raw::LayaCudaRaw::new(),
         })
     }
 
@@ -146,7 +154,31 @@ impl LayaEngine {
         self.runtime = device.runtime().map_err(backend_error)?;
         self.device = device;
         self.cache = TensorCache::new();
+        #[cfg(feature = "cuda")]
+        {
+            self.raw = crate::cuda_raw::LayaCudaRaw::new();
+        }
         Ok(self)
+    }
+
+    /// Select how a CUDA device runs the forward (default [`CudaPath::Raw`],
+    /// or `TENFERRO_DECISION_CUDA_PATH=native`). Ignored on the CPU.
+    pub fn with_cuda_path(mut self, path: CudaPath) -> Self {
+        self.cuda_path = path;
+        self
+    }
+
+    /// The CUDA path that runs the forward on a CUDA device: the selected
+    /// one, or [`CudaPath::Native`] when the raw path does not support the
+    /// model or the `cuda` feature is off.
+    pub fn cuda_path(&self) -> CudaPath {
+        #[cfg(feature = "cuda")]
+        if self.cuda_path == CudaPath::Raw
+            && crate::cuda_raw::LayaCudaRaw::supports(&self.encoder, &self.weights)
+        {
+            return CudaPath::Raw;
+        }
+        CudaPath::Native
     }
 
     /// The device the tenferro forward runs on.
@@ -236,9 +268,29 @@ impl LayaEngine {
             }
             qtypes.push(qtype.index() as i64);
         }
+        #[cfg(feature = "cuda")]
+        let raw = self.device.is_cuda() && self.cuda_path() == CudaPath::Raw;
+        #[cfg(not(feature = "cuda"))]
+        let raw = false;
         let (logits, action) = self
             .runtime
             .with_eager_session(|session| {
+                #[cfg(feature = "cuda")]
+                if raw {
+                    return crate::cuda_raw::forward_cuda_raw(
+                        &mut self.raw,
+                        session,
+                        &self.encoder,
+                        &self.agent,
+                        &self.weights,
+                        &ids,
+                        &mask,
+                        &marker_pos,
+                        &marker_mask,
+                        &qtypes,
+                    );
+                }
+                let _ = raw;
                 forward_tenferro_cached(
                     session,
                     &mut self.cache,

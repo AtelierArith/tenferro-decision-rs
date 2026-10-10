@@ -36,9 +36,11 @@ mod laya_attention;
 mod layernorm;
 mod linear;
 mod native_erf;
+#[cfg(feature = "cuda")]
+pub mod raw_exec;
 mod rms_norm;
 
-pub use device::Device;
+pub use device::{CudaPath, Device};
 pub use fusion::{FusedActivation, FusedScope, Fusion};
 pub use gated_silu::{EagerSessionGatedSiluExt, GATED_SILU_FAMILY_ID, GatedSiluOp};
 pub use geglu::{EagerSessionGegluExt, GEGLU_FAMILY_ID, GegluOp};

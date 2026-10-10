@@ -17,11 +17,13 @@ use std::path::PathBuf;
 
 use decision_core::PreparedState;
 use hf_fetch::{CheckpointSpec, Hub};
-use jeff_infer::engine::{Device, JeffBackend, JeffEngine};
+use jeff_infer::cuda_raw::{JeffCudaRaw, forward_cuda_raw};
+use jeff_infer::engine::{CudaPath, Device, JeffBackend, JeffEngine};
 use jeff_infer::model::{
     AttentionWeights, CudaDeltaWorkspaces, DeltaKernel, FullAttentionWeights, JeffConfig,
     JeffWeights, LayerWeights, MlpWeights, forward_reference, forward_tenferro_device,
 };
+use tenferro_gated_delta::raw::DeltaRawScan;
 use tenferro_gated_delta::{Algorithm, GatedDeltaConfig, GatedDeltaWeights, GatedDeltaWorkspace};
 use tenferro_infer::TensorCache;
 
@@ -271,10 +273,6 @@ fn cuda_production_logits_match_cpu_and_references() {
         return;
     };
     let mut cpu = JeffEngine::load(&dir).unwrap();
-    let mut gpu = JeffEngine::load(&dir)
-        .unwrap()
-        .with_device(Device::Cuda(0))
-        .expect("CUDA device required");
 
     // Julia reference (L8) and the JeffClient.jl parcel case (B1/L256, 101
     // active tokens after left padding; independent PyTorch logits).
@@ -327,24 +325,180 @@ fn cuda_production_logits_match_cpu_and_references() {
             f32s(&parcel["logits"][0]),
         ),
     ];
-    for (name, state, reference) in cases {
-        let host = cpu.logits(&state).unwrap().remove(0);
-        // Repeat to exercise retained device weights and layer workspaces.
-        for request in 0..2 {
-            let device = gpu.logits(&state).unwrap().remove(0);
-            let scale = reference.iter().map(|v| v.abs()).fold(1.0f32, f32::max);
-            let vs_cpu = max_diff(&device, &host);
-            let vs_reference = max_diff(&device, &reference);
-            let cpu_vs_reference = max_diff(&host, &reference);
-            eprintln!(
-                "{name} request {request}: cuda-vs-cpu {vs_cpu:e}, cuda-vs-reference \
-                 {vs_reference:e}, cpu-vs-reference {cpu_vs_reference:e} (scale {scale})"
-            );
-            assert!(vs_cpu <= 1e-4 * scale, "{name}: CUDA vs CPU diff {vs_cpu}");
-            assert!(
-                vs_reference <= cpu_vs_reference + 1e-4 * scale,
-                "{name}: CUDA vs reference diff {vs_reference}"
-            );
+    let hosts: Vec<Vec<f32>> = cases
+        .iter()
+        .map(|(_, state, _)| cpu.logits(state).unwrap().remove(0))
+        .collect();
+    drop(cpu);
+    // One device engine at a time (the raw path frees its device memory on
+    // drop).
+    for path in [CudaPath::Raw, CudaPath::Native] {
+        let mut gpu = JeffEngine::load(&dir)
+            .unwrap()
+            .with_device(Device::Cuda(0))
+            .expect("CUDA device required")
+            .with_cuda_path(path);
+        assert_eq!(gpu.cuda_path(), path);
+        for ((name, state, reference), host) in cases.iter().zip(&hosts) {
+            // Repeat to exercise retained device weights and workspaces.
+            for request in 0..2 {
+                let device = gpu.logits(state).unwrap().remove(0);
+                let scale = reference.iter().map(|v| v.abs()).fold(1.0f32, f32::max);
+                let vs_cpu = max_diff(&device, host);
+                let vs_reference = max_diff(&device, reference);
+                let cpu_vs_reference = max_diff(host, reference);
+                eprintln!(
+                    "{path:?} {name} request {request}: cuda-vs-cpu {vs_cpu:e}, \
+                     cuda-vs-reference {vs_reference:e}, cpu-vs-reference \
+                     {cpu_vs_reference:e} (scale {scale})"
+                );
+                assert!(
+                    vs_cpu <= 1e-4 * scale,
+                    "{path:?} {name}: CUDA vs CPU diff {vs_cpu}"
+                );
+                assert!(
+                    vs_reference <= cpu_vs_reference + 1e-4 * scale,
+                    "{path:?} {name}: CUDA vs reference diff {vs_reference}"
+                );
+            }
+        }
+    }
+}
+
+/// A raw-path-supported stack (head_dim 32): DeltaNet, full attention with
+/// grouped key/value heads (kv_heads 1 expanded to 2), DeltaNet, full
+/// attention last (exercising the last-position-only final layer).
+fn synthetic_raw(seed: u64) -> (JeffConfig, JeffWeights) {
+    let cfg = JeffConfig {
+        hidden: 64,
+        heads: 2,
+        head_dim: 32,
+        intermediate: 48,
+        eps: 1e-6,
+    };
+    let mut rng = Lcg(seed);
+    let width = cfg.heads * cfg.head_dim;
+    let delta = |rng: &mut Lcg| {
+        let config = GatedDeltaConfig {
+            hidden: cfg.hidden,
+            key_heads: 1,
+            value_heads: 2,
+            key_dim: 16,
+            value_dim: 8,
+            conv_taps: 4,
+            eps: cfg.eps,
+            chunk_size: 64,
+            algorithm: Algorithm::Chunked,
+        };
+        let channels =
+            2 * config.key_dim * config.key_heads + config.value_dim * config.value_heads;
+        let value_width = config.value_dim * config.value_heads;
+        AttentionWeights::Delta {
+            weights: GatedDeltaWeights {
+                qkv: rng.fill(cfg.hidden * channels, -0.3, 0.3),
+                z: rng.fill(cfg.hidden * value_width, -0.3, 0.3),
+                a: rng.fill(cfg.hidden * config.value_heads, -0.3, 0.3),
+                b: rng.fill(cfg.hidden * config.value_heads, -0.3, 0.3),
+                conv: rng.fill(config.conv_taps * channels, -0.5, 0.5),
+                a_decay: rng.fill(config.value_heads, -1.0, -0.05),
+                dt_bias: rng.fill(config.value_heads, -0.5, 0.5),
+                norm: rng.fill(config.value_dim, 0.5, 1.5),
+                out_proj: rng.fill(value_width * cfg.hidden, -0.3, 0.3),
+            },
+            config,
+        }
+    };
+    let full = |rng: &mut Lcg| {
+        // One key/value head expanded to both query heads.
+        let expand = |w: Vec<f32>| {
+            let hd = cfg.head_dim;
+            let mut out = Vec::with_capacity(cfg.hidden * width);
+            for i in 0..cfg.hidden {
+                for _ in 0..cfg.heads {
+                    out.extend_from_slice(&w[i * hd..(i + 1) * hd]);
+                }
+            }
+            out
+        };
+        AttentionWeights::Full(FullAttentionWeights {
+            q: rng.fill(cfg.hidden * width, -0.3, 0.3),
+            gate: rng.fill(cfg.hidden * width, -0.3, 0.3),
+            k: expand(rng.fill(cfg.hidden * cfg.head_dim, -0.3, 0.3)),
+            v: expand(rng.fill(cfg.hidden * cfg.head_dim, -0.3, 0.3)),
+            o: rng.fill(width * cfg.hidden, -0.3, 0.3),
+            q_norm: rng.fill(cfg.head_dim, -0.5, 0.5),
+            k_norm: rng.fill(cfg.head_dim, -0.5, 0.5),
+            rope_theta: 10_000_000.0,
+            rotary_dim: 8,
+        })
+    };
+    let layer = |rng: &mut Lcg, attention| LayerWeights {
+        input_norm: rng.fill(cfg.hidden, -0.5, 0.5),
+        post_norm: rng.fill(cfg.hidden, -0.5, 0.5),
+        attention,
+        mlp: MlpWeights {
+            gate: rng.fill(cfg.hidden * cfg.intermediate, -0.3, 0.3),
+            up: rng.fill(cfg.hidden * cfg.intermediate, -0.3, 0.3),
+            down: rng.fill(cfg.intermediate * cfg.hidden, -0.3, 0.3),
+        },
+    };
+    let mut layers = Vec::new();
+    for kind in 0..4 {
+        let attention = if kind % 2 == 0 {
+            delta(&mut rng)
+        } else {
+            full(&mut rng)
+        };
+        layers.push(layer(&mut rng, attention));
+    }
+    let vocab = 40;
+    let options = 6;
+    let weights = JeffWeights {
+        embedding: rng.fill(cfg.hidden * vocab, -1.0, 1.0),
+        vocab,
+        layers,
+        final_norm: rng.fill(cfg.hidden, -0.5, 0.5),
+        readout: rng.fill(cfg.hidden * options, -0.3, 0.3),
+        options,
+    };
+    (cfg, weights)
+}
+
+#[test]
+#[ignore = "requires CUDA hardware, NVRTC and cuBLAS; run explicitly with --ignored"]
+fn cuda_raw_forward_matches_reference_for_both_scans() {
+    let (cfg, weights) = synthetic_raw(7);
+    assert!(JeffCudaRaw::supports(&cfg, &weights));
+    let runtime = Device::Cuda(0).runtime().expect("CUDA device required");
+    for scan in [
+        DeltaRawScan::Recurrent,
+        DeltaRawScan::Chunked,
+        DeltaRawScan::Auto,
+    ] {
+        let mut state = JeffCudaRaw::new().with_scan(scan);
+        // Lengths across chunk boundaries (64), growing and shrinking so the
+        // scratch is reused and regrown; interior mask holes.
+        for length in [1usize, 7, 64, 65, 130, 9, 200] {
+            let ids: Vec<i64> = (0..length).map(|t| ((t * 13 + 5) % 40) as i64).collect();
+            let mask: Vec<f32> = (0..length)
+                .map(|t| {
+                    if t % 11 == 3 && t + 1 != length {
+                        0.0
+                    } else {
+                        1.0
+                    }
+                })
+                .collect();
+            let expected = forward_reference(&cfg, &weights, &ids, &mask).unwrap();
+            let got = runtime
+                .with_eager_session(|session| {
+                    forward_cuda_raw(&mut state, session, &cfg, &weights, &ids, &mask)
+                })
+                .unwrap()
+                .unwrap();
+            let diff = max_diff(&got, &expected);
+            eprintln!("{scan:?} length {length}: max diff {diff:e}");
+            assert!(diff <= 1e-4, "{scan:?} length {length}: diff {diff}");
         }
     }
 }

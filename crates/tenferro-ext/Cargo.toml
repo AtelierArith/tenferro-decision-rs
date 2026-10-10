@@ -11,7 +11,7 @@ authors.workspace = true
 [features]
 default = []
 onednn = ["cpu-kernels/onednn"]
-cuda = ["dep:tenferro-gpu", "tenferro-ad/cuda"]
+cuda = ["dep:tenferro-gpu", "dep:cudarc", "dep:rayon", "tenferro-ad/cuda"]
 
 [dependencies]
 tenferro-ad.workspace = true
@@ -21,3 +21,5 @@ tenferro-cpu.workspace = true
 cpu-kernels.workspace = true
 tenferro-infer.workspace = true
 tenferro-gpu = { workspace = true, optional = true, features = ["cuda"] }
+cudarc = { workspace = true, optional = true }
+rayon = { workspace = true, optional = true }
