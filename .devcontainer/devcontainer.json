@@ -1,0 +1,34 @@
+{
+  "name": "tenferro-decision-rs (CUDA)",
+  "build": { "dockerfile": "Dockerfile" },
+  "runArgs": ["--gpus=all", "--shm-size=8g"],
+  "hostRequirements": { "gpu": true },
+  "remoteUser": "ubuntu",
+  "containerEnv": {
+    "CARGO_TERM_COLOR": "always",
+    "LD_LIBRARY_PATH": "/usr/local/cuda/lib64:/usr/lib/x86_64-linux-gnu/libcutensor/13",
+    "HF_HOME": "/home/ubuntu/.cache/huggingface",
+    // CUDA 13 NVRTC no longer accepts the tests' default compute_70 (Volta).
+    // compute_86 matches the RTX 3060; change it for other GPUs.
+    "TENFERRO_CUDA_ARCH": "compute_86",
+    // Both GPUs are visible. Number them as nvidia-smi does; by convention
+    // GPU 0 runs benchmarks and GPU 1 runs tests and debugging, e.g.
+    // `CUDA_VISIBLE_DEVICES=1 cargo test ... -- --ignored`.
+    "CUDA_DEVICE_ORDER": "PCI_BUS_ID"
+  },
+  // Share the host Hugging Face cache so checkpoints are downloaded once, and
+  // keep the cargo registry/git caches across container rebuilds.
+  "initializeCommand": "mkdir -p \"${localEnv:HOME}/.cache/huggingface\"",
+  "mounts": [
+    "source=${localEnv:HOME}/.cache/huggingface,target=/home/ubuntu/.cache/huggingface,type=bind",
+    "source=tenferro-decision-rs-cargo-registry,target=/home/ubuntu/.cargo/registry,type=volume",
+    "source=tenferro-decision-rs-cargo-git,target=/home/ubuntu/.cargo/git,type=volume"
+  ],
+  "postCreateCommand": "sudo chown ubuntu:ubuntu /home/ubuntu/.cargo/registry /home/ubuntu/.cargo/git && git submodule update --init --recursive",
+  "postStartCommand": "nvidia-smi -L",
+  "customizations": {
+    "vscode": {
+      "extensions": ["rust-lang.rust-analyzer", "tamasfe.even-better-toml"]
+    }
+  }
+}
