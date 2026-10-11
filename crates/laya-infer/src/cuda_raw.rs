@@ -19,8 +19,11 @@
 
 use decision_core::DecisionError;
 use tenferro_ad::EagerSession;
+use tenferro_ext::cube_kernels as cube;
+pub use tenferro_ext::raw_exec::RawKernels;
 use tenferro_ext::raw_exec::{
-    ArenaBuilder, Arg, DevPtr, DeviceBuffer, Op, RawExec, align, at, with_raw_exec,
+    ArenaBuilder, Arg, CubeClient, CubePool, DevPtr, DeviceBuffer, Op, RawExec, align, at,
+    cube_alloc, with_raw_exec, with_raw_exec_cube,
 };
 
 use crate::config::{AgentConfig, EncoderConfig, LayerKind};
@@ -38,6 +41,8 @@ const KERNELS: &[&str] = &[
     "laya_attention",
 ];
 const HEAD_DIM: usize = 64;
+type Cu = cubecl_cuda::CudaRuntime;
+use cubecl::prelude::{CubeCount, CubeDim};
 const MAX_HIDDEN: usize = 32 * 32;
 
 fn invalid(field: &'static str, message: &'static str) -> tenferro_ad::Error {
@@ -64,6 +69,9 @@ struct Loc {
 struct Norm {
     w: Loc,
     b: Option<Loc>,
+    /// Offsets of `w` / `b` in the small CubeCL pool.
+    sw: usize,
+    sb: Option<usize>,
 }
 
 /// A linear layer stored column-major `(out, in)`.
@@ -71,6 +79,8 @@ struct Norm {
 struct Lin {
     w: Loc,
     b: Option<Loc>,
+    /// Offset of `b` in the small CubeCL pool.
+    sb: Option<usize>,
     inp: usize,
     out: usize,
 }
@@ -119,19 +129,68 @@ struct Weights {
     rope_bases: [f64; 2],
 }
 
+/// CubeCL pool buffers of the [`RawKernels::Cubecl`] variant.
+struct CubeState {
+    client: CubeClient,
+    small: CubePool,
+    small_uploaded: bool,
+    scratch: CubePool,
+    rope: CubePool,
+    rope_positions: usize,
+    rope_uploaded: bool,
+}
+
+impl std::fmt::Debug for CubeState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CubeState")
+            .field("small", &self.small)
+            .field("scratch", &self.scratch)
+            .field("rope", &self.rope)
+            .finish_non_exhaustive()
+    }
+}
+
 /// Device state of the raw Laya forward: resident weights, RoPE tables and
 /// the reused activation scratch. Create one per engine and runtime.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct LayaCudaRaw {
     weights: Option<Weights>,
     rope: Option<(DeviceBuffer, usize)>,
     scratch: Option<DeviceBuffer>,
+    kernels: RawKernels,
+    small_host: Option<Vec<f32>>,
+    cube: Option<CubeState>,
+}
+
+impl Default for LayaCudaRaw {
+    fn default() -> Self {
+        Self {
+            weights: None,
+            rope: None,
+            scratch: None,
+            kernels: RawKernels::from_env(),
+            small_host: None,
+            cube: None,
+        }
+    }
 }
 
 impl LayaCudaRaw {
-    /// Empty state; weights upload on the first forward.
+    /// Empty state; weights upload on the first forward. The kernel variant
+    /// follows `TENFERRO_DECISION_CUDA_KERNELS` (see [`RawKernels`]).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Select the non-GEMM kernel variant.
+    pub fn with_kernels(mut self, kernels: RawKernels) -> Self {
+        self.kernels = kernels;
+        self
+    }
+
+    /// The selected non-GEMM kernel variant.
+    pub fn kernels(&self) -> RawKernels {
+        self.kernels
     }
 
     /// Whether the raw path supports this model (head_dim 64 attention
@@ -147,7 +206,12 @@ impl LayaCudaRaw {
     }
 }
 
-fn push_norm(arena: &mut ArenaBuilder, index: usize, ln: &LayerNormWeights) -> Norm {
+fn push_norm(
+    arena: &mut ArenaBuilder,
+    small: &mut ArenaBuilder,
+    index: usize,
+    ln: &LayerNormWeights,
+) -> Norm {
     Norm {
         w: Loc {
             arena: index,
@@ -157,18 +221,22 @@ fn push_norm(arena: &mut ArenaBuilder, index: usize, ln: &LayerNormWeights) -> N
             arena: index,
             offset: arena.push(bias),
         }),
+        sw: small.push(&ln.weight),
+        sb: ln.bias.as_ref().map(|bias| small.push(bias)),
     }
 }
 
 /// `linear.weight` is column-major `(inp, out)`; store `(out, inp)`.
 fn push_lin(
     arena: &mut ArenaBuilder,
+    small: &mut ArenaBuilder,
     index: usize,
     linear: &LinearWeights,
     inp: usize,
     out: usize,
 ) -> Lin {
     Lin {
+        sb: linear.bias.as_ref().map(|bias| small.push(bias)),
         w: Loc {
             arena: index,
             offset: arena.push_transposed(&linear.weight, inp, out),
@@ -182,11 +250,15 @@ fn push_lin(
     }
 }
 
+/// Upload the weights; also returns the small vectors (norm weights and
+/// biases) staged for the CubeCL pool.
 fn upload_weights(
     exec: &RawExec<'_, '_>,
     encoder: &EncoderConfig,
     weights: &LayaWeights,
-) -> tenferro_tensor::Result<Weights> {
+) -> tenferro_tensor::Result<(Weights, Vec<f32>)> {
+    let mut small_builder = ArenaBuilder::new();
+    let small = &mut small_builder;
     let d = encoder.hidden_size;
     let inter = encoder.intermediate_size;
     let enc = &weights.encoder;
@@ -199,19 +271,26 @@ fn upload_weights(
         offset: top.push(&enc.tok_embeddings),
     };
     let vocab = enc.tok_embeddings.len() / d;
-    let embed_norm = push_norm(&mut top, 0, &enc.embed_norm);
-    let final_norm = push_norm(&mut top, 0, &enc.final_norm);
+    let embed_norm = push_norm(&mut top, small, 0, &enc.embed_norm);
+    let final_norm = push_norm(&mut top, small, 0, &enc.final_norm);
     let type_emb = Loc {
         arena: 0,
         offset: top.push(&weights.type_emb),
     };
-    let scorer_norm = push_norm(&mut top, 0, &weights.scorer_norm);
-    let scorer1 = push_lin(&mut top, 0, &weights.scorer1, d, d);
-    let scorer2 = push_lin(&mut top, 0, &weights.scorer2, d, 1);
+    let scorer_norm = push_norm(&mut top, small, 0, &weights.scorer_norm);
+    let scorer1 = push_lin(&mut top, small, 0, &weights.scorer1, d, d);
+    let scorer2 = push_lin(&mut top, small, 0, &weights.scorer2, d, 1);
     let action_hidden = weights.act1.weight.len() / (d + 4);
-    let act1 = push_lin(&mut top, 0, &weights.act1, d + 4, action_hidden);
+    let act1 = push_lin(&mut top, small, 0, &weights.act1, d + 4, action_hidden);
     let action_count = weights.act2.weight.len() / action_hidden;
-    let act2 = push_lin(&mut top, 0, &weights.act2, action_hidden, action_count);
+    let act2 = push_lin(
+        &mut top,
+        small,
+        0,
+        &weights.act2,
+        action_hidden,
+        action_count,
+    );
     arenas.push(top.upload(exec)?);
 
     let window = (encoder.local_attention / 2) as i32;
@@ -222,12 +301,12 @@ fn upload_weights(
         let attn_norm = layer
             .attn_norm
             .as_ref()
-            .map(|ln| push_norm(&mut arena, index, ln));
-        let wqkv = push_lin(&mut arena, index, &layer.wqkv, d, 3 * d);
-        let wo = push_lin(&mut arena, index, &layer.wo, d, d);
-        let mlp_norm = push_norm(&mut arena, index, &layer.mlp_norm);
-        let wi = push_lin(&mut arena, index, &layer.wi, d, 2 * inter);
-        let wo_mlp = push_lin(&mut arena, index, &layer.wo_mlp, inter, d);
+            .map(|ln| push_norm(&mut arena, small, index, ln));
+        let wqkv = push_lin(&mut arena, small, index, &layer.wqkv, d, 3 * d);
+        let wo = push_lin(&mut arena, small, index, &layer.wo, d, d);
+        let mlp_norm = push_norm(&mut arena, small, index, &layer.mlp_norm);
+        let wi = push_lin(&mut arena, small, index, &layer.wi, d, 2 * inter);
+        let wo_mlp = push_lin(&mut arena, small, index, &layer.wo_mlp, inter, d);
         arenas.push(arena.upload(exec)?);
         let (window, rope) = match layer.kind {
             LayerKind::FullAttention => (-1, 0),
@@ -251,12 +330,12 @@ fn upload_weights(
         let index = arenas.len();
         let ff = layer.linear1.weight.len() / d;
         let mut arena = ArenaBuilder::new();
-        let norm1 = push_norm(&mut arena, index, &layer.norm1);
-        let in_proj = push_lin(&mut arena, index, &layer.in_proj, d, 3 * d);
-        let out_proj = push_lin(&mut arena, index, &layer.out_proj, d, d);
-        let norm2 = push_norm(&mut arena, index, &layer.norm2);
-        let linear1 = push_lin(&mut arena, index, &layer.linear1, d, ff);
-        let linear2 = push_lin(&mut arena, index, &layer.linear2, ff, d);
+        let norm1 = push_norm(&mut arena, small, index, &layer.norm1);
+        let in_proj = push_lin(&mut arena, small, index, &layer.in_proj, d, 3 * d);
+        let out_proj = push_lin(&mut arena, small, index, &layer.out_proj, d, d);
+        let norm2 = push_norm(&mut arena, small, index, &layer.norm2);
+        let linear1 = push_lin(&mut arena, small, index, &layer.linear1, d, ff);
+        let linear2 = push_lin(&mut arena, small, index, &layer.linear2, ff, d);
         arenas.push(arena.upload(exec)?);
         head.push(HeadLayer {
             norm1,
@@ -269,25 +348,29 @@ fn upload_weights(
         });
     }
 
-    Ok(Weights {
-        arenas,
-        embed,
-        vocab,
-        embed_norm,
-        layers,
-        final_norm,
-        head,
-        type_emb,
-        scorer_norm,
-        scorer1,
-        scorer2,
-        act1,
-        act2,
-        rope_bases: [
-            encoder.rope_base(LayerKind::FullAttention),
-            encoder.rope_base(LayerKind::SlidingAttention),
-        ],
-    })
+    let small = small_builder.into_vec();
+    Ok((
+        Weights {
+            arenas,
+            embed,
+            vocab,
+            embed_norm,
+            layers,
+            final_norm,
+            head,
+            type_emb,
+            scorer_norm,
+            scorer1,
+            scorer2,
+            act1,
+            act2,
+            rope_bases: [
+                encoder.rope_base(LayerKind::FullAttention),
+                encoder.rope_base(LayerKind::SlidingAttention),
+            ],
+        },
+        small,
+    ))
 }
 
 /// RoPE tables `[cos_g, sin_g, cos_l, sin_l]`, each `(32, positions)`,
@@ -326,6 +409,8 @@ struct Layout {
     a1: usize,
     out: usize,
     ints: usize,
+    /// The token mask as f32 (CubeCL attention).
+    validf: usize,
     total: usize,
 }
 
@@ -360,6 +445,7 @@ impl Layout {
         let a1 = take(action_hidden * batch);
         let out = take(k_count * batch + action_count * batch);
         let ints = take(2 * tokens + 2 * k_count * batch + batch);
+        let validf = take(tokens);
         Self {
             x,
             hb,
@@ -374,6 +460,7 @@ impl Layout {
             a1,
             out,
             ints,
+            validf,
             total: next,
         }
     }
@@ -479,18 +566,77 @@ pub fn forward_cuda_raw(
     ints.extend(qtype.iter().map(|&q| q as i32));
 
     let mut out = vec![0.0f32; k_count * batch + action_count * batch];
-    with_raw_exec(session, "laya.forward_cuda_raw", |exec| {
+    let use_cube = state.kernels == RawKernels::Cubecl;
+    let validf: Vec<f32> = mask.iter().map(|&m| if m { 1.0 } else { 0.0 }).collect();
+    if use_cube {
         if state.weights.is_none() {
-            state.weights = Some(upload_weights(exec, encoder, weights)?);
+            let (w, small) = with_raw_exec(session, "laya.upload", |exec| {
+                upload_weights(exec, encoder, weights)
+            })?;
+            state.weights = Some(w);
+            state.small_host = Some(small);
+        }
+        // Pool buffers (the only memory CubeCL can bind), allocated in one
+        // short `with_cubecl` scope when missing or too small.
+        let rebuild = state
+            .cube
+            .as_ref()
+            .is_none_or(|c| c.scratch.len() < layout.total || c.rope_positions < length);
+        if rebuild {
+            let positions = length.next_power_of_two().max(256);
+            let rope_floats = 4 * (HEAD_DIM / 2) * positions;
+            let small_len = state.small_host.as_ref().map_or(1, Vec::len);
+            state.cube = None;
+            let (client, mut pools) = cube_alloc(session, &[small_len, layout.total, rope_floats])?;
+            let rope_pool = pools.pop().expect("three pools");
+            let scratch_pool = pools.pop().expect("three pools");
+            let small_pool = pools.pop().expect("three pools");
+            state.cube = Some(CubeState {
+                client,
+                small: small_pool,
+                small_uploaded: false,
+                scratch: scratch_pool,
+                rope: rope_pool,
+                rope_positions: positions,
+                rope_uploaded: false,
+            });
+        }
+    }
+    let cube_client = state
+        .cube
+        .as_ref()
+        .filter(|_| use_cube)
+        .map(|c| c.client.clone());
+    with_raw_exec_cube(session, "laya.forward_cuda_raw", cube_client, |exec| {
+        if state.weights.is_none() {
+            state.weights = Some(upload_weights(exec, encoder, weights)?.0);
         }
         let w = state.weights.as_ref().expect("uploaded above");
         if w.vocab != vocab {
             return Err(unsupported("weights changed since the first forward"));
         }
-        if state
-            .rope
-            .as_ref()
-            .is_none_or(|(_, positions)| *positions < length)
+        if let (true, Some(c)) = (use_cube, state.cube.as_mut()) {
+            if !c.small_uploaded {
+                let host = state.small_host.as_ref().expect("staged with the weights");
+                let ptr = exec.pool_ptr(&mut c.small)?;
+                // SAFETY: the pool was sized for the staged vectors.
+                unsafe { exec.upload(ptr, host)? };
+                c.small_uploaded = true;
+            }
+            if !c.rope_uploaded {
+                let table = rope_tables(w.rope_bases, c.rope_positions);
+                let ptr = exec.pool_ptr(&mut c.rope)?;
+                // SAFETY: the pool was sized for the table.
+                unsafe { exec.upload(ptr, &table)? };
+                exec.synchronize()?;
+                c.rope_uploaded = true;
+            }
+        }
+        if !use_cube
+            && state
+                .rope
+                .as_ref()
+                .is_none_or(|(_, positions)| *positions < length)
         {
             let positions = length.next_power_of_two().max(256);
             let table = rope_tables(w.rope_bases, positions);
@@ -501,10 +647,11 @@ pub fn forward_cuda_raw(
             exec.synchronize()?;
             state.rope = Some((buffer, positions));
         }
-        if state
-            .scratch
-            .as_ref()
-            .is_none_or(|scratch| scratch.len() < layout.total)
+        if !use_cube
+            && state
+                .scratch
+                .as_ref()
+                .is_none_or(|scratch| scratch.len() < layout.total)
         {
             state.scratch = None;
             state.scratch = Some(exec.alloc(layout.total)?);
@@ -515,10 +662,26 @@ pub fn forward_cuda_raw(
             .iter()
             .map(|arena| exec.ptr(arena))
             .collect::<tenferro_tensor::Result<Vec<DevPtr>>>()?;
-        let (rope_buffer, positions) = state.rope.as_ref().expect("allocated above");
-        let positions = *positions;
-        let rope = exec.ptr(rope_buffer)?;
-        let scratch = exec.ptr(state.scratch.as_ref().expect("allocated above"))?;
+        let (rope, positions, scratch) = match (use_cube, state.cube.as_mut()) {
+            (true, Some(c)) => (
+                exec.pool_ptr(&mut c.rope)?,
+                c.rope_positions,
+                exec.pool_ptr(&mut c.scratch)?,
+            ),
+            _ => {
+                let (rope_buffer, positions) = state.rope.as_ref().expect("allocated above");
+                (
+                    exec.ptr(rope_buffer)?,
+                    *positions,
+                    exec.ptr(state.scratch.as_ref().expect("allocated above"))?,
+                )
+            }
+        };
+        let cube_state = state.cube.as_ref().filter(|_| use_cube);
+        // Element offsets of scratch / RoPE addresses (CubeCL kernels address
+        // the pool tensors by offset).
+        let so = |ptr: DevPtr| ((ptr - scratch) / 4) as u32;
+        let ro = |ptr: DevPtr| ((ptr - rope) / 4) as u32;
         let p = |loc: Loc| at(bases[loc.arena], loc.offset);
         let s = |offset: usize| at(scratch, offset);
 
@@ -556,10 +719,34 @@ pub fn forward_cuda_raw(
         // buffer can be dropped.
         unsafe {
             exec.upload(ints_ptr, &ints)?;
+            if cube_state.is_some() {
+                exec.upload(s(layout.validf), &validf)?;
+            }
             let elementwise = |f, total: usize, args: &[Arg]| -> tenferro_tensor::Result<()> {
                 exec.launch(f, ((total as u32).div_ceil(256), 1, 1), 256, 0, args)
             };
             let layernorm = |y: DevPtr, xin: DevPtr, norm: Norm, cols: usize| {
+                if let Some(c) = cube_state {
+                    cube::cube_layernorm::launch_unchecked::<Cu>(
+                        exec.cube()?,
+                        cube::norm_dims(exec.cube()?, cols as u32).0,
+                        cube::norm_dims(exec.cube()?, cols as u32).1,
+                        c.scratch.arg(),
+                        c.scratch.arg(),
+                        c.small.arg(),
+                        c.small.arg(),
+                        so(y),
+                        so(xin),
+                        norm.sw as u32,
+                        norm.sb.unwrap_or(0) as u32,
+                        d as u32,
+                        cols as u32,
+                        eps,
+                        norm.sb.is_some(),
+                    );
+                    exec.cube_launched();
+                    return Ok(());
+                }
                 exec.launch(
                     f_ln,
                     ((cols as u32).div_ceil(8), 1, 1),
@@ -593,7 +780,23 @@ pub fn forward_cuda_raw(
                     y,
                     lin.out,
                 )?;
-                if lin.b.is_some() || act != 0 {
+                if let (Some(c), true) = (cube_state, lin.b.is_some() || act != 0) {
+                    let total = (lin.out * cols) as u32;
+                    cube::cube_bias_act::launch_unchecked::<Cu>(
+                        exec.cube()?,
+                        CubeCount::Static(total.div_ceil(256), 1, 1),
+                        CubeDim::new_1d(256),
+                        c.scratch.arg(),
+                        c.small.arg(),
+                        so(y),
+                        lin.sb.unwrap_or(0) as u32,
+                        lin.out as u32,
+                        total,
+                        lin.sb.is_some(),
+                        act as u32,
+                    );
+                    exec.cube_launched();
+                } else if lin.b.is_some() || act != 0 {
                     elementwise(
                         f_bias,
                         lin.out * cols,
@@ -610,6 +813,33 @@ pub fn forward_cuda_raw(
             };
             let attention = |heads: usize, window: i32, rope: Option<usize>| {
                 let (cos, sin) = rope.map_or((0, 0), cos_sin);
+                if let Some(c) = cube_state {
+                    cube::cube_laya_attention::launch_unchecked::<Cu>(
+                        exec.cube()?,
+                        CubeCount::Static(
+                            (length as u32).div_ceil(cube::FA_BQ),
+                            heads as u32,
+                            batch as u32,
+                        ),
+                        CubeDim::new_1d(cube::FA_NT),
+                        c.scratch.arg(),
+                        c.scratch.arg(),
+                        c.rope.arg(),
+                        c.scratch.arg(),
+                        so(att),
+                        so(qkv),
+                        if rope.is_some() { ro(cos) } else { 0 },
+                        if rope.is_some() { ro(sin) } else { 0 },
+                        layout.validf as u32,
+                        window,
+                        heads as u32,
+                        length as u32,
+                        1.0 / (HEAD_DIM as f32).sqrt(),
+                        rope.is_some(),
+                    );
+                    exec.cube_launched();
+                    return Ok(());
+                }
                 exec.launch(
                     f_attn,
                     ((length as u32).div_ceil(64), heads as u32, batch as u32),
@@ -656,16 +886,32 @@ pub fn forward_cuda_raw(
                 linear(layer.wo, att, x, tokens, 1.0, 0)?;
                 layernorm(hb, x, layer.mlp_norm, tokens)?;
                 linear(layer.wi, hb, u, tokens, 0.0, 0)?;
-                elementwise(
-                    f_geglu,
-                    inter * tokens,
-                    &[
-                        Arg::P(g),
-                        Arg::P(u),
-                        Arg::I(inter as i32),
-                        Arg::I((inter * tokens) as i32),
-                    ],
-                )?;
+                if let Some(c) = cube_state {
+                    let total = (inter * tokens) as u32;
+                    cube::cube_geglu::launch_unchecked::<Cu>(
+                        exec.cube()?,
+                        CubeCount::Static(total.div_ceil(256), 1, 1),
+                        CubeDim::new_1d(256),
+                        c.scratch.arg(),
+                        c.scratch.arg(),
+                        so(g),
+                        so(u),
+                        inter as u32,
+                        total,
+                    );
+                    exec.cube_launched();
+                } else {
+                    elementwise(
+                        f_geglu,
+                        inter * tokens,
+                        &[
+                            Arg::P(g),
+                            Arg::P(u),
+                            Arg::I(inter as i32),
+                            Arg::I((inter * tokens) as i32),
+                        ],
+                    )?;
+                }
                 linear(layer.wo_mlp, g, x, tokens, 1.0, 0)?;
             }
             layernorm(x, x, w.final_norm, tokens)?;

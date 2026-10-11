@@ -424,7 +424,11 @@ cargo run --release -p laya-infer --features cuda --example bench_laya_cuda -- <
 compute capability); `TENFERRO_DECISION_FUSED=0` disables the native path's
 fused CUDA kernels (A/B measurement); `TENFERRO_DECISION_DELTA_SCAN=recurrent|chunked`
 and `TENFERRO_DECISION_JEFF_GEMM=nn|tn` pin the raw Jeff path's DeltaNet scan
-and weight orientation. The benches take `LAYA_BENCH_PATH` / `JEFF_BENCH_PATH`
+and weight orientation; `TENFERRO_DECISION_CUDA_KERNELS=cubecl` runs the
+experimental portable CubeCL (`#[cube]`) versions of the norms, activations,
+attention and DeltaNet gate/prepare kernels (needs the CUDA headers via
+`CUDA_PATH`; see "CubeCL kernels for the raw path" in `23_TENFERRO_NATIVE.md`).
+The benches take `LAYA_BENCH_PATH` / `JEFF_BENCH_PATH`
 (`native`), `LAYA_BENCH_SHAPES` and `JEFF_BENCH_ONLY`. See
 `docs/agents/specs/docs/23_TENFERRO_NATIVE.md` ("Raw single-stream CUDA
 forward") for the design and the comparison with the Julia GPU runtimes.

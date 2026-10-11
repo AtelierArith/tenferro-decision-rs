@@ -23,7 +23,7 @@
 //! thread and runtime; destroying them at thread exit could race context
 //! teardown).
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -182,9 +182,58 @@ pub struct RawExec<'r, 's> {
     stream: u64,
     blas: cublas_sys::cublasHandle_t,
     arch: &'r str,
+    /// tenferro's CubeCL client, when `#[cube]` kernels are launched here.
+    cube: Option<CubeClient>,
+    /// Whether CubeCL launches may still be queued on CubeCL's device thread.
+    cube_pending: Cell<bool>,
 }
 
 impl<'r, 's> RawExec<'r, 's> {
+    /// tenferro's CubeCL client for `#[cube]` launches in this scope (set by
+    /// [`with_raw_exec_cube`]). Call [`Self::cube_launched`] after every
+    /// launch so later raw-stream work is ordered after it.
+    pub fn cube(&self) -> tenferro_tensor::Result<&CubeClient> {
+        self.cube
+            .as_ref()
+            .ok_or_else(|| backend("tenferro-ext::raw_exec", "no CubeCL client in this scope"))
+    }
+
+    /// Record that a `#[cube]` kernel was launched on [`Self::cube`].
+    ///
+    /// CubeCL hands launches to its device thread asynchronously; both run on
+    /// the same CUDA stream as this scope, so it is enough that the queued
+    /// launches have been *issued* before the next raw-stream operation.
+    /// Every raw operation of this scope therefore drains CubeCL's queue
+    /// first (a host round trip to the device thread, not a GPU barrier).
+    pub fn cube_launched(&self) {
+        self.cube_pending.set(true);
+    }
+
+    fn drain(&self) -> tenferro_tensor::Result<()> {
+        if self.cube_pending.replace(false) {
+            if let Some(client) = &self.cube {
+                let start = std::time::Instant::now();
+                client.exclusive(|| ()).map_err(|error| {
+                    backend("tenferro-ext::raw_exec::drain", format!("{error:?}"))
+                })?;
+                DRAINS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                DRAIN_NANOS.fetch_add(
+                    start.elapsed().as_nanos() as u64,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
+        }
+        Ok(())
+    }
+
+    /// The device address of a pool buffer for raw-stream work (cuBLAS,
+    /// NVRTC kernels, copies).
+    pub fn pool_ptr(&self, pool: &mut CubePool) -> tenferro_tensor::Result<DevPtr> {
+        let reference = self.raw.tensor_mut(&mut pool.tensor)?;
+        // SAFETY: used only by work enqueued in this synchronized scope.
+        Ok(unsafe { reference.raw_ptr() } as DevPtr)
+    }
+
     /// The NVRTC architecture of this device (`compute_XY`).
     pub fn arch(&self) -> &str {
         self.arch
@@ -282,6 +331,7 @@ impl<'r, 's> RawExec<'r, 's> {
         shared: u32,
         args: &[Arg],
     ) -> tenferro_tensor::Result<()> {
+        self.drain()?;
         let args: Vec<KernelArg<'_>> = args
             .iter()
             .map(|arg| match *arg {
@@ -326,6 +376,7 @@ impl<'r, 's> RawExec<'r, 's> {
         if m == 0 || n == 0 {
             return Ok(());
         }
+        self.drain()?;
         // SAFETY: forwarded caller contract; alpha/beta are host scalars
         // (pointer mode host, the handle default).
         unsafe {
@@ -372,6 +423,7 @@ impl<'r, 's> RawExec<'r, 's> {
         if m == 0 || n == 0 || batch == 0 {
             return Ok(());
         }
+        self.drain()?;
         // SAFETY: forwarded caller contract.
         unsafe {
             cublas::sgemm_strided_batched(
@@ -408,6 +460,7 @@ impl<'r, 's> RawExec<'r, 's> {
         if data.is_empty() {
             return Ok(());
         }
+        self.drain()?;
         // SAFETY: forwarded caller contract.
         unsafe { driver::memcpy_htod_async(dst, data, self.stream as driver_sys::CUstream) }
             .map_err(|error| backend("tenferro-ext::raw_exec::upload", error.to_string()))
@@ -423,6 +476,7 @@ impl<'r, 's> RawExec<'r, 's> {
         out: &mut [T],
         src: DevPtr,
     ) -> tenferro_tensor::Result<()> {
+        self.drain()?;
         if !out.is_empty() {
             // SAFETY: forwarded caller contract.
             unsafe { driver::memcpy_dtoh_async(out, src, self.stream as driver_sys::CUstream) }
@@ -440,6 +494,7 @@ impl<'r, 's> RawExec<'r, 's> {
         if floats == 0 {
             return Ok(());
         }
+        self.drain()?;
         // SAFETY: forwarded caller contract.
         unsafe { driver::memset_d8_async(dst, 0, 4 * floats, self.stream as driver_sys::CUstream) }
             .map_err(|error| backend("tenferro-ext::raw_exec::zero", error.to_string()))
@@ -447,6 +502,7 @@ impl<'r, 's> RawExec<'r, 's> {
 
     /// Block until every enqueued operation has completed.
     pub fn synchronize(&self) -> tenferro_tensor::Result<()> {
+        self.drain()?;
         // SAFETY: the stream is the scope's captured tenferro stream.
         unsafe { driver::stream::synchronize(self.stream as driver_sys::CUstream) }
             .map_err(|error| backend("tenferro-ext::raw_exec::synchronize", error.to_string()))
@@ -535,6 +591,17 @@ pub fn with_raw_exec<R>(
     label: &'static str,
     f: impl FnOnce(&mut RawExec<'_, '_>) -> tenferro_tensor::Result<R>,
 ) -> Result<R> {
+    with_raw_exec_cube(session, label, None, f)
+}
+
+/// [`with_raw_exec`] with tenferro's CubeCL client available for `#[cube]`
+/// launches ([`RawExec::cube`], from [`cube_alloc`]).
+pub fn with_raw_exec_cube<R>(
+    session: &mut EagerSession<'_>,
+    label: &'static str,
+    cube: Option<CubeClient>,
+    f: impl FnOnce(&mut RawExec<'_, '_>) -> tenferro_tensor::Result<R>,
+) -> Result<R> {
     let arch = cuda_arch(session)?;
     let result = with_cuda_exec_session(session.backend_session(), |cuda| {
         cuda.with_raw(label, |raw| {
@@ -549,6 +616,8 @@ pub fn with_raw_exec<R>(
                 stream,
                 blas,
                 arch: &arch,
+                cube,
+                cube_pending: Cell::new(false),
             };
             let result = f(&mut exec);
             let synced = exec.synchronize();
@@ -652,6 +721,21 @@ impl ArenaBuilder {
         self.data.is_empty()
     }
 
+    /// Copy the staged data to `ptr` (which must hold [`Self::len`] floats).
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must address at least [`Self::len`] floats of device memory.
+    pub unsafe fn upload_to(
+        self,
+        exec: &RawExec<'_, '_>,
+        ptr: DevPtr,
+    ) -> tenferro_tensor::Result<()> {
+        // SAFETY: forwarded caller contract.
+        unsafe { exec.upload(ptr, &self.data)? };
+        exec.synchronize()
+    }
+
     /// Allocate a device buffer and copy the staged data into it.
     pub fn upload(self, exec: &RawExec<'_, '_>) -> tenferro_tensor::Result<DeviceBuffer> {
         let buffer = exec.alloc(self.data.len())?;
@@ -662,4 +746,125 @@ impl ArenaBuilder {
         exec.synchronize()?;
         Ok(buffer)
     }
+}
+
+// ------------------------------------------------------------------ CubeCL
+
+/// Which kernels the raw forward launches for its non-GEMM work.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RawKernels {
+    /// The NVRTC kernels of the engine (default).
+    #[default]
+    Nvrtc,
+    /// Experimental CubeCL `#[cube]` kernels ([`crate::cube_kernels`]) for
+    /// the norms, activations, attention (Laya) and DeltaNet gate/prepare
+    /// (Jeff); GEMMs stay on cuBLAS and the remaining small kernels on NVRTC.
+    Cubecl,
+}
+
+impl RawKernels {
+    /// [`RawKernels::Nvrtc`], or [`RawKernels::Cubecl`] when
+    /// `TENFERRO_DECISION_CUDA_KERNELS=cubecl`.
+    pub fn from_env() -> Self {
+        match std::env::var("TENFERRO_DECISION_CUDA_KERNELS").as_deref() {
+            Ok("cubecl") => RawKernels::Cubecl,
+            _ => RawKernels::Nvrtc,
+        }
+    }
+}
+
+static DRAINS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static DRAIN_NANOS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Process-wide count and total host time (ns) of CubeCL queue drains
+/// ([`RawExec::cube_launched`]) since the last call; resets the counters.
+pub fn take_drain_stats() -> (u64, u64) {
+    (
+        DRAINS.swap(0, std::sync::atomic::Ordering::Relaxed),
+        DRAIN_NANOS.swap(0, std::sync::atomic::Ordering::Relaxed),
+    )
+}
+
+/// tenferro's CubeCL client type (CUDA runtime).
+pub type CubeClient = cubecl::client::ComputeClient<cubecl_cuda::CudaRuntime>;
+
+/// A dense f32 tenferro pool tensor usable by `#[cube]` kernels (through
+/// its CubeCL binding, [`Self::arg`]) and by raw-stream work (through
+/// [`RawExec::pool_ptr`]). CubeCL can bind only pool memory, not the driver
+/// allocations of [`DeviceBuffer`].
+pub struct CubePool {
+    tensor: tenferro_tensor::TypedTensor<f32>,
+    binding: cubecl::server::Binding,
+    floats: usize,
+}
+
+impl CubePool {
+    /// Number of f32 elements.
+    pub fn len(&self) -> usize {
+        self.floats
+    }
+
+    /// Whether the pool tensor is empty.
+    pub fn is_empty(&self) -> bool {
+        self.floats == 0
+    }
+
+    /// A CubeCL array argument over the whole tensor.
+    pub fn arg(&self) -> cubecl::prelude::ArrayArg<cubecl_cuda::CudaRuntime> {
+        // SAFETY: the binding comes from tenferro's `array_arg` for this
+        // tensor, which stays alive (owned here) for as long as the pool.
+        unsafe {
+            cubecl::prelude::ArrayArg::from_raw_parts_binding(
+                self.binding.clone(),
+                self.floats.max(1),
+            )
+        }
+    }
+}
+
+impl std::fmt::Debug for CubePool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CubePool")
+            .field("floats", &self.floats)
+            .finish()
+    }
+}
+
+/// Allocate pool tensors of the given sizes (floats) in one short
+/// `with_cubecl` scope and return tenferro's CubeCL client with them.
+pub fn cube_alloc(
+    session: &mut EagerSession<'_>,
+    sizes: &[usize],
+) -> Result<(CubeClient, Vec<CubePool>)> {
+    let result = with_cuda_exec_session(session.backend_session(), |cuda| {
+        cuda.with_cubecl("tenferro-ext::raw_exec::cube_alloc", |cc| {
+            let mut pools = Vec::with_capacity(sizes.len());
+            for &floats in sizes {
+                let tensor = cc.alloc_output::<f32>(&[floats.max(1)])?;
+                let arg = cc.array_arg(&tensor, "tenferro-ext::raw_exec::cube_alloc")?;
+                let binding = match arg {
+                    cubecl::prelude::ArrayArg::Handle { handle } => handle.handle,
+                    _ => {
+                        return Err(backend(
+                            "tenferro-ext::raw_exec",
+                            "unexpected aliased array argument",
+                        ));
+                    }
+                };
+                pools.push(CubePool {
+                    tensor,
+                    binding,
+                    floats,
+                });
+            }
+            Ok((cc.client().clone(), pools))
+        })
+    })
+    .ok_or_else(|| {
+        to_ad(backend(
+            "tenferro-ext::raw_exec",
+            "CUDA execution session required",
+        ))
+    })?;
+    result.map_err(to_ad)
 }

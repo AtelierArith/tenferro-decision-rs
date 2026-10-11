@@ -247,3 +247,25 @@ forward in one `CudaExecSession::with_raw` scope (see `23_TENFERRO_NATIVE.md`,
   raw `Function` does not expose; the raw kernels stay within 48 KB.
 - **Entry cost.** `with_raw` still flushes CubeCL with a host barrier on
   entry; with one scope per forward this is negligible.
+
+
+## CubeCL seam for the raw path (2026-10-11)
+
+Evaluating `#[cube]` kernels next to cuBLAS (see `23_TENFERRO_NATIVE.md`,
+"CubeCL kernels for the raw path"):
+
+- `with_cubecl` flushes on entry and exit; an empty scope behind queued work
+  blocks on the first call, and a scope launching a slow kernel returns only
+  after it completes. Alternating `with_cubecl` ↔ `with_raw` costs 0.8–1.7 ms
+  per pair. Related: tenferro-rs #2078.
+- No contract orders launches on tenferro's (cloned) CubeCL client against
+  raw-stream work inside one raw scope; both use the same CUDA stream, but
+  launches pass through CubeCL's device thread. We drain with
+  `ComputeClient::exclusive(|| ())` (~17 µs) before each raw operation that
+  follows a launch. A documented "issue now" / non-blocking dispatch would
+  remove the drain.
+- CubeCL binds only pool tensors; external device memory (our `cuMemAlloc`
+  buffers) cannot be adopted. `client.memory_cleanup()` does return dropped
+  pool memory to the driver (workaround for #2081).
+- CubeCL's CUDA runtime requires toolkit headers at run time (`CUDA_PATH`);
+  when missing it panics on the device thread and silently drops launches.

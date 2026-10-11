@@ -13,7 +13,7 @@ default = []
 hub = ["dep:hf-fetch"]
 # CUDA execution of the tenferro forward (`Device::Cuda`). Needs the CUDA
 # driver at run time; tests touching hardware are `#[ignore]`d.
-cuda = ["tenferro-ext/cuda", "tenferro-gated-delta/cuda", "tenferro-ad/cuda"]
+cuda = ["tenferro-ext/cuda", "tenferro-gated-delta/cuda", "tenferro-ad/cuda", "dep:cubecl", "dep:cubecl-cuda"]
 
 [dependencies]
 hf-fetch = { workspace = true, optional = true }
@@ -28,6 +28,8 @@ tenferro-infer.workspace = true
 tenferro-cpu.workspace = true
 tenferro-gated-delta = { path = "../tenferro-gated-delta" }
 tenferro-ext.workspace = true
+cubecl = { workspace = true, optional = true }
+cubecl-cuda = { workspace = true, optional = true }
 tokenizers = { version = "0.22", default-features = false, features = ["fancy-regex"] }
 minijinja = { version = "2", features = ["json", "loader"] }
 minijinja-contrib = { version = "2.24.0", features = ["pycompat"] }

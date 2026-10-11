@@ -14,7 +14,7 @@ onednn = ["tenferro-ext/onednn"]
 hub = ["dep:hf-fetch"]
 # CUDA execution of the tenferro forward (`Device::Cuda`). Needs the CUDA
 # driver at run time; tests touching hardware are `#[ignore]`d.
-cuda = ["tenferro-ext/cuda", "tenferro-ad/cuda"]
+cuda = ["tenferro-ext/cuda", "tenferro-ad/cuda", "dep:cubecl", "dep:cubecl-cuda"]
 
 [dependencies]
 hf-fetch = { workspace = true, optional = true }
@@ -29,6 +29,8 @@ tenferro-ext.workspace = true
 tenferro-tensor.workspace = true
 tenferro-infer.workspace = true
 tenferro-cpu.workspace = true
+cubecl = { workspace = true, optional = true }
+cubecl-cuda = { workspace = true, optional = true }
 
 [dev-dependencies]
 rayon.workspace = true
