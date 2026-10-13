@@ -20,11 +20,17 @@
 //! Layouts are feature-major `(rows, T)`. The host weights are row-major
 //! `(in, out)`, i.e. column-major `(out, in)`, so every product is `N, N`.
 
+use cubecl::prelude::{CubeCount, CubeDim};
 use decision_core::DecisionError;
 use tenferro_ad::EagerSession;
+use tenferro_ext::cube_kernels as cube;
+pub use tenferro_ext::raw_exec::RawKernels;
 use tenferro_ext::raw_exec::{
     ArenaBuilder, Arg, DevPtr, DeviceBuffer, Op, RawExec, align, at, with_raw_exec,
 };
+use tenferro_ext::raw_exec::{CubeClient, CubePool, cube_alloc, with_raw_exec_cube};
+type Cu = cubecl_cuda::CudaRuntime;
+use tenferro_gated_delta::raw::DeltaCube;
 use tenferro_gated_delta::raw::{
     DELTA_RAW_KERNELS, DELTA_RAW_SOURCE, DeltaRawConfig, DeltaRawOperands, DeltaRawScan,
     delta_raw_mix,
@@ -131,32 +137,76 @@ struct Weights {
     vocab: usize,
     /// Weights stored `(inp, out)` for `T, N` products.
     tn: bool,
+    /// Offsets in the small CubeCL pool of the norm vectors, by location.
+    small_of: std::collections::HashMap<(usize, usize), usize>,
+}
+
+/// CubeCL pool buffers of the [`RawKernels::Cubecl`] variant.
+struct CubeState {
+    client: CubeClient,
+    small: CubePool,
+    small_uploaded: bool,
+    scratch: CubePool,
+}
+
+impl std::fmt::Debug for CubeState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CubeState")
+            .field("small", &self.small)
+            .field("scratch", &self.scratch)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Device state of the raw Jeff forward: resident weights, RoPE tables and
 /// the reused activation scratch. Create one per engine and runtime; a clone
 /// starts empty (device buffers are not shared) and uploads on first use.
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct JeffCudaRaw {
     weights: Option<Weights>,
     rope: Option<(DeviceBuffer, usize)>,
     scratch: Option<DeviceBuffer>,
     scan: DeltaRawScan,
+    kernels: RawKernels,
+    small_host: Option<Vec<f32>>,
+    cube: Option<CubeState>,
+}
+
+impl Default for JeffCudaRaw {
+    fn default() -> Self {
+        Self {
+            weights: None,
+            rope: None,
+            scratch: None,
+            scan: DeltaRawScan::default(),
+            kernels: RawKernels::from_env(),
+            small_host: None,
+            cube: None,
+        }
+    }
 }
 
 impl Clone for JeffCudaRaw {
     fn clone(&self) -> Self {
         Self {
             scan: self.scan,
+            kernels: self.kernels,
             ..Self::default()
         }
     }
 }
 
 impl JeffCudaRaw {
-    /// Empty state; weights upload on the first forward.
+    /// Empty state; weights upload on the first forward. The kernel variant
+    /// follows `TENFERRO_DECISION_CUDA_KERNELS` (see [`RawKernels`]).
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Select the non-GEMM kernel variant.
+    pub fn with_kernels(mut self, kernels: RawKernels) -> Self {
+        self.kernels = kernels;
+        self
     }
 
     /// Select the DeltaNet scan (default [`DeltaRawScan::Auto`]).
@@ -265,11 +315,18 @@ fn push_wm(
     }
 }
 
+/// Upload the weights; also returns the norm vectors staged for the small
+/// CubeCL pool.
 fn upload_weights(
     exec: &RawExec<'_, '_>,
     cfg: &JeffConfig,
     weights: &JeffWeights,
-) -> tenferro_tensor::Result<Weights> {
+) -> tenferro_tensor::Result<(Weights, Vec<f32>)> {
+    let mut small = ArenaBuilder::new();
+    let mut small_of = std::collections::HashMap::new();
+    let mut stage = |loc: Loc, data: &[f32]| {
+        small_of.insert((loc.arena, loc.offset), small.push(data));
+    };
     let tn = transposed_layout();
     let hidden = cfg.hidden;
     let inter = cfg.intermediate;
@@ -282,6 +339,7 @@ fn upload_weights(
         arena: 0,
         offset: top.push(&weights.final_norm),
     };
+    stage(final_norm, &weights.final_norm);
     let readout = push_wm(
         &mut top,
         0,
@@ -300,6 +358,8 @@ fn upload_weights(
         };
         let input_norm = loc(arena.push(&layer.input_norm));
         let post_norm = loc(arena.push(&layer.post_norm));
+        stage(input_norm, &layer.input_norm);
+        stage(post_norm, &layer.post_norm);
         let mix = match &layer.attention {
             AttentionWeights::Delta { weights: w, config } => {
                 let dc = delta_config(config);
@@ -316,7 +376,11 @@ fn upload_weights(
                     conv: loc(arena.push(&w.conv)),
                     a_decay: loc(arena.push(&w.a_decay)),
                     dt_bias: loc(arena.push(&w.dt_bias)),
-                    norm: loc(arena.push(&w.norm)),
+                    norm: {
+                        let norm = loc(arena.push(&w.norm));
+                        stage(norm, &w.norm);
+                        norm
+                    },
                     out: push_wm(
                         &mut arena,
                         index,
@@ -375,16 +439,20 @@ fn upload_weights(
             down,
         });
     }
-    Ok(Weights {
-        embedding,
-        arenas,
-        layers,
-        final_norm,
-        readout,
-        options: weights.options,
-        vocab: weights.vocab,
-        tn,
-    })
+    Ok((
+        Weights {
+            embedding,
+            arenas,
+            layers,
+            final_norm,
+            readout,
+            options: weights.options,
+            vocab: weights.vocab,
+            tn,
+            small_of,
+        },
+        small.into_vec(),
+    ))
 }
 
 /// The distinct (rotary, theta bits) of the full-attention layers, in model
@@ -540,9 +608,40 @@ pub fn forward_cuda_raw(
     words.extend(mask.iter().map(|m| m.to_bits()));
     let mut logits = vec![0.0f32; weights.options];
     let scan = state.scan;
-    with_raw_exec(session, "jeff.forward_cuda_raw", |exec| {
+    let use_cube = state.kernels == RawKernels::Cubecl;
+    if use_cube {
         if state.weights.is_none() {
-            state.weights = Some(upload_weights(exec, cfg, weights)?);
+            let (w, small) = with_raw_exec(session, "jeff.upload", |exec| {
+                upload_weights(exec, cfg, weights)
+            })?;
+            state.weights = Some(w);
+            state.small_host = Some(small);
+        }
+        // Pool buffers (the only memory CubeCL can bind), allocated in one
+        // short `with_cubecl` scope when missing or too small.
+        let total = Layout::new(cfg, state.weights.as_ref().expect("uploaded above"), tokens).total;
+        if state.cube.as_ref().is_none_or(|c| c.scratch.len() < total) {
+            let small_len = state.small_host.as_ref().map_or(1, Vec::len);
+            state.cube = None;
+            let (client, mut pools) = cube_alloc(session, &[small_len, total])?;
+            let scratch = pools.pop().expect("two pools");
+            let small = pools.pop().expect("two pools");
+            state.cube = Some(CubeState {
+                client,
+                small,
+                small_uploaded: false,
+                scratch,
+            });
+        }
+    }
+    let cube_client = state
+        .cube
+        .as_ref()
+        .filter(|_| use_cube)
+        .map(|c| c.client.clone());
+    with_raw_exec_cube(session, "jeff.forward_cuda_raw", cube_client, |exec| {
+        if state.weights.is_none() {
+            state.weights = Some(upload_weights(exec, cfg, weights)?.0);
         }
         let w = state.weights.as_ref().expect("uploaded above");
         if w.vocab != weights.vocab || w.options != weights.options {
@@ -562,10 +661,20 @@ pub fn forward_cuda_raw(
             state.rope = Some((buffer, positions));
         }
         let layout = Layout::new(cfg, w, tokens);
-        if state
-            .scratch
-            .as_ref()
-            .is_none_or(|scratch| scratch.len() < layout.total)
+        if let (true, Some(c)) = (use_cube, state.cube.as_mut()) {
+            if !c.small_uploaded {
+                let host = state.small_host.as_ref().expect("staged with the weights");
+                let ptr = exec.pool_ptr(&mut c.small)?;
+                // SAFETY: the pool was sized for the staged vectors.
+                unsafe { exec.upload(ptr, host)? };
+                c.small_uploaded = true;
+            }
+        }
+        if !use_cube
+            && state
+                .scratch
+                .as_ref()
+                .is_none_or(|scratch| scratch.len() < layout.total)
         {
             state.scratch = None;
             state.scratch = Some(exec.alloc(layout.total)?);
@@ -593,7 +702,14 @@ pub fn forward_cuda_raw(
             }
             unreachable!("RoPE table built for every full-attention layer")
         };
-        let scratch = exec.ptr(state.scratch.as_ref().expect("allocated above"))?;
+        let scratch = match (use_cube, state.cube.as_mut()) {
+            (true, Some(c)) => exec.pool_ptr(&mut c.scratch)?,
+            _ => exec.ptr(state.scratch.as_ref().expect("allocated above"))?,
+        };
+        let cube_state = state.cube.as_ref().filter(|_| use_cube);
+        // Element offset of a scratch address (CubeCL kernels address the
+        // pool tensors by offset).
+        let so = |ptr: DevPtr| ((ptr - scratch) / 4) as u32;
         let p = |loc: Loc| at(bases[loc.arena], loc.offset);
         let s = |offset: usize| at(scratch, offset);
         let f_embed = module.function("jeff_embed")?;
@@ -624,6 +740,27 @@ pub fn forward_cuda_raw(
         unsafe {
             exec.upload(ids_ptr, &words)?;
             let rms = |y: DevPtr, xin: DevPtr, weight: Loc, mask: DevPtr, cols: usize| {
+                if let Some(c) = cube_state {
+                    cube::cube_rms_centered::launch_unchecked::<Cu>(
+                        exec.cube()?,
+                        cube::norm_dims(exec.cube()?, cols as u32).0,
+                        cube::norm_dims(exec.cube()?, cols as u32).1,
+                        c.scratch.arg(),
+                        c.scratch.arg(),
+                        c.small.arg(),
+                        c.scratch.arg(),
+                        so(y),
+                        so(xin),
+                        w.small_of[&(weight.arena, weight.offset)] as u32,
+                        if mask != 0 { so(mask) } else { 0 },
+                        hidden as u32,
+                        cols as u32,
+                        cfg.eps,
+                        mask != 0,
+                    );
+                    exec.cube_launched();
+                    return Ok(());
+                }
                 exec.launch(
                     f_rms,
                     ((cols as u32).div_ceil(8), 1, 1),
@@ -700,13 +837,29 @@ pub fn forward_cuda_raw(
                     proj,
                     2 * inter,
                 )?;
-                exec.launch(
-                    f_silu,
-                    (((inter * cols) as u32).div_ceil(256), 1, 1),
-                    256,
-                    0,
-                    &[Arg::P(act), Arg::P(proj), i(inter), i(inter * cols)],
-                )?;
+                if let Some(c) = cube_state {
+                    let total = (inter * cols) as u32;
+                    cube::cube_silu_mul::launch_unchecked::<Cu>(
+                        exec.cube()?,
+                        CubeCount::Static(total.div_ceil(256), 1, 1),
+                        CubeDim::new_1d(256),
+                        c.scratch.arg(),
+                        c.scratch.arg(),
+                        so(act),
+                        so(proj),
+                        inter as u32,
+                        total,
+                    );
+                    exec.cube_launched();
+                } else {
+                    exec.launch(
+                        f_silu,
+                        (((inter * cols) as u32).div_ceil(256), 1, 1),
+                        256,
+                        0,
+                        &[Arg::P(act), Arg::P(proj), i(inter), i(inter * cols)],
+                    )?;
+                }
                 lin(layer.down, 0, hidden, cols, act, inter, 1.0, xc, hidden)
             };
 
@@ -758,6 +911,14 @@ pub fn forward_cuda_raw(
                             },
                             tokens,
                             scan,
+                            cube_state
+                                .map(|c| DeltaCube {
+                                    scratch: &c.scratch,
+                                    scratch_base: scratch,
+                                    small: &c.small,
+                                    norm: w.small_of[&(norm.arena, norm.offset)],
+                                })
+                                .as_ref(),
                         )?;
                         let vw = dc.value_width();
                         lin(*out, 0, hidden, tokens, merged, vw, 1.0, x, hidden)?;

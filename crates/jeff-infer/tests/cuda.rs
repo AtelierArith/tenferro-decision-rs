@@ -17,7 +17,7 @@ use std::path::PathBuf;
 
 use decision_core::PreparedState;
 use hf_fetch::{CheckpointSpec, Hub};
-use jeff_infer::cuda_raw::{JeffCudaRaw, forward_cuda_raw};
+use jeff_infer::cuda_raw::{JeffCudaRaw, RawKernels, forward_cuda_raw};
 use jeff_infer::engine::{CudaPath, Device, JeffBackend, JeffEngine};
 use jeff_infer::model::{
     AttentionWeights, CudaDeltaWorkspaces, DeltaKernel, FullAttentionWeights, JeffConfig,
@@ -499,6 +499,40 @@ fn cuda_raw_forward_matches_reference_for_both_scans() {
             let diff = max_diff(&got, &expected);
             eprintln!("{scan:?} length {length}: max diff {diff:e}");
             assert!(diff <= 1e-4, "{scan:?} length {length}: diff {diff}");
+        }
+    }
+}
+
+#[test]
+#[ignore = "requires CUDA hardware, NVRTC, cuBLAS and the CUDA headers for CubeCL; run explicitly with --ignored"]
+fn cuda_raw_cubecl_kernels_match_reference() {
+    let (cfg, weights) = synthetic_raw(11);
+    let runtime = Device::Cuda(0).runtime().expect("CUDA device required");
+    for scan in [DeltaRawScan::Recurrent, DeltaRawScan::Chunked] {
+        let mut state = JeffCudaRaw::new()
+            .with_scan(scan)
+            .with_kernels(RawKernels::Cubecl);
+        for length in [1usize, 8, 65, 130, 200, 7] {
+            let ids: Vec<i64> = (0..length).map(|t| ((t * 7 + 3) % 40) as i64).collect();
+            let mask: Vec<f32> = (0..length)
+                .map(|t| {
+                    if t % 13 == 5 && t + 1 != length {
+                        0.0
+                    } else {
+                        1.0
+                    }
+                })
+                .collect();
+            let expected = forward_reference(&cfg, &weights, &ids, &mask).unwrap();
+            let got = runtime
+                .with_eager_session(|session| {
+                    forward_cuda_raw(&mut state, session, &cfg, &weights, &ids, &mask)
+                })
+                .unwrap()
+                .unwrap();
+            let diff = max_diff(&got, &expected);
+            eprintln!("CubeCL {scan:?} length {length}: max diff {diff:e}");
+            assert!(diff <= 1e-4, "CubeCL {scan:?} length {length}: diff {diff}");
         }
     }
 }

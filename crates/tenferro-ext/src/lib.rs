@@ -16,6 +16,8 @@
 #![allow(clippy::approx_constant, clippy::excessive_precision)]
 
 #[cfg(feature = "cuda")]
+pub mod cube_kernels;
+#[cfg(feature = "cuda")]
 pub mod cuda_fused;
 mod device;
 #[cfg(not(feature = "cuda"))]

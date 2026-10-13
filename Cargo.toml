@@ -51,3 +51,8 @@ tenferro-linalg = { git = "https://github.com/tensor4all/tenferro-rs", rev = "47
 # and loading features as tenferro-gpu's own `cudarc`, so no second copy is
 # built; the libraries are loaded at run time.
 cudarc = { version = "0.19", default-features = false, features = ["driver", "runtime", "nvrtc", "cublas", "dynamic-loading", "cuda-12080"] }
+# CubeCL for the experimental `#[cube]` kernels of the raw CUDA path
+# (`tenferro_ext::cube_kernels`): the exact fork revision tenferro-gpu pins, so
+# one CubeCL runtime type (and tenferro's own client) is shared.
+cubecl = { package = "t4a-cubecl", git = "https://github.com/tensor4all/cubecl.git", rev = "ffc017d5440b34a293f3bcd47e93e7fc51f1d733", default-features = false }
+cubecl-cuda = { package = "t4a-cubecl-cuda", git = "https://github.com/tensor4all/cubecl.git", rev = "ffc017d5440b34a293f3bcd47e93e7fc51f1d733" }

@@ -15,7 +15,7 @@ use std::path::PathBuf;
 
 use hf_fetch::{CheckpointSpec, Hub};
 use laya_infer::agent::{CudaPath, Device, LayaEngine};
-use laya_infer::cuda_raw::{LayaCudaRaw, forward_cuda_raw};
+use laya_infer::cuda_raw::{LayaCudaRaw, RawKernels, forward_cuda_raw};
 use laya_infer::model::{TensorCache, forward_tenferro_cached};
 use serde_json::Value;
 
@@ -408,5 +408,76 @@ fn cuda_engine_paths_agree() {
             }
             other => panic!("unexpected answers {other:?}"),
         }
+    }
+}
+
+#[test]
+#[ignore = "requires CUDA hardware and the production Laya checkpoint; run with --release -- --ignored"]
+fn cuda_raw_cubecl_kernels_match_nvrtc_and_cpu() {
+    let Some(dir) = checkpoint_dir() else {
+        eprintln!("skipping: production Laya checkpoint is not present");
+        return;
+    };
+    let engine = LayaEngine::load(&dir).unwrap();
+    let cpu = Device::Cpu.runtime().unwrap();
+    let gpu = Device::Cuda(0).runtime().expect("CUDA device required");
+    let mut nvrtc = LayaCudaRaw::new().with_kernels(RawKernels::Nvrtc);
+    let mut cubecl = LayaCudaRaw::new().with_kernels(RawKernels::Cubecl);
+    assert_eq!(cubecl.kernels(), RawKernels::Cubecl);
+    let mut cpu_cache = TensorCache::new();
+    let mut cases: Vec<(&str, Batch)> = fixture_cases()
+        .into_iter()
+        .map(|(name, batch, _, _)| (name, batch))
+        .collect();
+    cases.push(("long-L300-B2", long_batch(300)));
+    for (name, (ids, mask, marker_pos, marker_mask, qtype)) in cases {
+        let (cpu_logits, cpu_action) = cpu
+            .with_eager_session(|session| {
+                forward_tenferro_cached(
+                    session,
+                    &mut cpu_cache,
+                    engine.encoder(),
+                    engine.agent(),
+                    engine.weights(),
+                    &ids,
+                    &mask,
+                    &marker_pos,
+                    &marker_mask,
+                    &qtype,
+                )
+            })
+            .unwrap()
+            .unwrap();
+        let scale = cpu_action.iter().map(|v| v.abs()).fold(1.0f32, f32::max);
+        let mut outs = Vec::new();
+        for state in [&mut nvrtc, &mut cubecl] {
+            outs.push(
+                gpu.with_eager_session(|session| {
+                    forward_cuda_raw(
+                        state,
+                        session,
+                        engine.encoder(),
+                        engine.agent(),
+                        engine.weights(),
+                        &ids,
+                        &mask,
+                        &marker_pos,
+                        &marker_mask,
+                        &qtype,
+                    )
+                })
+                .unwrap()
+                .unwrap(),
+            );
+        }
+        let (cube_logits, cube_action) = &outs[1];
+        let vs_cpu = max_diff(cube_logits, &cpu_logits);
+        let vs_nvrtc = max_diff(cube_logits, &outs[0].0);
+        eprintln!("{name}: CubeCL logits vs cpu {vs_cpu:e}, vs NVRTC {vs_nvrtc:e}");
+        assert!(
+            vs_cpu <= 1e-4,
+            "{name}: CubeCL logits differ from CPU by {vs_cpu}"
+        );
+        assert!(max_diff(cube_action, &cpu_action) <= 1e-4 * scale);
     }
 }

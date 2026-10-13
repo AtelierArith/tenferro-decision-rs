@@ -393,3 +393,131 @@ alone moves L64 and L256 by ~5% in opposite directions, so per-shape GEMM
 algorithm selection (cublasLt heuristics/autotuning) is the next lever, then a
 bandwidth-optimal skinny GEMM for ≤ 8 tokens (L8 reads ~2 GB of weights at
 ~57% of peak bandwidth).
+
+
+## CubeCL kernels for the raw path (2026-10-11, experimental)
+
+Question: can the raw path's non-GEMM kernels be `#[cube]` (CubeCL) kernels,
+portable to CubeCL's wgpu/Metal runtimes, with GEMMs on cuBLAS, without
+losing speed? Selected with `TENFERRO_DECISION_CUDA_KERNELS=cubecl` (or
+`LayaCudaRaw::with_kernels` / `JeffCudaRaw::with_kernels`,
+`tenferro_ext::raw_exec::RawKernels`); NVRTC stays the default.
+
+### Seam measurements (RTX 3060, GPU 0, pinned `471c427`)
+
+MWE `target/tenferro-mwe/20-cubecl-seam` (standalone crate):
+
+| measurement | result |
+|---|---|
+| empty `with_cubecl`, idle / empty `with_raw`, idle | 15.8 µs / 8.4 µs per scope |
+| empty scope behind 67 ms of queued GEMMs | `with_cubecl` blocks on the **first** scope (66.8 ms; its exit flush waits); `with_raw` on the second (67.2 ms, tenferro-rs #2078) |
+| scope that launches a slow `#[cube]` kernel | returns only when the kernel has finished (exit flush is a host barrier) |
+| alternating `with_cubecl`(copy) ↔ `with_raw`(256³ cuBLAS) | 0.8–1.7 ms per pair |
+| streams | CubeCL kernels, cuBLAS on the raw stream and eager GEMMs all run on one CUDA stream (nsys) |
+| `#[cube]` launch with a cloned client inside one raw scope, then cuBLAS | 0/100 stale reads, but unordered by contract (launches go to CubeCL's device thread asynchronously); `ComputeClient::exclusive(\|\| ())` drains the queue first: ordered by construction, ~17–20 µs |
+| binding our `cuMemAlloc` buffers | impossible (no adoption API); CubeCL binds only tenferro pool tensors |
+| freed pool memory (#2081) | `client.memory_cleanup()` returns it to the driver (6.5 → 10.5 GiB free) |
+
+So per-op `with_cubecl` scopes are unusable for inference (each blocks), and
+the hybrid that works runs the whole forward in **one raw scope**: `#[cube]`
+kernels launched on tenferro's client (cloned once from a short
+`with_cubecl` scope that allocates the pool tensors), cuBLAS and the
+remaining NVRTC kernels on the raw stream, and a queue drain before every
+raw-stream operation that follows a CubeCL launch (`RawExec::cube_launched`,
+centralized in `raw_exec`). Scratch, RoPE tables and the small weight vectors
+(norms, biases) live in pool tensors (`CubePool`); GEMM weights stay in the
+`cuMemAlloc` arenas.
+
+### Ported kernels (`tenferro_ext::cube_kernels`)
+
+Laya: LayerNorm, bias/activation, GeGLU (MLX-exact erf) and the fused flash
+attention (RoPE, online softmax, local-window/padding tile skipping). Jeff:
+centered RMSNorm (masked), SiLU gate, the DeltaNet RMSNorm·silu(z) gate and
+the chunked delta rule's `prepare` kernel. Embedding, marker pooling,
+attention prep/attention of Jeff, conv, Q/K norm, gates, scans and the
+triangular inverse stay NVRTC.
+
+Portability work needed (found by running the same source on CubeCL's wgpu
+runtime over lavapipe, `target/tenferro-mwe/21-cube-wgpu`, plane size 8,
+32 KiB shared memory): no hard-coded 32-lane planes (norms use `PLANE_DIM` /
+`UNIT_POS_PLANE`; launch geometry from `plane_size_max`), no reliance on
+float tricks a shader compiler may fold (MLX's `+1.5·2^23` rounding replaced by
+`round`), and attention shared memory exactly 32 KiB (the block-wide vote via
+a shared flag pushed it 4 bytes over the limit and wgpu dropped the launch
+silently; the votes are now block-uniform mask checks). After that all six
+kernels match CPU references to ≤ 1.7e-6 on both wgpu (lavapipe) and CUDA.
+
+### Results
+
+Per kernel (nsys, GPU time per call; host GPU 0, see the note below):
+
+| kernel | NVRTC | CubeCL |
+|---|---:|---:|
+| Laya LayerNorm, L8 / L512 | 12.3 / 21.1 µs | 13.3 / 18.4 µs |
+| Laya attention, L8 / L512 | 10.7 / 311.5 µs | 11.3 / 291.4 µs |
+| Laya GeGLU, L512 | 54.2 µs | 54.1 µs |
+| Jeff RMSNorm, L8 / L256 | 12.2 / 12.9 µs | 12.9 / 13.4 µs |
+| Jeff chunk prepare, L256 | 70.9 µs | 61.9 µs |
+| Jeff RMS gate, L256 / SiLU gate, L256 | 31.9 / 34.6 µs | 32.6 / 34.5 µs |
+
+(A non-portable first version with a 32-register warp-per-column LayerNorm
+took 5.2 µs at L8, 2.4× faster than NVRTC, whose register array spills.)
+
+End to end (warm median of 50 after 10 warmups, NVRTC and CubeCL alternated,
+mean of two runs):
+
+| row | raw NVRTC | raw CubeCL | CubeCL / NVRTC |
+|---|---:|---:|---:|
+| Jeff parcel trimmed L101 | 24.72 | 24.92 | 1.008 |
+| Jeff parcel full L256 | 45.58 | 45.74 | 1.004 |
+| Jeff synthetic L8 | 9.75 | 9.86 | 1.012 |
+| Jeff synthetic L64 | 15.58 | 15.70 | 1.007 |
+| Laya L8 B1 | 7.16 | 7.31 | 1.021 |
+| Laya L64 B1 | 10.99 | 11.30 | 1.028 |
+| Laya L8 B8 | 11.06 | 11.27 | 1.019 |
+| Laya L93 B1 | 15.77 | 15.98 | 1.014 |
+| Laya L93 B10 | 107.85 | 108.22 | 1.003 |
+| Laya L512 B1 | 63.73 | 63.16 | 0.991 |
+| Laya L512 B10 | 543.50 | 549.53 | 1.011 |
+
+The 1–3% cost at small sizes is the queue drains (109 per Jeff forward, 127
+per Laya forward, ~17 µs each, mostly overlapped with GPU work). Accuracy is
+unchanged (Laya logits vs CPU ≤ 7.6e-6, vs NVRTC ≤ 5.2e-6; Jeff vs host oracle
+≤ 8.6e-6 for both scans; production gates pass). First call: +1–2 s of CubeCL
+JIT compilation.
+
+Measurement note: the devcontainer lost GPU access during this work (NVML
+"Unknown Error"), so the final per-kernel and end-to-end numbers were taken on
+the host with CUDA 13 cuBLAS / NVRTC 12.8 libraries and the container's CUDA
+13.0 headers; raw-path numbers match the container's (Laya L8B1 7.16 vs 7.2
+ms).
+
+### Blockers and caveats
+
+- CubeCL's CUDA runtime needs a CUDA toolkit's headers at run time
+  (`CUDA_PATH` or `/usr/local/cuda`, for `#include <cuda_runtime.h>` in the
+  generated source); the NVRTC raw path needs only the driver, NVRTC and
+  cuBLAS. Without `CUDA_PATH` the compile panics on CubeCL's device thread and
+  the launches are dropped while the forward returns garbage (no error).
+- No ordering contract between `#[cube]` launches on tenferro's client and
+  raw-stream work in one scope (the drain is our convention); per-op scopes
+  block (#2078-like).
+- CubeCL can bind only pool tensors (not external device memory), whose
+  memory is never returned to the driver without `memory_cleanup` (#2081).
+- No `float4` shared loads or `__syncthreads_or` in the port (scalar loads,
+  mask-based skips instead); dynamic shared memory above 48 KiB appears to be
+  handled by CubeCL on CUDA (reported limit 101 KiB), unlike the raw seam
+  (#2085).
+- wgpu was checked on lavapipe only (no WebGPU/Metal hardware here); subgroup
+  operations are an optional WebGPU feature.
+
+### Recommendation
+
+Hybrid, not yet the default: the CubeCL kernels are viable (correct, portable
+after the fixes above, within 1–3% of NVRTC, faster for attention and chunk
+prepare) and worth keeping as the portable path for the non-GEMM work, but the
+NVRTC kernels stay the CUDA default until (1) tenferro defines ordering
+between CubeCL launches and raw-stream work (or exposes a non-blocking scope),
+(2) CubeCL's CUDA backend stops requiring toolkit headers or fails loudly, and
+(3) a GEMM path exists for non-CUDA runtimes (cuBLAS is CUDA-only, so
+portability today covers only the non-GEMM half).

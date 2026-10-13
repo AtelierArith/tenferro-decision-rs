@@ -11,7 +11,34 @@
 //! `(rows, tokens)`; the caller owns every buffer and the scope's
 //! synchronization.
 
-use tenferro_ext::raw_exec::{Arg, DevPtr, Mat, Op, RawExec, RawModule, align, at};
+use cubecl::prelude::{CubeCount, CubeDim};
+use tenferro_ext::cube_kernels as cube;
+use tenferro_ext::raw_exec::{Arg, CubePool, DevPtr, Mat, Op, RawExec, RawModule, align, at};
+
+type Cu = cubecl_cuda::CudaRuntime;
+
+/// CubeCL context of [`delta_raw_mix`]: when given, the output gate and the
+/// chunk-prepare kernel run as `#[cube]` kernels (`tenferro_ext::cube_kernels`)
+/// on pool tensors. `ops.proj`, `ops.gated` and `ops.scratch` must lie in
+/// `scratch` (at `scratch_base`); `norm` is the element offset of the output
+/// RMSNorm scale in `small`.
+#[derive(Clone, Copy, Debug)]
+pub struct DeltaCube<'a> {
+    /// The pool holding the activations and the DeltaNet scratch.
+    pub scratch: &'a CubePool,
+    /// Device address of `scratch`.
+    pub scratch_base: DevPtr,
+    /// The pool holding the small weight vectors.
+    pub small: &'a CubePool,
+    /// Element offset of the output RMSNorm scale in `small`.
+    pub norm: usize,
+}
+
+impl DeltaCube<'_> {
+    fn off(&self, ptr: DevPtr) -> u32 {
+        ((ptr - self.scratch_base) / 4) as u32
+    }
+}
 
 /// The CUDA source of the raw DeltaNet kernels.
 pub const DELTA_RAW_SOURCE: &str = include_str!("cuda/delta_raw.cu");
@@ -223,6 +250,7 @@ pub unsafe fn delta_raw_mix(
     ops: &DeltaRawOperands,
     tokens: usize,
     scan: DeltaRawScan,
+    cube_ctx: Option<&DeltaCube<'_>>,
 ) -> tenferro_tensor::Result<()> {
     if tokens == 0 {
         return Ok(());
@@ -301,6 +329,7 @@ pub unsafe fn delta_raw_mix(
         match scan.resolve(tokens) {
             DeltaRawScan::Chunked => chunked(
                 exec, module, cfg, &layout, ops, tokens, query, key, mixed, beta, decay, output,
+                cube_ctx,
             )?,
             _ => exec.launch(
                 module.function("gd_recurrent")?,
@@ -323,6 +352,28 @@ pub unsafe fn delta_raw_mix(
                     i(tokens),
                 ],
             )?,
+        }
+        if let Some(c) = cube_ctx {
+            cube::cube_rms_gate::launch_unchecked::<Cu>(
+                exec.cube()?,
+                CubeCount::Static((heads * tokens) as u32, 1, 1),
+                CubeDim::new_1d(32),
+                c.scratch.arg(),
+                c.scratch.arg(),
+                c.small.arg(),
+                c.scratch.arg(),
+                c.off(ops.gated),
+                c.off(output),
+                c.norm as u32,
+                c.off(ops.proj),
+                ops.ld_proj as u32,
+                z_row as u32,
+                dv as u32,
+                heads as u32,
+                ops.eps,
+            );
+            exec.cube_launched();
+            return Ok(());
         }
         exec.launch(
             module.function("gd_rms_gate")?,
@@ -361,6 +412,7 @@ unsafe fn chunked(
     beta: DevPtr,
     decay: DevPtr,
     output: DevPtr,
+    cube_ctx: Option<&DeltaCube<'_>>,
 ) -> tenferro_tensor::Result<()> {
     let c = DELTA_RAW_CHUNK;
     let (dk, dv, heads) = (cfg.key_dim, cfg.value_dim, cfg.value_heads);
@@ -383,33 +435,62 @@ unsafe fn chunked(
     let i = |v: usize| Arg::I(v as i32);
     // SAFETY (block): forwarded caller contract.
     unsafe {
-        exec.launch(
-            module.function("gd_chunk_prepare")?,
-            (batches as u32, 4, 1),
-            128,
-            0,
-            &[
-                Arg::P(kq),
-                Arg::P(scaled),
-                Arg::P(dq),
-                Arg::P(ek),
-                Arg::P(cumulative),
-                Arg::P(gates),
-                Arg::P(growth),
-                Arg::P(query),
-                Arg::P(key),
-                Arg::P(mixed),
-                i(cfg.conv_channels()),
-                Arg::P(beta),
-                Arg::P(decay),
-                i(dk),
-                i(dv),
-                i(2 * dk * cfg.key_heads),
-                i(heads),
-                i(heads / cfg.key_heads),
-                i(tokens),
-            ],
-        )?;
+        if let Some(cc) = cube_ctx {
+            cube::cube_chunk_prepare::launch_unchecked::<Cu>(
+                exec.cube()?,
+                CubeCount::Static(batches as u32, cube::GD_PARTS, 1),
+                CubeDim::new_1d(128),
+                cc.scratch.arg(),
+                cc.off(kq),
+                cc.off(scaled),
+                cc.off(dq),
+                cc.off(ek),
+                cc.off(cumulative),
+                cc.off(gates),
+                cc.off(growth),
+                cc.off(query),
+                cc.off(key),
+                cc.off(mixed),
+                cfg.conv_channels() as u32,
+                cc.off(beta),
+                cc.off(decay),
+                dk as u32,
+                dv as u32,
+                (2 * dk * cfg.key_heads) as u32,
+                heads as u32,
+                (heads / cfg.key_heads) as u32,
+                tokens as u32,
+            );
+            exec.cube_launched();
+        } else {
+            exec.launch(
+                module.function("gd_chunk_prepare")?,
+                (batches as u32, 4, 1),
+                128,
+                0,
+                &[
+                    Arg::P(kq),
+                    Arg::P(scaled),
+                    Arg::P(dq),
+                    Arg::P(ek),
+                    Arg::P(cumulative),
+                    Arg::P(gates),
+                    Arg::P(growth),
+                    Arg::P(query),
+                    Arg::P(key),
+                    Arg::P(mixed),
+                    i(cfg.conv_channels()),
+                    Arg::P(beta),
+                    Arg::P(decay),
+                    i(dk),
+                    i(dv),
+                    i(2 * dk * cfg.key_heads),
+                    i(heads),
+                    i(heads / cfg.key_heads),
+                    i(tokens),
+                ],
+            )?;
+        }
         // products[:, 0:C] = k'k, products[:, C:2C] = k'q
         exec.gemm_batched(
             Op::T,

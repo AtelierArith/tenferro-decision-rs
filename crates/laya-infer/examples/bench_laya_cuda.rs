@@ -187,6 +187,15 @@ fn main() {
             )
             .0;
         }
+        let (drains, nanos) = tenferro_ext::raw_exec::take_drain_stats();
+        if drains > 0 {
+            let calls = (1 + warmup + iters) as f64;
+            eprintln!(
+                "  CubeCL drains: {:.0} per forward, {:.1} us each",
+                drains as f64 / calls,
+                nanos as f64 / drains as f64 / 1e3
+            );
+        }
         eprintln!(
             "L{length}B{batch}: cuda median {:.2} ms (first {:.0} ms)",
             shape["cuda"]["ms_median"].as_f64().unwrap(),
