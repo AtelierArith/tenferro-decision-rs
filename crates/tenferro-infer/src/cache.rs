@@ -195,9 +195,10 @@ mod tests {
     fn scalar_values_keep_bits_dtype_and_runtime_distinct() {
         let first = tenferro_ad::EagerRuntime::new().unwrap();
         let second = tenferro_ad::EagerRuntime::new().unwrap();
+        let mut engine = tenferro_cpu::CpuEngine::serial();
         let mut cache = TensorCache::new();
         let retained = first
-            .with_eager_session(|session| {
+            .with_eager_session(&mut engine, |session| {
                 let x = session
                     .constant_from_host(Tensor::from_vec_col_major(vec![1], vec![1.0f32])?)?;
                 let a = cache.scalar_like(session, &x, 0.25)?;
@@ -222,10 +223,9 @@ mod tests {
                 assert_eq!(cache.len(), 4);
                 Ok::<_, tenferro_ad::Error>(a)
             })
-            .unwrap()
             .unwrap();
         second
-            .with_eager_session(|session| {
+            .with_eager_session(&mut engine, |session| {
                 let x = session
                     .constant_from_host(Tensor::from_vec_col_major(vec![1], vec![2.0f32])?)?;
                 let a = cache.scalar_like(session, &x, 0.25)?;
@@ -235,17 +235,17 @@ mod tests {
                 assert_eq!(retained.value()?.as_slice::<f32>()?, &[0.25]);
                 Ok::<_, tenferro_ad::Error>(())
             })
-            .unwrap()
             .unwrap();
     }
 
     #[test]
     fn shared_storage_keeps_shapes_and_layouts_distinct() {
         let runtime = tenferro_ad::EagerRuntime::new().unwrap();
+        let mut engine = tenferro_cpu::CpuEngine::serial();
         let data = vec![1.0f32, 2.0, 3.0, 4.0, 5.0, 6.0];
         let mut cache = TensorCache::new();
         runtime
-            .with_eager_session(|session| {
+            .with_eager_session(&mut engine, |session| {
                 let transposed = cache.col(session, vec![2, 3], &data)?;
                 let direct = cache.col_major(session, vec![2, 3], &data)?;
                 let reshaped = cache.col_major(session, vec![3, 2], &data)?;
@@ -260,7 +260,6 @@ mod tests {
                 assert_eq!(cache.len(), 3);
                 Ok::<_, tenferro_ad::Error>(())
             })
-            .unwrap()
             .unwrap();
     }
 }

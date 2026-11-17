@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use jeff_infer::checkpoint::load_checkpoint;
 use jeff_infer::model::{forward_reference, forward_tenferro};
 use tenferro_ad::EagerRuntime;
-use tenferro_cpu::CpuBackend;
+use tenferro_cpu::CpuEngine;
 
 fn fixture_dir() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -106,18 +106,20 @@ fn host_reference_matches_pytorch_fixture() {
 
 #[test]
 fn tenferro_forward_matches_pytorch_fixture() {
+    let mut engine = CpuEngine::serial();
     let Some(dir) = available() else {
         eprintln!("skipping: JeffClient native fixture submodule is not initialized");
         return;
     };
     let checkpoint = load_checkpoint(&dir).expect("load checkpoint");
     let (cfg, weights) = (checkpoint.config, checkpoint.weights);
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let runtime = EagerRuntime::new().unwrap();
     for case in load_cases(&dir) {
         let (ids, mask) = active_span(&case.ids, &case.mask);
         let got = runtime
-            .with_eager_session(|session| forward_tenferro(session, &cfg, &weights, &ids, &mask))
-            .unwrap()
+            .with_eager_session(&mut engine, |session| {
+                forward_tenferro(session, &cfg, &weights, &ids, &mask)
+            })
             .unwrap();
         let diff = max_abs_diff(&got, &case.expected);
         assert!(

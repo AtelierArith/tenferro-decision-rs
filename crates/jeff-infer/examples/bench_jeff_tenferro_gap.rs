@@ -13,7 +13,6 @@ use jeff_infer::host_opt::{HostOptWorkspace, forward_host_opt_with};
 use jeff_infer::model::{DeltaKernel, forward_tenferro_cached_kernel};
 use serde_json::json;
 use tenferro_ad::EagerRuntime;
-use tenferro_cpu::CpuBackend;
 use tenferro_gated_delta::GatedDeltaWorkspace;
 use tenferro_infer::TensorCache;
 
@@ -30,6 +29,7 @@ fn median(mut s: Vec<f64>) -> f64 {
 }
 
 fn main() {
+    let mut engine = tenferro_infer::cpu_engine();
     let args: Vec<String> = std::env::args().collect();
     let dir = args
         .get(1)
@@ -40,7 +40,7 @@ fn main() {
     let checkpoint = load_checkpoint(dir).expect("load checkpoint");
     let (cfg, weights) = (checkpoint.config, checkpoint.weights);
 
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let runtime = EagerRuntime::new().unwrap();
     let mut cache = TensorCache::new();
     let mut ws = GatedDeltaWorkspace::new();
     let mut host_ws = HostOptWorkspace::new();
@@ -60,10 +60,10 @@ fn main() {
             hs.push(t.elapsed().as_secs_f64() * 1000.0);
         }
 
-        let run_te = |cache: &mut TensorCache, ws: &mut GatedDeltaWorkspace| -> f64 {
+        let mut run_te = |cache: &mut TensorCache, ws: &mut GatedDeltaWorkspace| -> f64 {
             let t = Instant::now();
             let _ = runtime
-                .with_eager_session(|session| {
+                .with_eager_session(&mut engine, |session| {
                     forward_tenferro_cached_kernel(
                         ws,
                         cache,
@@ -75,7 +75,6 @@ fn main() {
                         DeltaKernel::HostRecurrent,
                     )
                 })
-                .unwrap()
                 .unwrap();
             t.elapsed().as_secs_f64() * 1000.0
         };

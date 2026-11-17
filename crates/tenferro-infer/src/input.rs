@@ -26,11 +26,12 @@ pub fn bool_tensor_native(
 mod tests {
     use super::*;
     use tenferro_ad::EagerRuntime;
-    use tenferro_cpu::CpuBackend;
+    use tenferro_cpu::CpuEngine;
 
     #[test]
     fn native_masks_select_columns_and_retain_previous_requests() {
-        let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+        let runtime = EagerRuntime::new().unwrap();
+        let mut engine = CpuEngine::serial();
         let mut retained = Vec::new();
         for keep in [
             [true, false, false, true, true, false],
@@ -38,7 +39,7 @@ mod tests {
             [true; 6],
         ] {
             let selected = runtime
-                .with_eager_session(|session| {
+                .with_eager_session(&mut engine, |session| {
                     let mask = bool_tensor_native(session, vec![2, 3], &keep)?;
                     let values = session.constant_from_host(Tensor::from_vec_col_major(
                         vec![2, 3],
@@ -49,14 +50,14 @@ mod tests {
                     let selected = session.where_select(&mask, &values, &replacement)?;
                     session.transpose(&selected, &[1, 0])
                 })
-                .unwrap()
                 .unwrap();
             retained.push((keep, selected));
         }
         for (keep, selected) in retained {
             let output = runtime
-                .with_eager_session(|session| crate::output::host_value(session, &selected))
-                .unwrap()
+                .with_eager_session(&mut engine, |session| {
+                    crate::output::host_value(session, &selected)
+                })
                 .unwrap();
             let expected: Vec<f32> = [0usize, 2, 4, 1, 3, 5]
                 .into_iter()
@@ -74,9 +75,10 @@ mod tests {
 
     #[test]
     fn native_masks_reject_invalid_shape_and_support_scalar_inputs() {
-        let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+        let runtime = EagerRuntime::new().unwrap();
+        let mut engine = CpuEngine::serial();
         runtime
-            .with_eager_session(|session| {
+            .with_eager_session(&mut engine, |session| {
                 assert!(bool_tensor_native(session, vec![2, 3], &[true]).is_err());
                 for value in [false, true] {
                     let scalar = bool_tensor_native(session, vec![], &[value])?;
@@ -85,7 +87,6 @@ mod tests {
                 }
                 Ok::<_, tenferro_ad::Error>(())
             })
-            .unwrap()
             .unwrap();
     }
 }

@@ -10,9 +10,10 @@ Updated as work lands.
 - Virtual Cargo workspace (`crates/*`), shared dependency block.
 - `decision-core`: typed questions/answers, `Content`, `State`, `DecisionError`,
   and the `DecisionEngine` trait. No tenferro dependency.
-- tenferro CPU wiring pinned to the surveyed revision
-  `471c4278dbc5a955b8a1664789c37e5d07e743cb` (the crates.io `0.7.1` release
-  differs in the session-entry API).
+- tenferro CPU wiring on the published `0.11` line (crates.io; see
+  `25_TENFERRO_0_11_MIGRATION.md`). The caller holds the `CpuEngine`; eager
+  sessions borrow it, so there is no backend object and no nested session
+  `Result`.
 - `reference-data` fixture format + loader; `fixtures/`.
 - `safetensors-io`: a shared, dependency-light safetensors reader
   (`F32`/`F64`/`F16`/`BF16`) used by both engines' checkpoint loaders.
@@ -36,8 +37,10 @@ independent numerical test:
 - `rope_modernbert`, `rope_qwen_partial`
 - reference multi-head `attention` with optional mask
 
-Known gap: tenferro has no `erf`, so `gelu` uses the tanh approximation. The
-exact erf-based form that Laya's MLX kernels use requires an extension op.
+`gelu` has a tanh form and, since tenferro `0.11`, a standard `erf`. The Laya
+forward keeps the MLX-compatible `f32` kernel from `tenferro-ext`
+(`EagerSessionErfExt::erf_ext` / `gelu_erf`) for bit-parity with the Julia
+reference; the inherent `EagerSession::erf` is tenferro's own op.
 
 ### Phase 9 — `jev-client`
 

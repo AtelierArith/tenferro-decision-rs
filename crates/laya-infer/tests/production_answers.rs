@@ -12,7 +12,6 @@ use laya_infer::{
 };
 use serde_json::Value;
 use tenferro_ad::EagerRuntime;
-use tenferro_cpu::CpuBackend;
 
 fn integers(value: &Value) -> Vec<i64> {
     value
@@ -143,10 +142,11 @@ fn bundled_questions_match_julia_collate_predict_and_action() {
             integers(&item["markers"])
         );
     }
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let runtime = EagerRuntime::new().unwrap();
+    let mut cpu_engine = tenferro_cpu::CpuEngine::serial();
     let b = &reference["batch"];
     let (logits, action) = runtime
-        .with_eager_session(|session| {
+        .with_eager_session(&mut cpu_engine, |session| {
             forward_tenferro_cached(
                 session,
                 &mut TensorCache::new(),
@@ -160,7 +160,6 @@ fn bundled_questions_match_julia_collate_predict_and_action() {
                 &integers(&b["qtype"]),
             )
         })
-        .unwrap()
         .unwrap();
     for (actual, key) in [(&logits, "logits"), (&action, "action")] {
         let expected = reference[key].as_array().unwrap();

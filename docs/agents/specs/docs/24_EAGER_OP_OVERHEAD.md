@@ -105,8 +105,8 @@ The eager API does not fuse by design, but tenferro ships a separate
 
 `tenferro-gated-delta::traced_layer` re-expresses the head-batched DeltaNet on
 `TracedTensor`; `examples/bench_compiled_delta.rs` compiles it once and runs it
-via `prepare_compiled` + `run_prepared` (the steady-state API — `run_compiled`
-re-prepares every call). Measured at `hidden=1024, length=64, value_heads=16`
+via `Runtime::prepare` + `Runtime::run` (the steady-state API — running a
+compiled graph directly re-prepares every call). Measured at `hidden=1024, length=64, value_heads=16`
 (release, 8 threads):
 
 | benchmark | eager | compiled | compiled / eager |
@@ -116,6 +116,12 @@ re-prepares every call). Measured at `hidden=1024, length=64, value_heads=16`
 
 The compiled layer matches the eager layer to `1.6e-5`, and saves ~10% on the
 DeltaNet layer.
+
+Re-measured on the tenferro `0.11` migration host (`12.2 ms` eager vs `14.0 ms`
+compiled, `0.87×`, same `1.7e-5` agreement): the compiled path no longer leads,
+so the win above is machine- and revision-specific rather than a property of the
+lowering. Treat the compiled layer as a lower-bound experiment until the 0.11
+region planner is re-profiled.
 
 A chain-length sweep on a pure elementwise `tanh` chain (`1024×64`) settles why
 the compiled elementwise path does not win:
@@ -127,7 +133,7 @@ the compiled elementwise path does not win:
 | 100 | 17.9 ms | 64.1 ms | 1 | 100 | 6 |
 | 200 | 35.3 ms | 128.1 ms | 1 | 200 | 6 |
 
-`PreparedCompiledGraph::elementwise_region_summary`/`_execution_counts` show that
+`Prepared::elementwise_region_summary`/`_execution_counts` show that
 **fusion does engage**: one elementwise region covers all `k` instructions and is
 executed as **one fused command per run** (`fused = 6` = 1 region × 6 runs),
 with zero fallbacks. Yet the compiled time scales **linearly** at ~0.64 ms/op,

@@ -2,7 +2,7 @@
 //! recurrent reference.
 
 use tenferro_ad::EagerRuntime;
-use tenferro_cpu::CpuBackend;
+use tenferro_cpu::CpuEngine;
 use tenferro_gated_delta::{DeltaScanInputs, chunked::delta_scan_chunked, delta_scan_reference};
 
 struct Lcg(u64);
@@ -82,6 +82,7 @@ fn make_case(key_dim: usize, value_dim: usize, length: usize, seed: u64) -> Case
 }
 
 fn compare(case: &Case, chunk_size: usize, tolerance: f32) {
+    let mut engine = CpuEngine::serial();
     let inputs = DeltaScanInputs {
         q: &case.q,
         k: &case.k,
@@ -97,10 +98,11 @@ fn compare(case: &Case, chunk_size: usize, tolerance: f32) {
     };
     let reference = delta_scan_reference(&inputs);
 
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let runtime = EagerRuntime::new().unwrap();
     let chunked = runtime
-        .with_eager_session(|session| delta_scan_chunked(session, &inputs, chunk_size))
-        .unwrap()
+        .with_eager_session(&mut engine, |session| {
+            delta_scan_chunked(session, &inputs, chunk_size)
+        })
         .unwrap();
 
     // Exercise the prepared tensor entry point separately: poison padded pair
@@ -135,7 +137,7 @@ fn compare(case: &Case, chunk_size: usize, tolerance: f32) {
         }
     }
     let prepared = runtime
-        .with_eager_session(|session| {
+        .with_eager_session(&mut engine, |session| {
             use tenferro_gated_delta::chunked::{PreparedChunkScan, delta_scan_prepared};
             let tensor = |session: &mut tenferro_ad::EagerSession<'_>,
                           shape: Vec<usize>,
@@ -195,7 +197,6 @@ fn compare(case: &Case, chunk_size: usize, tolerance: f32) {
                 .collect();
             Ok::<_, tenferro_ad::Error>(row)
         })
-        .unwrap()
         .unwrap();
     assert_eq!(prepared.len(), reference.len());
     for (&actual, &expected) in prepared.iter().zip(&reference) {

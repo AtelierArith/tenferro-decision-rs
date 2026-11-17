@@ -18,7 +18,7 @@ use jeff_infer::checkpoint::load_checkpoint;
 use jeff_infer::host_opt::forward_host_opt;
 use jeff_infer::model::{DeltaKernel, forward_reference, forward_tenferro_cached_kernel};
 use tenferro_ad::EagerRuntime;
-use tenferro_cpu::CpuBackend;
+use tenferro_cpu::CpuEngine;
 use tenferro_gated_delta::GatedDeltaWorkspace;
 use tenferro_infer::TensorCache;
 
@@ -53,6 +53,7 @@ fn f32_array(value: &serde_json::Value) -> Vec<f32> {
 #[test]
 #[ignore = "loads the ~1.7 GB production Jeff checkpoint; run with --release -- --ignored"]
 fn forward_matches_production_reference() {
+    let mut engine = CpuEngine::serial();
     let Some((dir, reference)) = available() else {
         eprintln!("skipping: production Jeff checkpoint or reference is not present");
         return;
@@ -99,12 +100,12 @@ fn forward_matches_production_reference() {
 
     // Exercise the native constants cache across separate requests on the
     // production weights, comparing both executions with the Julia logits.
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let runtime = EagerRuntime::new().unwrap();
     let mut workspace = GatedDeltaWorkspace::new();
     let mut cache = TensorCache::new();
     for request in 0..2 {
         let native = runtime
-            .with_eager_session(|session| {
+            .with_eager_session(&mut engine, |session| {
                 forward_tenferro_cached_kernel(
                     &mut workspace,
                     &mut cache,
@@ -116,7 +117,6 @@ fn forward_matches_production_reference() {
                     DeltaKernel::TensorNative,
                 )
             })
-            .unwrap()
             .unwrap();
         assert_eq!(native.len(), expected.len());
         let diff = native

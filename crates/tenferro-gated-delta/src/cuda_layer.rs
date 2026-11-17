@@ -5,8 +5,8 @@
 
 use std::rc::Rc;
 
+use crate::cuda::driver::with_cuda_exec_session;
 use tenferro_ad::{DType, EagerSession, EagerTensor, Result};
-use tenferro_gpu::cuda::with_cuda_exec_session;
 use tenferro_tensor::{Tensor, TensorRead, TensorView, TypedTensor};
 
 use crate::{

@@ -2,7 +2,7 @@
 //! reference layer with identical weights.
 
 use tenferro_ad::EagerRuntime;
-use tenferro_cpu::CpuBackend;
+use tenferro_cpu::CpuEngine;
 use tenferro_gated_delta::{
     Algorithm, GatedDeltaConfig, GatedDeltaWeights, delta_layer_reference, delta_layer_tenferro,
 };
@@ -61,6 +61,7 @@ fn weights(cfg: &GatedDeltaConfig, seed: u64) -> GatedDeltaWeights {
 
 #[test]
 fn layer_tenferro_matches_reference() {
+    let mut engine = CpuEngine::serial();
     let cfg = config();
     let w = weights(&cfg, 7);
     let length = 6;
@@ -71,10 +72,11 @@ fn layer_tenferro_matches_reference() {
 
     let reference = delta_layer_reference(&cfg, &w, &x, &mask).unwrap();
 
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let runtime = EagerRuntime::new().unwrap();
     let tenferro = runtime
-        .with_eager_session(|session| delta_layer_tenferro(session, &cfg, &w, &x, &mask))
-        .unwrap()
+        .with_eager_session(&mut engine, |session| {
+            delta_layer_tenferro(session, &cfg, &w, &x, &mask)
+        })
         .unwrap();
 
     assert_eq!(reference.len(), cfg.hidden * length);

@@ -39,7 +39,9 @@ Concretely:
 
 - `decision-core` and `jev-client` must not depend on tenferro.
 - `tenferro-gated-delta` is Jeff-only. Depend on tenferro's public crates only;
-  pin revisions deliberately in `Cargo.toml`.
+  the workspace tracks the published `0.11` line, so a version bump is a
+  `Cargo.toml` change plus a re-survey
+  (`docs/agents/specs/docs/25_TENFERRO_0_11_MIGRATION.md`).
 - Network/model access goes through `hf-fetch`; the inference crates stay
   offline and deterministic.
 - Never modify the pinned tenferro-rs dependency. `extern/*` are submodules:

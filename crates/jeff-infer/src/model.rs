@@ -824,13 +824,14 @@ fn config_error(error: DecisionError) -> tenferro_ad::Error {
 mod tests {
     use super::*;
     use tenferro_ad::EagerRuntime;
-    use tenferro_cpu::CpuBackend;
+    use tenferro_cpu::CpuEngine;
 
     #[test]
     fn native_linear_f64_preserves_weight_layout() {
-        let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+        let mut engine = CpuEngine::serial();
+        let runtime = EagerRuntime::new().unwrap();
         let output = runtime
-            .with_eager_session(|session| {
+            .with_eager_session(&mut engine, |session| {
                 // Two rows, three features; columns stored contiguously.
                 let x = session.constant_from(tenferro_ad::Tensor::from_vec_col_major(
                     vec![2, 3],
@@ -842,7 +843,6 @@ mod tests {
                 )?)?;
                 linear_tenferro(session, &x, &weight)
             })
-            .unwrap()
             .unwrap();
         assert_eq!(output.shape(), &[2, 2]);
         assert_eq!(
@@ -869,6 +869,7 @@ mod tests {
 
     #[test]
     fn projected_q_norm_rope_matches() {
+        let mut engine = CpuEngine::serial();
         let cfg = JeffConfig {
             hidden: 8,
             heads: 2,
@@ -889,9 +890,9 @@ mod tests {
         let host_normed = rms_heads(&projected, hd, heads, length, &q_norm, cfg.eps);
         let host = rope_partial_host(&host_normed, hd, heads, length, hd, 10000.0);
 
-        let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+        let runtime = EagerRuntime::new().unwrap();
         let ten = runtime
-            .with_eager_session(|session| -> tenferro_ad::Result<Vec<f32>> {
+            .with_eager_session(&mut engine, |session| -> tenferro_ad::Result<Vec<f32>> {
                 let x_t = host_to_tensor(session, cfg.hidden, length, &x)?;
                 let q_w_t = host_to_tensor(session, cfg.hidden, width, &q_w)?;
                 let proj = linear_col(session, &x_t, &q_w_t)?; // [width,length]
@@ -915,7 +916,6 @@ mod tests {
                 }
                 Ok(out)
             })
-            .unwrap()
             .unwrap();
 
         let mut max_diff = 0.0f32;
@@ -927,6 +927,7 @@ mod tests {
 
     #[test]
     fn full_attention_block_matches() {
+        let mut engine = CpuEngine::serial();
         let cfg = JeffConfig {
             hidden: 8,
             heads: 2,
@@ -947,13 +948,13 @@ mod tests {
             rope_theta: 10000.0,
             rotary_dim: 2,
         };
-        let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+        let runtime = EagerRuntime::new().unwrap();
         for length in [1usize, 2, 3, 6] {
             let x = rng.fill(cfg.hidden * length, -1.0, 1.0);
             let mask = vec![1.0f32; length];
             let host = full_attention_host(&w, &cfg, &x, &mask);
             let ten = runtime
-                .with_eager_session(|session| {
+                .with_eager_session(&mut engine, |session| {
                     // The forward now works on `(length, hidden)`; the host `x` is
                     // row-major `(hidden, length)`, which is exactly the
                     // column-major `(length, hidden)` buffer.
@@ -976,7 +977,6 @@ mod tests {
                     }
                     Ok::<Vec<f32>, tenferro_ad::Error>(row_major)
                 })
-                .unwrap()
                 .unwrap();
             let mut max_diff = 0.0f32;
             for (a, b) in host.iter().zip(&ten) {

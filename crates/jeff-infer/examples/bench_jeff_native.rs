@@ -9,13 +9,13 @@ use jeff_infer::checkpoint::load_checkpoint;
 use jeff_infer::model::{DeltaKernel, forward_tenferro_cached_kernel};
 use serde_json::json;
 use tenferro_ad::EagerRuntime;
-use tenferro_cpu::CpuBackend;
 use tenferro_gated_delta::GatedDeltaWorkspace;
 use tenferro_infer::TensorCache;
 
 const BASE: [i64; 8] = [2, 100, 1000, 2000, 3000, 4000, 5, 3];
 
 fn main() {
+    let mut engine = tenferro_infer::cpu_engine();
     let args: Vec<String> = std::env::args().collect();
     let dir = args
         .get(1)
@@ -24,7 +24,7 @@ fn main() {
     let iters: usize = args.get(3).map(|s| s.parse().unwrap()).unwrap_or(5);
     assert!(iters > 0, "at least one measured iteration required");
     let checkpoint = load_checkpoint(dir).expect("load checkpoint");
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let runtime = EagerRuntime::new().unwrap();
     let mut workspace = GatedDeltaWorkspace::new();
     let mut cache = TensorCache::new();
     let mut rows = Vec::new();
@@ -36,7 +36,7 @@ fn main() {
         for iteration in 0..warmup + iters {
             let timer = Instant::now();
             logits = runtime
-                .with_eager_session(|session| {
+                .with_eager_session(&mut engine, |session| {
                     forward_tenferro_cached_kernel(
                         &mut workspace,
                         &mut cache,
@@ -48,7 +48,6 @@ fn main() {
                         DeltaKernel::TensorNative,
                     )
                 })
-                .unwrap()
                 .unwrap();
             if iteration >= warmup {
                 samples.push(timer.elapsed().as_secs_f64() * 1000.0);

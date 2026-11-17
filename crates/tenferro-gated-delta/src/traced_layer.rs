@@ -7,7 +7,7 @@
 
 use tenferro_linalg::TracedTensorLinalgExt;
 use tenferro_runtime::{
-    DType, DotGeneralConfig, PadConfig, Result as R, SliceConfig, TracedTensor,
+    DType, DotGeneralConfig, PadConfig, Result as R, SliceConfig, TraceContext, TracedTensor,
 };
 
 use crate::config::GatedDeltaConfig;
@@ -28,7 +28,7 @@ pub struct GatedDeltaTracedWeights {
 }
 
 /// Column-major `[rows, cols]` traced constant from row-major `data`.
-fn col(shape: [usize; 2], row_major: &[f32]) -> R<TracedTensor> {
+fn col(trace: &TraceContext, shape: [usize; 2], row_major: &[f32]) -> R<TracedTensor> {
     let [rows, cols] = shape;
     let mut column_major = vec![0.0f32; rows * cols];
     for row in 0..rows {
@@ -36,16 +36,17 @@ fn col(shape: [usize; 2], row_major: &[f32]) -> R<TracedTensor> {
             column_major[row + column * rows] = row_major[row * cols + column];
         }
     }
-    TracedTensor::from_vec_col_major(vec![rows, cols], column_major)
+    trace.from_vec_col_major(vec![rows, cols], column_major)
 }
 
 /// Column-major traced constant from data that is already column-major.
-fn col_major(shape: Vec<usize>, data: &[f32]) -> R<TracedTensor> {
-    TracedTensor::from_vec_col_major(shape, data.to_vec())
+fn col_major(trace: &TraceContext, shape: Vec<usize>, data: &[f32]) -> R<TracedTensor> {
+    trace.from_vec_col_major(shape, data.to_vec())
 }
 
 /// Build the traced weights for a layer from the host weights.
 pub fn prepare_traced_weights(
+    trace: &TraceContext,
     cfg: &GatedDeltaConfig,
     weights: &GatedDeltaWeights,
 ) -> R<GatedDeltaTracedWeights> {
@@ -53,20 +54,20 @@ pub fn prepare_traced_weights(
     let value_width = cfg.value_dim * cfg.value_heads;
     let conv_channels = 2 * key_width + value_width;
     Ok(GatedDeltaTracedWeights {
-        qkv: col([cfg.hidden, conv_channels], &weights.qkv)?,
-        z: col([cfg.hidden, value_width], &weights.z)?,
-        a: col([cfg.hidden, cfg.value_heads], &weights.a)?,
-        b: col([cfg.hidden, cfg.value_heads], &weights.b)?,
-        conv: col_major(vec![conv_channels, cfg.conv_taps], &weights.conv)?,
-        a_decay: col_major(vec![cfg.value_heads], &weights.a_decay)?,
-        dt_bias: col_major(vec![cfg.value_heads], &weights.dt_bias)?,
-        norm: col_major(vec![cfg.value_dim], &weights.norm)?,
-        out_proj: col([value_width, cfg.hidden], &weights.out_proj)?,
+        qkv: col(trace, [cfg.hidden, conv_channels], &weights.qkv)?,
+        z: col(trace, [cfg.hidden, value_width], &weights.z)?,
+        a: col(trace, [cfg.hidden, cfg.value_heads], &weights.a)?,
+        b: col(trace, [cfg.hidden, cfg.value_heads], &weights.b)?,
+        conv: col_major(trace, vec![conv_channels, cfg.conv_taps], &weights.conv)?,
+        a_decay: col_major(trace, vec![cfg.value_heads], &weights.a_decay)?,
+        dt_bias: col_major(trace, vec![cfg.value_heads], &weights.dt_bias)?,
+        norm: col_major(trace, vec![cfg.value_dim], &weights.norm)?,
+        out_proj: col(trace, [value_width, cfg.hidden], &weights.out_proj)?,
     })
 }
 
-fn scalar(value: f32) -> R<TracedTensor> {
-    TracedTensor::from_vec_col_major(vec![1], vec![value])
+fn scalar(trace: &TraceContext, value: f32) -> R<TracedTensor> {
+    trace.from_vec_col_major(vec![1], vec![value])
 }
 
 /// `y = weightᵀ x` for `x (in, L)` and prepared `weight (in, out)`.
@@ -141,9 +142,9 @@ fn slice_features(
     })
 }
 
-fn softplus(x: &TracedTensor) -> R<TracedTensor> {
-    let zero = scalar(0.0)?;
-    let one = scalar(1.0)?;
+fn softplus(trace: &TraceContext, x: &TracedTensor) -> R<TracedTensor> {
+    let zero = scalar(trace, 0.0)?;
+    let one = scalar(trace, 1.0)?;
     let positive = x.maximum(&zero)?;
     let abs = x.abs()?;
     let neg_abs = abs.scale_real(-1.0)?;
@@ -154,6 +155,7 @@ fn softplus(x: &TracedTensor) -> R<TracedTensor> {
 }
 
 fn causal_depthwise_silu(
+    trace: &TraceContext,
     x: &TracedTensor,
     conv: &TracedTensor,
     channels: usize,
@@ -190,24 +192,30 @@ fn causal_depthwise_silu(
     }
     let sum = acc.expect("conv_taps >= 1");
     // silu(sum) = sum * sigmoid(sum) = sum / (1 + exp(-sum))
-    let one = scalar(1.0)?;
+    let one = scalar(trace, 1.0)?;
     let neg = sum.neg()?;
     let exp = neg.exp()?;
     let denom = exp.add(&one)?;
     sum.div(&denom)
 }
 
-fn l2_normalize_heads(x: &TracedTensor, heads: usize, length: usize, eps: f64) -> R<TracedTensor> {
-    let sum_sq = x.reduce_sum_squares(&[1])?; // (heads, length)
-    let eps = TracedTensor::from_vec_col_major(vec![length], vec![eps as f32; length])?;
+fn l2_normalize_heads(
+    trace: &TraceContext,
+    x: &TracedTensor,
+    heads: usize,
+    length: usize,
+    eps: f64,
+) -> R<TracedTensor> {
+    let sum_sq = x.reduce_sum_squares(Some(&[1]))?; // (heads, length)
+    let eps = trace.from_vec_col_major(vec![length], vec![eps as f32; length])?;
     let denom = sum_sq.add(&eps)?;
     let inv = denom.rsqrt()?;
     let inv = inv.reshape(vec![heads, 1, length])?;
     x.mul(&inv)
 }
 
-fn lower_tri_ones(n: usize) -> R<TracedTensor> {
-    let ones = TracedTensor::from_vec_col_major(vec![n, n], vec![1.0f32; n * n])?;
+fn lower_tri_ones(trace: &TraceContext, n: usize) -> R<TracedTensor> {
+    let ones = trace.from_vec_col_major(vec![n, n], vec![1.0f32; n * n])?;
     ones.tril(0)
 }
 
@@ -244,6 +252,7 @@ fn solve_unit_lower_heads(
 
 #[allow(clippy::too_many_arguments)]
 fn delta_scan_chunked(
+    trace: &TraceContext,
     key_dim: usize,
     value_dim: usize,
     length: usize,
@@ -258,9 +267,9 @@ fn delta_scan_chunked(
     norm_weight: &TracedTensor,
     eps: f64,
 ) -> R<TracedTensor> {
-    let neg_big = scalar(-1.0e30)?;
-    let zero = scalar(0.0)?;
-    let mut state = TracedTensor::from_vec_col_major(
+    let neg_big = scalar(trace, -1.0e30)?;
+    let zero = scalar(trace, 0.0)?;
+    let mut state = trace.from_vec_col_major(
         vec![heads, value_dim, key_dim],
         vec![0.0f32; heads * value_dim * key_dim],
     )?;
@@ -278,7 +287,7 @@ fn delta_scan_chunked(
         let bc = slice_time_rows(beta, heads, start, end)?;
         let dc = slice_time_rows(decay, heads, start, end)?;
 
-        let lower = lower_tri_ones(n)?;
+        let lower = lower_tri_ones(trace, n)?;
         let lower = lower.broadcast_in_dim(&[heads, n, n], &[1, 2])?;
         let dc_col = dc.reshape(vec![heads, n, 1])?;
         let cumulative = bmm(&lower, &dc_col)?;
@@ -341,13 +350,13 @@ fn delta_scan_chunked(
             .mul(&result_t)?
             .reduce_sum(Some(&[2]))?
             .scale_real(1.0 / value_dim as f64)?
-            .add(&scalar(eps as f32)?)?;
+            .add(&scalar(trace, eps as f32)?)?;
         let inv = mean.rsqrt()?;
         let inv = inv.reshape(vec![heads, n, 1])?;
         let normalized_t = result_t.mul(&inv)?.mul(norm_weight)?;
         let normalized = normalized_t.transpose(&[0, 2, 1])?;
         let gated_z = {
-            let one = scalar(1.0)?;
+            let one = scalar(trace, 1.0)?;
             let neg = zc.neg()?;
             let exp = neg.exp()?;
             let denom = exp.add(&one)?;
@@ -369,6 +378,7 @@ fn delta_scan_chunked(
 /// Full graph-compiled Gated DeltaNet layer: `x (hidden, length)` and
 /// `mask (length,)` traced inputs, returns `(hidden, length)`.
 pub fn delta_layer_traced(
+    trace: &TraceContext,
     cfg: &GatedDeltaConfig,
     weights: &GatedDeltaTracedWeights,
     x: &TracedTensor,
@@ -386,7 +396,14 @@ pub fn delta_layer_traced(
     let x_masked = x.mul(mask)?;
 
     let qkv = linear_col(&x_masked, &weights.qkv)?;
-    let mixed = causal_depthwise_silu(&qkv, &weights.conv, conv_channels, length, cfg.conv_taps)?;
+    let mixed = causal_depthwise_silu(
+        trace,
+        &qkv,
+        &weights.conv,
+        conv_channels,
+        length,
+        cfg.conv_taps,
+    )?;
     let z = linear_col(&x_masked, &weights.z)?;
     let a = linear_col(&x_masked, &weights.a)?;
     let b = linear_col(&x_masked, &weights.b)?;
@@ -415,13 +432,13 @@ pub fn delta_layer_traced(
     let z = z.reshape(vec![value_dim, heads, length])?;
     let z = z.transpose(&[1, 0, 2])?;
 
-    let q = l2_normalize_heads(&q, heads, length, 1e-6)?;
+    let q = l2_normalize_heads(trace, &q, heads, length, 1e-6)?;
     let inv_scale = 1.0 / (key_dim as f64).sqrt();
     let q = q.scale_real(inv_scale)?;
-    let k = l2_normalize_heads(&k, heads, length, 1e-6)?;
+    let k = l2_normalize_heads(trace, &k, heads, length, 1e-6)?;
 
     let beta = {
-        let one = scalar(1.0)?;
+        let one = scalar(trace, 1.0)?;
         let neg = b.neg()?;
         let exp = neg.exp()?;
         let denom = exp.add(&one)?;
@@ -429,11 +446,12 @@ pub fn delta_layer_traced(
     };
     let dt_bias = weights.dt_bias.reshape(vec![heads, 1])?;
     let a_shifted = a.add(&dt_bias)?;
-    let softplus = softplus(&a_shifted)?;
+    let softplus = softplus(trace, &a_shifted)?;
     let a_decay = weights.a_decay.reshape(vec![heads, 1])?;
     let decay = a_decay.mul(&softplus)?;
 
     let out = delta_scan_chunked(
+        trace,
         key_dim,
         value_dim,
         length,
@@ -455,11 +473,11 @@ pub fn delta_layer_traced(
 }
 
 /// Build a `(hidden, length)` F32 traced input placeholder.
-pub fn input_x(hidden: usize, length: usize) -> R<TracedTensor> {
-    TracedTensor::input_concrete_shape(DType::F32, &[hidden, length])
+pub fn input_x(trace: &TraceContext, hidden: usize, length: usize) -> R<TracedTensor> {
+    trace.input_concrete_shape(DType::F32, &[hidden, length])
 }
 
 /// Build a `(length,)` F32 traced input placeholder for the mask.
-pub fn input_mask(length: usize) -> R<TracedTensor> {
-    TracedTensor::input_concrete_shape(DType::F32, &[length])
+pub fn input_mask(trace: &TraceContext, length: usize) -> R<TracedTensor> {
+    trace.input_concrete_shape(DType::F32, &[length])
 }

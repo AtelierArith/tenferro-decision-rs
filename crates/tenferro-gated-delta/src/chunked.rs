@@ -114,7 +114,7 @@ pub fn delta_scan_chunk_step(
     let correction_keys = session.matmul(&corrections, &ending_keys_t)?;
     let next_state = session.add(&state_scaled, &correction_keys)?;
 
-    let square_sum = session.reduce_sum_squares(&result, &[0])?;
+    let square_sum = session.reduce_sum_squares(&result, Some(&[0]))?;
     let mean_square = session.mul(&square_sum, inputs.inverse_value_dim)?;
     let denominator = session.add(&mean_square, inputs.eps)?;
     let inverse = session.rsqrt(&denominator)?;
@@ -413,13 +413,14 @@ fn slice_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tenferro_cpu::CpuEngine;
 
     #[test]
     fn chunk_step_rejects_scalar_norm_weight_with_typed_error() {
-        let runtime =
-            tenferro_ad::EagerRuntime::with_cpu_backend(tenferro_cpu::CpuBackend::new()).unwrap();
+        let mut engine = CpuEngine::serial();
+        let runtime = tenferro_ad::EagerRuntime::new().unwrap();
         runtime
-            .with_eager_session(|session| {
+            .with_eager_session(&mut engine, |session| {
                 let state = constant(session, &[2, 3], &[0.0; 6])?;
                 let q = constant(session, &[3, 4], &[0.0; 12])?;
                 let v = constant(session, &[2, 4], &[0.0; 8])?;
@@ -449,7 +450,6 @@ mod tests {
                 assert!(matches!(error, tenferro_ad::Error::TensorRuntime(_)));
                 Ok::<(), tenferro_ad::Error>(())
             })
-            .unwrap()
             .unwrap();
     }
 }

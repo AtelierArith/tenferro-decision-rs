@@ -3,16 +3,15 @@
 //! Raw-stage parity gate. Explicit execution requires CUDA and NVRTC; absence
 //! is a failure, never a skipped successful parity result.
 
+use tenferro_gated_delta::cuda::driver::with_cuda_exec_session;
 use tenferro_gated_delta::{
     DeltaScanInputs,
     cuda::{CudaKernels, CudaStageRun, RecurrentGeometry},
     delta_scan_reference,
     ops::{l2_normalize, sigmoid, silu, softplus},
 };
-use tenferro_gpu::cuda::{
-    CudaBackend, CudaDeviceId, download_tensor, upload_tensor, with_cuda_exec_session,
-};
-use tenferro_tensor::{BackendSessionHost, Tensor};
+use tenferro_gpu::cuda::{CudaDeviceId, CudaEngine, download_tensor, upload_tensor};
+use tenferro_tensor::Tensor;
 
 fn values(count: usize, salt: usize) -> Vec<f32> {
     (0..count)
@@ -45,8 +44,7 @@ impl Drop for CudaScanResources {
 #[test]
 #[ignore = "requires CUDA hardware and NVRTC; run explicitly with --ignored"]
 fn recurrent_stages_match_cpu_at_boundaries_and_grouped_heads() {
-    let mut backend =
-        CudaBackend::new(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
+    let mut engine = CudaEngine::open(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
     let arch = std::env::var("TENFERRO_CUDA_ARCH").unwrap_or_else(|_| "compute_70".into());
     for (kd, vd, kh, vh) in [(1, 1, 1, 1), (33, 37, 2, 4), (256, 128, 1, 2)] {
         for length in [1usize, 63, 64, 65, 127, 128, 129] {
@@ -113,7 +111,7 @@ fn recurrent_stages_match_cpu_at_boundaries_and_grouped_heads() {
             }
             let upload = |shape: Vec<usize>, data: Vec<f32>| {
                 let host = Tensor::from_vec_col_major(shape, data).unwrap();
-                upload_tensor(backend.runtime(), &host)
+                upload_tensor(engine.runtime(), &host)
                     .unwrap()
                     .into_typed::<f32>()
                     .unwrap()
@@ -129,40 +127,32 @@ fn recurrent_stages_match_cpu_at_boundaries_and_grouped_heads() {
                 upload(vec![vd], norm),
             ];
             let geometry = RecurrentGeometry::new(length, kd, vd, kh, vh, taps).unwrap();
-            let output = backend
-                .with_backend_session(|session| {
-                    with_cuda_exec_session(session, |cuda| {
-                        cuda.with_raw("cuda_stage_parity", |raw| {
-                            let kernels = CudaKernels::compile(raw, &arch)?;
-                            let outputs = [
-                                raw.alloc_output::<f32>(&[length, channels])?,
-                                raw.alloc_output::<f32>(&[length, vh * vd])?,
-                                raw.alloc_output::<f32>(&[length, vh * vd])?,
-                            ];
-                            // SAFETY: all uploads/allocations are distinct, and
-                            // ownership prevents conflicting accesses until finish.
-                            let pending = unsafe {
-                                CudaStageRun::enqueue(
-                                    raw, kernels, &geometry, inputs, outputs, 1e-5,
-                                )?
-                            };
-                            let (kernels, inputs, outputs) = pending.finish()?;
-                            // Reuse the loaded module and all workspaces. A second
-                            // scan must restart its recurrent state and match the oracle.
-                            let pending = unsafe {
-                                CudaStageRun::enqueue(
-                                    raw, kernels, &geometry, inputs, outputs, 1e-5,
-                                )?
-                            };
-                            let (_, _, [_, _, out]) = pending.finish()?;
-                            Ok(Tensor::from_typed(out))
-                        })
-                    })
-                    .expect("CUDA execution session")
+            let output = with_cuda_exec_session(&mut engine, |cuda| {
+                cuda.with_raw("cuda_stage_parity", |raw| {
+                    let kernels = CudaKernels::compile(raw, &arch)?;
+                    let outputs = [
+                        raw.alloc_output::<f32>(&[length, channels])?,
+                        raw.alloc_output::<f32>(&[length, vh * vd])?,
+                        raw.alloc_output::<f32>(&[length, vh * vd])?,
+                    ];
+                    // SAFETY: all uploads/allocations are distinct, and
+                    // ownership prevents conflicting accesses until finish.
+                    let pending = unsafe {
+                        CudaStageRun::enqueue(raw, kernels, &geometry, inputs, outputs, 1e-5)?
+                    };
+                    let (kernels, inputs, outputs) = pending.finish()?;
+                    // Reuse the loaded module and all workspaces. A second
+                    // scan must restart its recurrent state and match the oracle.
+                    let pending = unsafe {
+                        CudaStageRun::enqueue(raw, kernels, &geometry, inputs, outputs, 1e-5)?
+                    };
+                    let (_, _, [_, _, out]) = pending.finish()?;
+                    Ok(Tensor::from_typed(out))
                 })
-                .unwrap()
-                .unwrap();
-            let downloaded = download_tensor(backend.runtime(), &output).unwrap();
+            })
+            .expect("CUDA execution session")
+            .unwrap();
+            let downloaded = download_tensor(engine.runtime(), &output).unwrap();
             let actual = downloaded.as_slice::<f32>().unwrap();
             assert_eq!(actual.len(), expected.len());
             for (index, (&actual, &expected)) in actual.iter().zip(&expected).enumerate() {
@@ -179,8 +169,7 @@ fn recurrent_stages_match_cpu_at_boundaries_and_grouped_heads() {
 #[ignore = "requires CUDA hardware and cuBLAS; run explicitly with --ignored"]
 fn native_unit_lower_triangular_solve_supports_large_key_rhs() {
     use tenferro_linalg::TensorLinalgExt;
-    let mut backend =
-        CudaBackend::new(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
+    let mut engine = CudaEngine::open(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
     // Chunk width is the triangular-system dimension; key width is the RHS
     // column count and may exceed the recurrent kernel's register-state limit.
     let key_dim = 257;
@@ -201,19 +190,16 @@ fn native_unit_lower_triangular_solve_supports_large_key_rhs() {
         // the lower/unit flags must ignore both rather than solve a dense matrix.
         let matrix = Tensor::from_vec_col_major(vec![n, n], matrix).unwrap();
         let rhs = Tensor::from_vec_col_major(vec![n, key_dim], rhs).unwrap();
-        let matrix = upload_tensor(backend.runtime(), &matrix).unwrap();
-        let rhs = upload_tensor(backend.runtime(), &rhs).unwrap();
-        let solution = backend
-            .with_backend_session(|session| {
-                matrix.triangular_solve(&rhs, true, true, false, true, session)
-            })
-            .unwrap()
+        let matrix = upload_tensor(engine.runtime(), &matrix).unwrap();
+        let rhs = upload_tensor(engine.runtime(), &rhs).unwrap();
+        let solution = matrix
+            .triangular_solve(&rhs, true, true, false, true, &mut engine)
             .expect("CUDA unit triangular solve must be supported");
         assert!(
             solution.as_typed::<f32>().unwrap().host_data().is_err(),
             "native CUDA solve must return device storage"
         );
-        let solution = download_tensor(backend.runtime(), &solution).unwrap();
+        let solution = download_tensor(engine.runtime(), &solution).unwrap();
         let actual = solution.as_slice::<f32>().unwrap();
         assert_eq!(actual.len(), expected.len());
         for (&actual, &expected) in actual.iter().zip(&expected) {
@@ -226,8 +212,7 @@ fn native_unit_lower_triangular_solve_supports_large_key_rhs() {
 #[ignore = "requires CUDA hardware and NVRTC; run explicitly with --ignored"]
 fn chunk_decay_matches_cpu_with_padding_and_underflow() {
     use tenferro_gated_delta::cuda::{ChunkDecayBuffers, ChunkDecayGeometry};
-    let mut backend =
-        CudaBackend::new(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
+    let mut engine = CudaEngine::open(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
     let arch = std::env::var("TENFERRO_CUDA_ARCH").unwrap_or_else(|_| "compute_70".into());
     let heads = 2;
     let chunk_size = 64usize;
@@ -270,7 +255,7 @@ fn chunk_decay_matches_cpu_with_padding_and_underflow() {
         let expected = [cumulative, beta, pair, tail, final_factor];
         let upload = |shape: Vec<usize>, data: Vec<f32>| {
             let host = Tensor::from_vec_col_major(shape, data).unwrap();
-            upload_tensor(backend.runtime(), &host)
+            upload_tensor(engine.runtime(), &host)
                 .unwrap()
                 .into_typed::<f32>()
                 .unwrap()
@@ -282,57 +267,55 @@ fn chunk_decay_matches_cpu_with_padding_and_underflow() {
             upload(vec![heads], bias),
         ];
         let geometry = ChunkDecayGeometry::new(length, heads, chunk_size).unwrap();
-        let outputs = backend
-            .with_backend_session(|session| {
-                with_cuda_exec_session(session, |cuda| {
-                    cuda.with_raw("cuda_chunk_decay", |raw| {
-                        let kernels = CudaKernels::compile(raw, &arch)?;
-                        let mut outputs = [
-                            raw.alloc_output::<f32>(&[length, heads])?,
-                            raw.alloc_output::<f32>(&[length, heads])?,
-                            raw.alloc_output::<f32>(&[chunk_size, chunk_size, chunks, heads])?,
-                            raw.alloc_output::<f32>(&[length, heads])?,
-                            raw.alloc_output::<f32>(&[chunks, heads])?,
-                        ];
-                        let mut retained = Vec::new();
-                        for tensor in inputs.iter().chain(outputs.iter()) {
-                            retained.push(raw.retain_tensor(tensor, "cuda_chunk_decay")?);
-                        }
-                        let [cumulative, beta, pair, tail, final_factor] = &mut outputs;
-                        // SAFETY: distinct owned uploads/outputs stay retained through
-                        // synchronization, including when enqueueing returns an error.
-                        let launched = unsafe {
-                            kernels.enqueue_chunk_decay(
-                                raw,
-                                &geometry,
-                                ChunkDecayBuffers {
-                                    a: &inputs[0],
-                                    b: &inputs[1],
-                                    a_decay: &inputs[2],
-                                    dt_bias: &inputs[3],
-                                    cumulative,
-                                    beta,
-                                    pair,
-                                    tail,
-                                    final_factor,
-                                },
-                            )
-                        };
-                        if let Err(error) = raw.synchronize() {
-                            std::mem::forget(retained);
-                            std::mem::forget(kernels);
-                            return Err(error);
-                        }
-                        launched?;
-                        Ok(outputs.map(Tensor::from_typed))
-                    })
-                })
-                .expect("CUDA execution session")
+        let outputs = with_cuda_exec_session(&mut engine, |cuda| {
+            cuda.with_raw("cuda_chunk_decay", |raw| {
+                let kernels = CudaKernels::compile(raw, &arch)?;
+                let mut outputs = [
+                    raw.alloc_output::<f32>(&[length, heads])?,
+                    raw.alloc_output::<f32>(&[length, heads])?,
+                    raw.alloc_output::<f32>(&[chunk_size, chunk_size, chunks, heads])?,
+                    raw.alloc_output::<f32>(&[length, heads])?,
+                    raw.alloc_output::<f32>(&[chunks, heads])?,
+                ];
+                let mut retained = Vec::new();
+                for tensor in inputs.iter().chain(outputs.iter()) {
+                    // SAFETY: the uploads and outputs stay alive in this
+                    // scope through the final synchronization.
+                    retained.push(unsafe { raw.retain_tensor(tensor, "cuda_chunk_decay")? });
+                }
+                let [cumulative, beta, pair, tail, final_factor] = &mut outputs;
+                // SAFETY: distinct owned uploads/outputs stay retained through
+                // synchronization, including when enqueueing returns an error.
+                let launched = unsafe {
+                    kernels.enqueue_chunk_decay(
+                        raw,
+                        &geometry,
+                        ChunkDecayBuffers {
+                            a: &inputs[0],
+                            b: &inputs[1],
+                            a_decay: &inputs[2],
+                            dt_bias: &inputs[3],
+                            cumulative,
+                            beta,
+                            pair,
+                            tail,
+                            final_factor,
+                        },
+                    )
+                };
+                if let Err(error) = raw.synchronize() {
+                    std::mem::forget(retained);
+                    std::mem::forget(kernels);
+                    return Err(error);
+                }
+                launched?;
+                Ok(outputs.map(Tensor::from_typed))
             })
-            .unwrap()
-            .unwrap();
+        })
+        .expect("CUDA execution session")
+        .unwrap();
         for (index, (output, expected)) in outputs.iter().zip(&expected).enumerate() {
-            let host = download_tensor(backend.runtime(), output).unwrap();
+            let host = download_tensor(engine.runtime(), output).unwrap();
             let actual = host.as_slice::<f32>().unwrap();
             assert_eq!(actual.len(), expected.len());
             for (&actual, &expected) in actual.iter().zip(expected) {
@@ -354,8 +337,8 @@ fn cuda_decay_preparation_feeds_native_large_key_scan_on_one_session() {
     use tenferro_gated_delta::cuda::{ChunkDecayBuffers, ChunkDecayGeometry};
     use tenferro_tensor::TensorRead;
 
-    let backend = CudaBackend::new(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
-    let runtime = EagerRuntime::with_cuda_backend(backend.clone()).unwrap();
+    let mut engine = CudaEngine::open(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
+    let runtime = EagerRuntime::new().unwrap();
     let arch = std::env::var("TENFERRO_CUDA_ARCH").unwrap_or_else(|_| "compute_70".into());
     let length = 65usize;
     let kd = 257;
@@ -397,7 +380,7 @@ fn cuda_decay_preparation_feeds_native_large_key_scan_on_one_session() {
     });
     let upload = |shape, data| {
         let host = Tensor::from_vec_col_major(shape, data).unwrap();
-        upload_tensor(backend.runtime(), &host)
+        upload_tensor(engine.runtime(), &host)
             .unwrap()
             .into_typed::<f32>()
             .unwrap()
@@ -408,9 +391,9 @@ fn cuda_decay_preparation_feeds_native_large_key_scan_on_one_session() {
         upload(vec![1], decay.to_vec()),
         upload(vec![1], bias.to_vec()),
     ];
-    let runtime_handle = backend.runtime().clone();
+    let runtime_handle = engine.runtime().clone();
     let output = runtime
-        .with_eager_session(move |session| {
+        .with_eager_session(&mut engine, move |session| {
             let mut resources = CudaScanResources {
                 runtime: runtime_handle,
                 inputs: Some(inputs),
@@ -556,9 +539,8 @@ fn cuda_decay_preparation_feeds_native_large_key_scan_on_one_session() {
             resources.completed = true;
             computed
         })
-        .unwrap()
         .unwrap();
-    let output = download_tensor(backend.runtime(), &output).unwrap();
+    let output = download_tensor(engine.runtime(), &output).unwrap();
     let actual = output.as_slice::<f32>().unwrap();
     assert_eq!(actual.len(), expected.len());
     for row in 0..vd {
@@ -638,8 +620,8 @@ fn request_composition_gpu_parity(mixed: bool, key_dim: usize) {
             out_proj: values(width * cfg.hidden, seed + 6),
         }
     }
-    let backend = CudaBackend::new(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
-    let runtime = tenferro_ad::EagerRuntime::with_cuda_backend(backend.clone()).unwrap();
+    let mut engine = CudaEngine::open(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
+    let runtime = tenferro_ad::EagerRuntime::new().unwrap();
     let arch = std::env::var("TENFERRO_CUDA_ARCH").unwrap_or_else(|_| "compute_70".into());
     let cfg = GatedDeltaConfig {
         hidden: 8,
@@ -678,7 +660,7 @@ fn request_composition_gpu_parity(mixed: bool, key_dim: usize) {
                 expected.extend([first, second]);
             }
             let outputs = runtime
-                .with_eager_session(|session| {
+                .with_eager_session(&mut engine, |session| {
                     let mut cache = TensorCache::new();
                     let first_weights =
                         prepare_tensor_weights(session, &cfg, &first_weights, &mut cache)?;
@@ -795,10 +777,9 @@ fn request_composition_gpu_parity(mixed: bool, key_dim: usize) {
                     .expect("CUDA execution session")?;
                     Ok::<_, tenferro_ad::Error>(copies)
                 })
-                .unwrap()
                 .unwrap();
             for (output, expected) in outputs.iter().zip(&expected) {
-                let output = download_tensor(backend.runtime(), output).unwrap();
+                let output = download_tensor(engine.runtime(), output).unwrap();
                 let actual = output.as_slice::<f32>().unwrap();
                 for row in 0..cfg.hidden {
                     for token in 0..length {
@@ -823,8 +804,8 @@ fn full_layer_gpu_parity(path: FullLayerPath) {
     };
     use tenferro_infer::TensorCache;
 
-    let backend = CudaBackend::new(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
-    let runtime = tenferro_ad::EagerRuntime::with_cuda_backend(backend.clone()).unwrap();
+    let mut engine = CudaEngine::open(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
+    let runtime = tenferro_ad::EagerRuntime::new().unwrap();
     let cases = if path == FullLayerPath::RawChunked {
         vec![
             (7, 2, 4, vec![1usize, 63, 64, 65]),
@@ -869,10 +850,9 @@ fn full_layer_gpu_parity(path: FullLayerPath) {
         };
         let mut cache = TensorCache::new();
         let prepared = runtime
-            .with_eager_session(|session| {
+            .with_eager_session(&mut engine, |session| {
                 prepare_tensor_weights(session, &cfg, &weights, &mut cache)
             })
-            .unwrap()
             .unwrap();
         assert!(prepared.qkv.tensor_read().backend_family().is_some());
         for length in lengths {
@@ -918,7 +898,7 @@ fn full_layer_gpu_parity(path: FullLayerPath) {
                     }
                 }
                 let output = runtime
-                    .with_eager_session(|session| {
+                    .with_eager_session(&mut engine, |session| {
                         let x = session.constant_from_host(Tensor::from_vec_col_major(
                             vec![cfg.hidden, length],
                             column_major,
@@ -993,9 +973,8 @@ fn full_layer_gpu_parity(path: FullLayerPath) {
                         .expect("CUDA execution session")?;
                         Ok::<_, tenferro_ad::Error>(result)
                     })
-                    .unwrap()
                     .unwrap();
-                let host = download_tensor(backend.runtime(), &output).unwrap();
+                let host = download_tensor(engine.runtime(), &output).unwrap();
                 let actual = host.as_slice::<f32>().unwrap();
                 for h in 0..cfg.hidden {
                     for t in 0..result_length {

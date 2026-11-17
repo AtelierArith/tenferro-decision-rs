@@ -8,7 +8,7 @@ use jeff_infer::model::{
     forward_reference, forward_reference_with, forward_tenferro, forward_tenferro_with,
 };
 use tenferro_ad::EagerRuntime;
-use tenferro_cpu::CpuBackend;
+use tenferro_cpu::CpuEngine;
 use tenferro_gated_delta::{Algorithm, GatedDeltaConfig, GatedDeltaWeights, GatedDeltaWorkspace};
 
 struct Lcg(u64);
@@ -163,11 +163,13 @@ fn full_only_two_tokens_all_active() {
 }
 
 fn compare(cfg: &JeffConfig, weights: &JeffWeights, ids: &[i64], mask: &[f32], tol: f32) {
+    let mut engine = CpuEngine::serial();
     let reference = forward_reference(cfg, weights, ids, mask).unwrap();
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let runtime = EagerRuntime::new().unwrap();
     let tenferro = runtime
-        .with_eager_session(|session| forward_tenferro(session, cfg, weights, ids, mask))
-        .unwrap()
+        .with_eager_session(&mut engine, |session| {
+            forward_tenferro(session, cfg, weights, ids, mask)
+        })
         .unwrap();
     let mut max_diff = 0.0f32;
     for (a, b) in reference.iter().zip(&tenferro) {
@@ -280,19 +282,19 @@ fn host_workspace_reuse_matches_fresh_forward() {
 
 #[test]
 fn tenferro_workspace_reuse_matches_reference() {
+    let mut engine = CpuEngine::serial();
     let cfg = config();
     let weights = build_weights(&cfg, 12, 3, 11);
     let ids = vec![3_i64, 1, 4, 1, 5, 2];
     let mask = vec![1.0f32, 1.0, 0.0, 1.0, 1.0, 1.0];
     let reference = forward_reference(&cfg, &weights, &ids, &mask).unwrap();
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let runtime = EagerRuntime::new().unwrap();
     let mut workspace = GatedDeltaWorkspace::new();
     for _ in 0..2 {
         let tenferro = runtime
-            .with_eager_session(|session| {
+            .with_eager_session(&mut engine, |session| {
                 forward_tenferro_with(&mut workspace, session, &cfg, &weights, &ids, &mask)
             })
-            .unwrap()
             .unwrap();
         let max_diff = reference
             .iter()

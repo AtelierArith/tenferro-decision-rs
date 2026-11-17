@@ -2,12 +2,13 @@
 //! independent Rust references.
 
 use tenferro_ad::{EagerRuntime, EagerSession, Tensor};
-use tenferro_cpu::CpuBackend;
+use tenferro_cpu::CpuEngine;
 use tenferro_infer as ti;
 
 fn run<R: Send>(f: impl FnOnce(&mut EagerSession<'_>) -> ti::Result<R> + Send) -> R {
-    let ctx = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
-    ctx.with_eager_session(f).unwrap().unwrap()
+    let ctx = EagerRuntime::new().unwrap();
+    let mut engine = CpuEngine::serial();
+    ctx.with_eager_session(&mut engine, f).unwrap()
 }
 
 fn vec1(values: &[f64]) -> Tensor {

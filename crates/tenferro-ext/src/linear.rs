@@ -13,12 +13,12 @@ use tenferro_ad::extension::{
     EagerExtensionTarget, apply_eager_with_targeted_extension_in_session,
 };
 use tenferro_ad::{EagerSession, EagerTensor};
-use tenferro_cpu::CpuBackend;
+use tenferro_cpu::CpuEngine;
 use tenferro_runtime::extension::{
     ExtensionOp, ExtensionShapeContext, SymDim, define_extension_runtime,
 };
 use tenferro_runtime::{ErrorPhase, ExtensionModule};
-use tenferro_tensor::{BackendSession, DType, Tensor, TensorBackend, TensorRead};
+use tenferro_tensor::{DType, Engine, Tensor, TensorRead};
 
 /// Stable family identifier for the `linear` extension op.
 pub const LINEAR_FAMILY_ID: &str = "tenferro-decision.linear.v1";
@@ -76,7 +76,7 @@ impl ExtensionOp for LinearOp {
 
 fn execute_linear_in_session(
     _op: &LinearOp,
-    session: &mut dyn BackendSession,
+    session: &mut dyn Engine,
     _caches: &mut tenferro_runtime::ExtensionCacheStore,
     inputs: &[TensorRead<'_>],
 ) -> tenferro_tensor::Result<Vec<Tensor>> {
@@ -124,8 +124,8 @@ fn execute_linear_in_session(
     Ok(vec![Tensor::from_vec_col_major(vec![length, out_dim], y)?])
 }
 
-fn linear_session_supported<B: TensorBackend + 'static>(_op: &LinearOp) -> bool {
-    std::any::TypeId::of::<B>() == std::any::TypeId::of::<CpuBackend>()
+fn linear_session_supported<B: Engine + 'static>(_op: &LinearOp) -> bool {
+    std::any::TypeId::of::<B>() == std::any::TypeId::of::<CpuEngine>()
 }
 
 define_extension_runtime! {
@@ -134,13 +134,13 @@ define_extension_runtime! {
     op_type = LinearOp,
     execute_in_session = execute_linear_in_session,
     session_supported = linear_session_supported,
-    backend_bound = TensorBackend,
+    backend_bound = Engine,
 }
 
 fn linear_extension_module(
     target: EagerExtensionTarget,
 ) -> tenferro_runtime::Result<Arc<dyn ExtensionModule>> {
-    extension_module::<CpuBackend>(target.engine_id).map_err(|source| {
+    extension_module::<CpuEngine>(target.engine_id).map_err(|source| {
         tenferro_runtime::Error::runtime_state_source(
             "tenferro-ext::linear",
             ErrorPhase::Execution,
@@ -191,14 +191,15 @@ mod tests {
 
     #[test]
     fn linear_matches_naive() {
+        let mut engine = CpuEngine::serial();
         let (length, in_dim, out_dim) = (4usize, 5usize, 3usize);
         let mut state = 13u64;
         let x: Vec<f32> = (0..length * in_dim).map(|_| lcg(&mut state)).collect();
         let w: Vec<f32> = (0..in_dim * out_dim).map(|_| lcg(&mut state)).collect();
 
-        let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+        let runtime = EagerRuntime::new().unwrap();
         let got = runtime
-            .with_eager_session(|session| {
+            .with_eager_session(&mut engine, |session| {
                 let x_t = session
                     .constant_from(Tensor::from_vec_col_major(vec![length, in_dim], x.clone())?)?;
                 let w_t = session.constant_from(Tensor::from_vec_col_major(
@@ -207,7 +208,6 @@ mod tests {
                 )?)?;
                 session.linear(&x_t, &w_t)
             })
-            .unwrap()
             .unwrap()
             .value()
             .unwrap()

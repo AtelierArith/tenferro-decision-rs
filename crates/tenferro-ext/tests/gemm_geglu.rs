@@ -1,12 +1,13 @@
 use tenferro_ad::{EagerRuntime, Tensor};
-use tenferro_cpu::CpuBackend;
+use tenferro_cpu::CpuEngine;
 use tenferro_ext::{
     EagerSessionGegluExt, EagerSessionGemmBiasExt, EagerSessionGemmExt, EagerSessionGemmGegluExt,
 };
 
 #[test]
 fn fused_projection_matches_separate_operations_for_strides_batches_and_bias() {
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let mut engine = CpuEngine::serial();
+    let runtime = EagerRuntime::new().unwrap();
     for (input, hidden, length, batch) in [
         (7usize, 5usize, 1usize, 1usize),
         (7, 5, 3, 2),
@@ -17,7 +18,7 @@ fn fused_projection_matches_separate_operations_for_strides_batches_and_bias() {
         for has_bias in [false, true] {
             for strided in [false, true] {
                 runtime
-                    .with_eager_session(|session| {
+                    .with_eager_session(&mut engine, |session| {
                         let data: Vec<f32> = (0..input * length * batch)
                             .map(|i| ((i % 23) as f32 - 11.) * 0.031)
                             .collect();
@@ -80,7 +81,6 @@ fn fused_projection_matches_separate_operations_for_strides_batches_and_bias() {
                         }
                         Ok::<_, tenferro_ad::Error>(())
                     })
-                    .unwrap()
                     .unwrap();
             }
         }
@@ -89,9 +89,10 @@ fn fused_projection_matches_separate_operations_for_strides_batches_and_bias() {
 
 #[test]
 fn fused_projection_rejects_dtype_width_and_bias_errors() {
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let mut engine = CpuEngine::serial();
+    let runtime = EagerRuntime::new().unwrap();
     runtime
-        .with_eager_session(|session| {
+        .with_eager_session(&mut engine, |session| {
             let x = session
                 .constant_from_host(Tensor::from_vec_col_major(vec![3, 2], vec![1.0f32; 6])?)?;
             let w = session
@@ -108,17 +109,17 @@ fn fused_projection_rejects_dtype_width_and_bias_errors() {
             assert!(session.gemm_geglu(&x, &w, None, 4).is_err());
             Ok::<_, tenferro_ad::Error>(())
         })
-        .unwrap()
         .unwrap();
 }
 
 #[test]
 fn retained_outputs_survive_workspace_growth_and_changed_inputs() {
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let mut engine = CpuEngine::serial();
+    let runtime = EagerRuntime::new().unwrap();
     let mut retained = Vec::new();
     for (length, factor) in [(1usize, 1.0f32), (17, -0.5), (3, 2.0)] {
         let values = runtime
-            .with_eager_session(|session| {
+            .with_eager_session(&mut engine, |session| {
                 let x = session.constant_from_host(Tensor::from_vec_col_major(
                     vec![3, length],
                     (0..3 * length)
@@ -138,18 +139,16 @@ fn retained_outputs_survive_workspace_growth_and_changed_inputs() {
                     .to_vec();
                 Ok::<_, tenferro_ad::Error>((fused, expected))
             })
-            .unwrap()
             .unwrap();
         retained.push(values);
     }
     for (output, expected) in retained {
         runtime
-            .with_eager_session(|session| {
+            .with_eager_session(&mut engine, |session| {
                 let actual = session.duplicate_value(&output)?;
                 assert_eq!(actual.as_slice::<f32>()?, expected);
                 Ok::<_, tenferro_ad::Error>(())
             })
-            .unwrap()
             .unwrap();
     }
 }

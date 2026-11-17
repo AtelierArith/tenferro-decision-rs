@@ -54,7 +54,7 @@ typed-decision-rs/
 - `docs/08_SOURCE_SNAPSHOT.md` — source repositories and observed implementation facts used for this design
 - `docs/09_JEFFCLIENT_ANALYSIS.md` — detailed analysis of the JeffClient.jl native inference path and its Rust/tenferro porting implications
 - `docs/10_DECISION_ABSTRACTION.md` — proposed `decision-core` surface and `DecisionEngine` seam for Laya-first integration of Jeff and Jev
-- `docs/11_TENFERRO_API_SURVEY.md` — tenferro-rs API coverage survey for the Laya/Jeff/tenferro-gated-delta crates at revision `471c4278`
+- `docs/11_TENFERRO_API_SURVEY.md` — tenferro-rs API coverage survey for the Laya/Jeff/tenferro-gated-delta crates at crates.io `0.11.0`
 - `docs/12_TENFERRO_GATED_DELTA.md` — design of the `tenferro-gated-delta` crate (causal conv, reference/chunked/recurrent Delta, CPU/CUDA, extension-op integration)
 - `docs/13_LAYA_INFER_DESIGN.md` — design of the `laya-infer` crate (ModernBERT encoder, decision head, tokenizer, prompt, calibration)
 - `docs/14_JEFF_INFER_DESIGN.md` — design of the `jeff-infer` crate (Qwen3.5 hybrid stack, readout, prepared-token inference)
@@ -68,6 +68,7 @@ typed-decision-rs/
 - `docs/22_CPU_KERNEL_OPTIMIZATION.md` — host GEMM/BLAS/SIMD analysis
 - `docs/23_TENFERRO_NATIVE.md` — tenferro-native forwarding, weight caching, backend selection
 - `docs/24_EAGER_OP_OVERHEAD.md` — eager op cost breakdown and the compiled (fused) path
+- `docs/25_TENFERRO_0_11_MIGRATION.md` — what moved between tenferro `0.7.1` and `0.11.0` and how the workspace adapted
 
 ## Recommended first milestone
 

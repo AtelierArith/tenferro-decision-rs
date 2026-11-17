@@ -9,7 +9,7 @@
 use std::time::Instant;
 
 use tenferro_ad::{EagerRuntime, Tensor as AdTensor};
-use tenferro_cpu::CpuBackend;
+use tenferro_cpu::CpuEngine;
 use tenferro_gated_delta::config::{Algorithm, GatedDeltaConfig};
 use tenferro_gated_delta::layer::GatedDeltaWeights;
 use tenferro_gated_delta::tensor_layer::{delta_layer_tenferro_native, prepare_tensor_weights};
@@ -17,7 +17,7 @@ use tenferro_gated_delta::traced_layer::{
     delta_layer_traced, input_mask, input_x, prepare_traced_weights,
 };
 use tenferro_infer::TensorCache;
-use tenferro_runtime::{DType, GraphCompiler, Runtime};
+use tenferro_runtime::{DType, ExecutionEngine, GraphCompiler, Runtime, TensorRead, TraceContext};
 
 /// Column-major copy of row-major `(rows, cols)` data.
 fn col_major(rows: usize, cols: usize, row_major: &[f32]) -> Vec<f32> {
@@ -43,6 +43,7 @@ impl Lcg {
 
 fn run_eager(
     runtime: &std::sync::Arc<EagerRuntime>,
+    engine: &mut CpuEngine,
     cfg: &GatedDeltaConfig,
     weights: &GatedDeltaWeights,
     x: &[f32],
@@ -51,7 +52,7 @@ fn run_eager(
 ) -> Vec<f32> {
     let length = mask.len();
     runtime
-        .with_eager_session(|session| {
+        .with_eager_session(engine, |session| {
             let tw = prepare_tensor_weights(session, cfg, weights, cache)?;
             let x = session.constant_from(AdTensor::from_vec_col_major(
                 vec![cfg.hidden, length],
@@ -61,7 +62,6 @@ fn run_eager(
             let host = session.duplicate_value(&out)?;
             Ok::<Vec<f32>, tenferro_ad::Error>(host.as_slice::<f32>()?.to_vec())
         })
-        .unwrap()
         .unwrap()
 }
 
@@ -102,20 +102,39 @@ fn main() {
     let iters = 5;
 
     // ---- eager tensor-native ----
-    let eager_runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let eager_runtime = EagerRuntime::new().unwrap();
+    let mut eager_engine = tenferro_infer::cpu_engine();
     let mut cache = TensorCache::new();
-    let eager = run_eager(&eager_runtime, &cfg, &weights, &x, &mask, &mut cache);
+    let eager = run_eager(
+        &eager_runtime,
+        &mut eager_engine,
+        &cfg,
+        &weights,
+        &x,
+        &mask,
+        &mut cache,
+    );
     let t = Instant::now();
     for _ in 0..iters {
-        let _ = run_eager(&eager_runtime, &cfg, &weights, &x, &mask, &mut cache);
+        let _ = run_eager(
+            &eager_runtime,
+            &mut eager_engine,
+            &cfg,
+            &weights,
+            &x,
+            &mask,
+            &mut cache,
+        );
     }
     let eager_ms = t.elapsed().as_secs_f64() * 1e3 / iters as f64;
 
     // ---- graph-compiled ----
-    let traced_weights = prepare_traced_weights(&cfg, &weights).unwrap();
-    let x_in = input_x(cfg.hidden, length).unwrap();
-    let mask_in = input_mask(length).unwrap();
-    let out = delta_layer_traced(&cfg, &traced_weights, &x_in, &mask_in, length).unwrap();
+    // Every traced value belongs to the context that issued it.
+    let trace = TraceContext::new();
+    let traced_weights = prepare_traced_weights(&trace, &cfg, &weights).unwrap();
+    let x_in = input_x(&trace, cfg.hidden, length).unwrap();
+    let mask_in = input_mask(&trace, length).unwrap();
+    let out = delta_layer_traced(&trace, &cfg, &traced_weights, &x_in, &mask_in, length).unwrap();
 
     let mut compiler = GraphCompiler::new();
     let t = Instant::now();
@@ -130,15 +149,15 @@ fn main() {
         .unwrap();
     let compile_ms = t.elapsed().as_secs_f64() * 1e3;
 
-    let mut builder = Runtime::builder();
-    let backend = CpuBackend::new();
+    let mut compiled_engine = tenferro_infer::cpu_engine();
     let engine_id = tenferro_cpu::runtime_engine_id().unwrap();
+    let mut builder = Runtime::builder();
     builder
-        .register_engine(tenferro_cpu::runtime_engine_registration(&backend).unwrap())
+        .register_engine(tenferro_cpu::runtime_engine_registration(&compiled_engine).unwrap())
         .unwrap();
     builder
         .install_extension_module(
-            tenferro_linalg::extension_module::<CpuBackend>(engine_id).unwrap(),
+            tenferro_linalg::extension_module::<CpuEngine>(engine_id).unwrap(),
         )
         .unwrap();
     let runtime = builder.build().unwrap();
@@ -147,15 +166,28 @@ fn main() {
         AdTensor::from_vec_col_major(vec![cfg.hidden, length], col_major(cfg.hidden, length, &x))
             .unwrap();
     let mask_t = AdTensor::from_vec_col_major(vec![length], mask.clone()).unwrap();
+    let reads = [
+        TensorRead::from_tensor(&x_t),
+        TensorRead::from_tensor(&mask_t),
+    ];
 
-    let _ = runtime.run_compiled(&program, &[&x_t, &mask_t]).unwrap();
+    let target = compiled_engine.target();
     let prepared = runtime
-        .prepare_compiled(&program, &[&x_t, &mask_t])
+        .prepare(&program, &reads, std::slice::from_ref(&target))
+        .unwrap();
+    runtime
+        .warm_up(&mut [&mut compiled_engine], &prepared, &reads)
         .unwrap();
     let t = Instant::now();
     let mut compiled_out = Vec::new();
     for _ in 0..iters {
-        compiled_out = runtime.run_prepared(&prepared, &[&x_t, &mask_t]).unwrap();
+        compiled_out = runtime
+            .run(&mut [&mut compiled_engine], &prepared, &reads)
+            .unwrap()
+            .into_iter()
+            .map(|output| output.into_tensor(&mut compiled_engine))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
     }
     let compiled_ms = t.elapsed().as_secs_f64() * 1e3 / iters as f64;
 
@@ -187,7 +219,8 @@ fn elementwise_bench(iters: usize) {
     let x = rng.fill(hidden * length);
     let x_t =
         AdTensor::from_vec_col_major(vec![hidden, length], col_major(hidden, length, &x)).unwrap();
-    let eager_runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let eager_runtime = EagerRuntime::new().unwrap();
+    let mut eager_engine = tenferro_infer::cpu_engine();
 
     for k in [1usize, 10, 100, 200] {
         let eager =
@@ -202,16 +235,21 @@ fn elementwise_bench(iters: usize) {
                 let host = session.duplicate_value(&y)?;
                 Ok(host.as_slice::<f32>()?.to_vec())
             };
-        let _ = eager_runtime.with_eager_session(eager).unwrap().unwrap();
+        let _ = eager_runtime
+            .with_eager_session(&mut eager_engine, eager)
+            .unwrap();
         let t = Instant::now();
         for _ in 0..iters {
-            let _ = eager_runtime.with_eager_session(eager).unwrap().unwrap();
+            let _ = eager_runtime
+                .with_eager_session(&mut eager_engine, eager)
+                .unwrap();
         }
         let eager_ms = t.elapsed().as_secs_f64() * 1e3 / iters as f64;
 
-        let x_in =
-            tenferro_runtime::TracedTensor::input_concrete_shape(DType::F32, &[hidden, length])
-                .unwrap();
+        let trace = TraceContext::new();
+        let x_in = trace
+            .input_concrete_shape(DType::F32, &[hidden, length])
+            .unwrap();
         let mut y = x_in.clone();
         for _ in 0..k {
             y = y.tanh().unwrap();
@@ -220,16 +258,23 @@ fn elementwise_bench(iters: usize) {
         let program = compiler
             .compile_with_input_specs(&y, &[(&x_in, DType::F32, &[hidden, length])])
             .unwrap();
+        let mut engine = tenferro_infer::cpu_engine();
         let mut builder = Runtime::builder();
         builder
-            .register_engine(tenferro_cpu::runtime_engine_registration(&CpuBackend::new()).unwrap())
+            .register_engine(tenferro_cpu::runtime_engine_registration(&engine).unwrap())
             .unwrap();
         let runtime = builder.build().unwrap();
-        let prepared = runtime.prepare_compiled(&program, &[&x_t]).unwrap();
-        let _ = runtime.run_prepared(&prepared, &[&x_t]).unwrap();
+        let reads = [TensorRead::from_tensor(&x_t)];
+        let target = engine.target();
+        let prepared = runtime
+            .prepare(&program, &reads, std::slice::from_ref(&target))
+            .unwrap();
+        runtime
+            .warm_up(&mut [&mut engine], &prepared, &reads)
+            .unwrap();
         let t = Instant::now();
         for _ in 0..iters {
-            let _ = runtime.run_prepared(&prepared, &[&x_t]).unwrap();
+            let _ = runtime.run(&mut [&mut engine], &prepared, &reads).unwrap();
         }
         let compiled_ms = t.elapsed().as_secs_f64() * 1e3 / iters as f64;
 

@@ -37,13 +37,13 @@ rayon = "1"
 # native OpenSSL; `blocking` matches the crate's synchronous transport trait.
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "http2", "blocking"] }
 
-# Pinned to the surveyed tenferro-rs revision (`11_TENFERRO_API_SURVEY.md`).
-# The crates.io 0.7.1 release predates this revision and differs in the
-# session-entry API (`with_backend_session` returns a nested `Result` here).
-# The MVP engine path uses the CPU provider only.
-tenferro-runtime = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb" }
-tenferro-cpu = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb" }
-tenferro-gpu = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb", default-features = false }
-tenferro-tensor = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb" }
-tenferro-ad = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb" }
-tenferro-linalg = { git = "https://github.com/tensor4all/tenferro-rs", rev = "471c4278dbc5a955b8a1664789c37e5d07e743cb" }
+# The tenferro-rs CPU stack, on the published 0.11 line
+# (`docs/agents/specs/docs/11_TENFERRO_API_SURVEY.md`). `native` is the default
+# CPU provider (faer); the MVP engine path uses that provider only. The GPU
+# crates stay opt-in (`cuda` feature) and default to no backend.
+tenferro-runtime = "0.11.0"
+tenferro-cpu = "0.11.0"
+tenferro-gpu = { version = "0.11.0", default-features = false }
+tenferro-tensor = "0.11.0"
+tenferro-ad = "0.11.0"
+tenferro-linalg = "0.11.0"

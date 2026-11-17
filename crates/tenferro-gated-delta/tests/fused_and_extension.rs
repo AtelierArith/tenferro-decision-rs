@@ -2,7 +2,7 @@
 //! `GatedDelta` extension op — all cross-checked against the host reference.
 
 use tenferro_ad::{EagerRuntime, Tensor};
-use tenferro_cpu::CpuBackend;
+use tenferro_cpu::CpuEngine;
 use tenferro_gated_delta::{
     Algorithm, AlgorithmChoice, BackendCaps, EagerSessionGatedDeltaExt, GatedDeltaConfig,
     GatedDeltaOp, GatedDeltaPlan, GatedDeltaWeights, GatedDeltaWorkspace, delta_layer_recurrent,
@@ -88,9 +88,10 @@ fn recurrent_matches_reference() {
 
 #[test]
 fn direct_entry_dispatches_on_plan() {
+    let mut engine = CpuEngine::serial();
     let (cfg, w, x, mask) = sample();
     let reference = delta_layer_reference(&cfg, &w, &x, &mask).unwrap();
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let runtime = EagerRuntime::new().unwrap();
     let mut ws = GatedDeltaWorkspace::new();
 
     for choice in [
@@ -100,8 +101,9 @@ fn direct_entry_dispatches_on_plan() {
     ] {
         let plan = GatedDeltaPlan::resolve(&cfg, choice, BackendCaps::cpu(), mask.len()).unwrap();
         let out = runtime
-            .with_eager_session(|session| gated_delta(session, &cfg, &w, &x, &mask, &plan, &mut ws))
-            .unwrap()
+            .with_eager_session(&mut engine, |session| {
+                gated_delta(session, &cfg, &w, &x, &mask, &plan, &mut ws)
+            })
             .unwrap();
         let tolerance = if choice == AlgorithmChoice::Chunked {
             5e-3
@@ -118,6 +120,7 @@ fn direct_entry_dispatches_on_plan() {
 
 #[test]
 fn extension_op_matches_reference() {
+    let mut engine = CpuEngine::serial();
     let (cfg, w, x, mask) = sample();
     let reference = delta_layer_reference(&cfg, &w, &x, &mask).unwrap();
     let length = mask.len();
@@ -126,9 +129,9 @@ fn extension_op_matches_reference() {
     let conv_channels = 2 * key_width + value_width;
 
     let op = GatedDeltaOp::from_config(&cfg);
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let runtime = EagerRuntime::new().unwrap();
     let out = runtime
-        .with_eager_session(|session| {
+        .with_eager_session(&mut engine, |session| {
             let x_t = session.constant_from(Tensor::from_vec_col_major(
                 vec![length, cfg.hidden],
                 x.clone(),
@@ -178,7 +181,6 @@ fn extension_op_matches_reference() {
                 ],
             )
         })
-        .unwrap()
         .unwrap();
     let values = out.value().unwrap();
     let col = values.as_slice::<f32>().unwrap();

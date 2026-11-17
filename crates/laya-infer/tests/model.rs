@@ -11,7 +11,7 @@ use laya_infer::model::{
     forward_encoder_tenferro, forward_reference, forward_tenferro, forward_tenferro_cached,
 };
 use tenferro_ad::EagerRuntime;
-use tenferro_cpu::CpuBackend;
+use tenferro_cpu::CpuEngine;
 
 /// Small deterministic PRNG so the tests do not pull in a dependency.
 struct Lcg(u64);
@@ -180,20 +180,20 @@ fn encoder_batch(length: usize, batch: usize) -> (Vec<i64>, Vec<bool>) {
 
 #[test]
 fn encoder_parity() {
+    let mut engine = CpuEngine::serial();
     let cfg = encoder_config();
     let mut rng = Lcg(11);
     let weights = encoder_weights(&cfg, &mut rng);
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let runtime = EagerRuntime::new().unwrap();
 
     for length in [1usize, 4] {
         for batch in [1usize, 2] {
             let (ids, mask) = encoder_batch(length, batch);
             let reference = forward_encoder_reference(&cfg, &weights, &ids, &mask, batch).unwrap();
             let tenferro = runtime
-                .with_eager_session(|session| {
+                .with_eager_session(&mut engine, |session| {
                     forward_encoder_tenferro(session, &cfg, &weights, &ids, &mask, batch)
                 })
-                .unwrap()
                 .unwrap();
             let diff = max_abs_diff(&reference, &tenferro);
             assert!(diff <= 2e-2, "L={length} B={batch} encoder max diff {diff}");
@@ -204,11 +204,12 @@ fn encoder_parity() {
 
 #[test]
 fn decision_model_parity() {
+    let mut engine = CpuEngine::serial();
     let cfg = encoder_config();
     let agent = agent_config();
     let mut rng = Lcg(29);
     let weights = laya_weights(&cfg, &agent, &mut rng);
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let runtime = EagerRuntime::new().unwrap();
 
     let length = 4;
     let batch = 2;
@@ -230,7 +231,7 @@ fn decision_model_parity() {
     )
     .unwrap();
     let (ten_logits, ten_action) = runtime
-        .with_eager_session(|session| {
+        .with_eager_session(&mut engine, |session| {
             forward_tenferro(
                 session,
                 &cfg,
@@ -243,7 +244,6 @@ fn decision_model_parity() {
                 &qtype,
             )
         })
-        .unwrap()
         .unwrap();
 
     assert_eq!(ref_logits.len(), 3 * batch);
@@ -256,11 +256,12 @@ fn decision_model_parity() {
 
 #[test]
 fn decision_model_cached_reuse_parity() {
+    let mut engine = CpuEngine::serial();
     let cfg = encoder_config();
     let agent = agent_config();
     let mut rng = Lcg(29);
     let weights = laya_weights(&cfg, &agent, &mut rng);
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let runtime = EagerRuntime::new().unwrap();
 
     let length = 4;
     let batch = 2;
@@ -285,7 +286,7 @@ fn decision_model_cached_reuse_parity() {
     let mut cache = TensorCache::new();
     for _ in 0..2 {
         let (logits, action) = runtime
-            .with_eager_session(|session| {
+            .with_eager_session(&mut engine, |session| {
                 forward_tenferro_cached(
                     session,
                     &mut cache,
@@ -299,7 +300,6 @@ fn decision_model_cached_reuse_parity() {
                     &qtype,
                 )
             })
-            .unwrap()
             .unwrap();
         assert!(max_abs_diff(&ref_logits, &logits) <= 2e-2);
         assert!(max_abs_diff(&ref_action, &action) <= 2e-2);
@@ -337,11 +337,12 @@ fn padded_markers_are_masked() {
 
 #[test]
 fn encoder_attention_gemm_tiles_match_host_with_sparse_masks_and_padding() {
+    let mut engine = CpuEngine::serial();
     let mut cfg = encoder_config();
     cfg.max_position_embeddings = 256;
     let mut rng = Lcg(67);
     let weights = encoder_weights(&cfg, &mut rng);
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let runtime = EagerRuntime::new().unwrap();
     for local_attention in [2usize, 128] {
         let mut cfg = cfg.clone();
         cfg.local_attention = local_attention;
@@ -355,10 +356,9 @@ fn encoder_attention_gemm_tiles_match_host_with_sparse_masks_and_padding() {
                 }
                 let expected = forward_encoder_reference(&cfg, &weights, &ids, &mask, 2).unwrap();
                 let actual = runtime
-                    .with_eager_session(|session| {
+                    .with_eager_session(&mut engine, |session| {
                         forward_encoder_tenferro(session, &cfg, &weights, &ids, &mask, 2)
                     })
-                    .unwrap()
                     .unwrap();
                 assert!(
                     actual

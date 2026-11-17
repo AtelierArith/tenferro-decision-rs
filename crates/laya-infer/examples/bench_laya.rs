@@ -14,7 +14,6 @@ use laya_infer::model::{
 };
 use serde_json::json;
 use tenferro_ad::EagerRuntime;
-use tenferro_cpu::CpuBackend;
 
 const BASE: [i64; 8] = [2, 100, 1000, 2000, 3000, 4000, 5, 3];
 
@@ -54,6 +53,7 @@ fn stats(mut samples: Vec<f64>) -> serde_json::Value {
 }
 
 fn main() {
+    let mut engine = tenferro_infer::cpu_engine();
     let args: Vec<String> = std::env::args().collect();
     let dir = args
         .get(1)
@@ -106,12 +106,12 @@ fn main() {
     // The tenferro path: rebuilding every weight tensor per call (fresh cache)
     // vs a reused weight cache. Timed on the smallest shape.
     let (ids, mask, marker_pos, marker_mask, qtype) = make_batch(8, 1);
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let runtime = EagerRuntime::new().unwrap();
 
-    let time = |cached: bool| -> serde_json::Value {
+    let mut time = |cached: bool| -> serde_json::Value {
         let mut cache = TensorCache::new();
         let _ = runtime
-            .with_eager_session(|session| {
+            .with_eager_session(&mut engine, |session| {
                 if cached {
                     forward_tenferro_cached(
                         session,
@@ -139,13 +139,12 @@ fn main() {
                     )
                 }
             })
-            .unwrap()
             .unwrap();
         let mut samples = Vec::new();
         for _ in 0..2 {
             let timer = Instant::now();
             let _ = runtime
-                .with_eager_session(|session| {
+                .with_eager_session(&mut engine, |session| {
                     if cached {
                         forward_tenferro_cached(
                             session,
@@ -173,7 +172,6 @@ fn main() {
                         )
                     }
                 })
-                .unwrap()
                 .unwrap();
             samples.push(timer.elapsed().as_secs_f64() * 1000.0);
         }

@@ -17,7 +17,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use tenferro_ad::EagerRuntime;
-use tenferro_cpu::CpuBackend;
+use tenferro_cpu::CpuEngine;
 
 use crate::calibration::{
     Calibration, LayaDecision, QType, action_probability, choice_answer, noul_answer, score_answer,
@@ -39,6 +39,8 @@ pub struct LayaEngine {
     batch_size: usize,
     /// The tenferro runtime the production forward runs on (CPU today).
     runtime: Arc<EagerRuntime>,
+    /// The CPU engine every eager session borrows (tenferro 0.11: caller-held).
+    engine: CpuEngine,
     /// Weight tensors cached across forwards (see [`TensorCache`]).
     cache: TensorCache,
 }
@@ -54,7 +56,7 @@ impl LayaEngine {
     ) -> Result<Self> {
         agent.validate(&encoder)?;
         weights.validate(&encoder, &agent)?;
-        let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).map_err(backend_error)?;
+        let runtime = EagerRuntime::new().map_err(backend_error)?;
         Ok(Self {
             encoder,
             agent,
@@ -63,6 +65,7 @@ impl LayaEngine {
             calibration,
             batch_size: 16,
             runtime,
+            engine: tenferro_infer::cpu_engine(),
             cache: TensorCache::new(),
         })
     }
@@ -210,7 +213,7 @@ impl LayaEngine {
         }
         let (logits, action) = self
             .runtime
-            .with_eager_session(|session| {
+            .with_eager_session(&mut self.engine, |session| {
                 forward_tenferro_cached(
                     session,
                     &mut self.cache,
@@ -224,7 +227,6 @@ impl LayaEngine {
                     &qtypes,
                 )
             })
-            .map_err(forward_error)?
             .map_err(forward_error)?;
         let action_count = self.agent.action_count();
         if logits.len() != slots * batch || action.len() != action_count * batch {

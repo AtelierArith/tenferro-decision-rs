@@ -1,17 +1,18 @@
 #![cfg(feature = "onednn")]
 use tenferro_ad::EagerRuntime;
-use tenferro_cpu::CpuBackend;
+use tenferro_cpu::CpuEngine;
 use tenferro_ext::{EagerSessionPreparedGemmExt, PreparedGemm};
 use tenferro_tensor::Tensor;
 
 #[test]
 fn prepared_op_matches_projection_bias_and_geglu_and_retains_outputs() {
+    let mut engine = CpuEngine::serial();
     let (input, output) = (7usize, 10usize);
     let weights: Vec<f32> = (0..input * output)
         .map(|i| (i % 13) as f32 * 0.03 - 0.2)
         .collect();
     let prepared = PreparedGemm::new(&weights, input, output).unwrap();
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let runtime = EagerRuntime::new().unwrap();
     let mut outputs = Vec::new();
     for (length, batch) in [(1, 1), (3, 2), (17, 2), (65, 1), (1, 1), (0, 2)] {
         for biased in [false, true] {
@@ -56,7 +57,7 @@ fn prepared_op_matches_projection_bias_and_geglu_and_retains_outputs() {
                     projected
                 };
                 let result = runtime
-                    .with_eager_session(|session| {
+                    .with_eager_session(&mut engine, |session| {
                         let x = session.constant_from(Tensor::from_vec_col_major(
                             vec![input, length, batch],
                             x.clone(),
@@ -71,7 +72,6 @@ fn prepared_op_matches_projection_bias_and_geglu_and_retains_outputs() {
                         };
                         session.prepared_gemm(&x, &prepared, bias.as_ref(), geglu)
                     })
-                    .unwrap()
                     .unwrap();
                 outputs.push((result, expected));
             }
@@ -90,10 +90,11 @@ fn prepared_op_matches_projection_bias_and_geglu_and_retains_outputs() {
 
 #[test]
 fn rejects_bad_dtype_dimensions_and_bias_before_execution() {
+    let mut engine = CpuEngine::serial();
     let prepared = PreparedGemm::new(&[1.; 6], 2, 3).unwrap();
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let runtime = EagerRuntime::new().unwrap();
     runtime
-        .with_eager_session(|session| {
+        .with_eager_session(&mut engine, |session| {
             let x =
                 session.constant_from(Tensor::from_vec_col_major(vec![2, 1], vec![1.0f32; 2])?)?;
             assert!(session.prepared_gemm(&x, &prepared, None, true).is_err());
@@ -120,17 +121,17 @@ fn rejects_bad_dtype_dimensions_and_bias_before_execution() {
             );
             Ok::<_, tenferro_ad::Error>(())
         })
-        .unwrap()
         .unwrap();
 }
 
 #[test]
 fn strided_and_rank_one_inputs_can_share_preparation_across_runtimes() {
+    let mut engine = CpuEngine::serial();
     let prepared = PreparedGemm::new(&[1., 2., 3., 4., 5., 6.], 3, 2).unwrap();
     for _ in 0..2 {
-        let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+        let runtime = EagerRuntime::new().unwrap();
         runtime
-            .with_eager_session(|session| {
+            .with_eager_session(&mut engine, |session| {
                 let base = session.constant_from(Tensor::from_vec_col_major(
                     vec![2, 3],
                     vec![1.0f32, 2., 3., 4., 5., 6.],
@@ -152,7 +153,6 @@ fn strided_and_rank_one_inputs_can_share_preparation_across_runtimes() {
                 );
                 Ok::<_, tenferro_ad::Error>(())
             })
-            .unwrap()
             .unwrap();
     }
 }

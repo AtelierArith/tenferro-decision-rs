@@ -1,20 +1,20 @@
 //! Numerical tests for the self-hosted `erf` extension op and exact GELU.
 
 use tenferro_ad::{EagerRuntime, EagerSession, EagerTensor, Tensor};
-use tenferro_cpu::CpuBackend;
+use tenferro_cpu::CpuEngine;
 use tenferro_ext::EagerSessionErfExt;
 
 fn run<F>(shape: Vec<usize>, data: Vec<f32>, f: F) -> Vec<f32>
 where
     F: FnOnce(&mut EagerSession<'_>, &EagerTensor) -> tenferro_ad::Result<EagerTensor> + Send,
 {
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let mut engine = CpuEngine::serial();
+    let runtime = EagerRuntime::new().unwrap();
     let out = runtime
-        .with_eager_session(|s| {
+        .with_eager_session(&mut engine, |s| {
             let x = s.constant_from(Tensor::from_vec_col_major(shape, data)?)?;
             f(s, &x)
         })
-        .unwrap()
         .unwrap();
     out.value().unwrap().as_slice::<f32>().unwrap().to_vec()
 }
@@ -24,7 +24,7 @@ fn erf_matches_mlx_reference_values() {
     let values = run(
         vec![7],
         vec![-3.0f32, -1.0, -0.5, 0.0, 0.5, 1.0, 3.0],
-        |s, x| s.erf(x),
+        |s, x| s.erf_ext(x),
     );
     // MLX `erff` (mathfns.jl) values.
     let expected = [
@@ -104,14 +104,14 @@ fn native_erf_preserves_special_values_and_signed_zero() {
 
 #[test]
 fn native_erf_f64_matches_cpu_extension() {
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let mut engine = CpuEngine::serial();
+    let runtime = EagerRuntime::new().unwrap();
     let input: Vec<f64> = (-1000..=1000).map(|i| i as f64 * 0.006).collect();
     let (native, cpu) = runtime
-        .with_eager_session(|s| {
+        .with_eager_session(&mut engine, |s| {
             let x = s.constant_from(Tensor::from_vec_col_major(vec![input.len()], input)?)?;
-            Ok::<_, tenferro_ad::Error>((tenferro_ext::erf_tensor_native(s, &x)?, s.erf(&x)?))
+            Ok::<_, tenferro_ad::Error>((tenferro_ext::erf_tensor_native(s, &x)?, s.erf_ext(&x)?))
         })
-        .unwrap()
         .unwrap();
     let native = native.value().unwrap();
     let cpu = cpu.value().unwrap();
@@ -146,6 +146,7 @@ fn native_gelu_matches_cpu_erf_form() {
 
 #[test]
 fn cached_native_gelu_reuses_constants_across_changed_inputs_and_runtime() {
+    let mut engine = CpuEngine::serial();
     let runtimes = [EagerRuntime::new().unwrap(), EagerRuntime::new().unwrap()];
     let mut cache = tenferro_infer::TensorCache::new();
     let mut retained = Vec::new();
@@ -153,7 +154,7 @@ fn cached_native_gelu_reuses_constants_across_changed_inputs_and_runtime() {
     for runtime in &runtimes {
         for shift in [0.0f32, 0.25, -0.5] {
             let (cached, plain) = runtime
-                .with_eager_session(|session| {
+                .with_eager_session(&mut engine, |session| {
                     let data = vec![-2.0 + shift, 0.0 + shift, 2.0 + shift, 3.0 + shift];
                     let x = session
                         .constant_from_host(Tensor::from_vec_col_major(vec![2, 2], data)?)?;
@@ -164,7 +165,6 @@ fn cached_native_gelu_reuses_constants_across_changed_inputs_and_runtime() {
                     let plain = tenferro_ext::gelu_erf_tensor_native(session, &x)?;
                     Ok::<_, tenferro_ad::Error>((output, plain))
                 })
-                .unwrap()
                 .unwrap();
             let actual = cached.value().unwrap().as_slice::<f32>().unwrap().to_vec();
             assert_eq!(actual, plain.value().unwrap().as_slice::<f32>().unwrap());

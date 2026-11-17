@@ -5,7 +5,9 @@
 //! Production dispatch, persistent workspaces and device parity are pending.
 //! Plan resolution continues to reject CUDA until those are implemented.
 
-use tenferro_gpu::cuda::raw::{Function, Module, NvrtcOptions, Session};
+pub mod driver;
+
+use driver::{CudaSession as Session, Function, Module, NvrtcOptions};
 
 /// CUDA source compiled by [`CudaKernels::compile`].
 pub const KERNEL_SOURCE: &str = include_str!("cuda/kernels.cu");
@@ -33,7 +35,7 @@ impl CudaKernels {
     /// its device. Compile once and retain this owner across requests.
     ///
     /// Returns tenferro's typed compiler/driver errors without a CPU fallback.
-    pub fn compile(session: &Session<'_>, arch: &str) -> tenferro_tensor::Result<Self> {
+    pub fn compile(session: &Session<'_, '_>, arch: &str) -> tenferro_tensor::Result<Self> {
         let options = NvrtcOptions {
             arch: Some(arch.into()),
             std: Some("c++14".into()),
@@ -41,7 +43,7 @@ impl CudaKernels {
         };
         let module = session.compile_nvrtc(KERNEL_SOURCE, &options)?;
         Ok(Self {
-            runtime: session.runtime_identity(),
+            runtime: session.runtime_identity().clone(),
             conv_silu: module.function("gated_delta_conv_silu")?,
             recurrent: module.function("gated_delta_recurrent")?,
             norm_gate: module.function("gated_delta_norm_gate")?,
@@ -120,8 +122,8 @@ impl ConvGeometry {
         [self.length, self.channels, self.taps]
     }
 
-    pub fn launch(&self) -> tenferro_gpu::cuda::raw::LaunchConfig {
-        tenferro_gpu::cuda::raw::LaunchConfig {
+    pub fn launch(&self) -> driver::LaunchConfig {
+        driver::LaunchConfig {
             grid: [self.grid_x, 1, 1],
             block: [256, 1, 1],
             shared_mem_bytes: 0,
@@ -138,14 +140,14 @@ impl CudaKernels {
     /// without conflicting accesses until stream completion, including on error.
     pub unsafe fn enqueue_conv(
         &self,
-        session: &Session<'_>,
+        session: &Session<'_, '_>,
         geometry: &ConvGeometry,
         input: &tenferro_tensor::TypedTensor<f32>,
         weight: &tenferro_tensor::TypedTensor<f32>,
         output: &mut tenferro_tensor::TypedTensor<f32>,
     ) -> tenferro_tensor::Result<()> {
-        use tenferro_gpu::cuda::raw::KernelArg;
-        if self.runtime != session.runtime_identity() {
+        use driver::KernelArg;
+        if self.runtime != *session.runtime_identity() {
             return Err(tenferro_tensor::Error::invalid_argument(
                 "gated_delta.cuda",
                 "runtime",
@@ -278,8 +280,8 @@ impl RecurrentGeometry {
     }
 
     /// Launch shapes for convolution, scan and normalization, respectively.
-    pub fn launches(&self) -> [tenferro_gpu::cuda::raw::LaunchConfig; 3] {
-        use tenferro_gpu::cuda::raw::LaunchConfig;
+    pub fn launches(&self) -> [driver::LaunchConfig; 3] {
+        use driver::LaunchConfig;
         let elements = (self.length * self.channels) as u32;
         let norm_threads = (self.value_dim as u32).next_power_of_two().clamp(32, 1024);
         [
@@ -348,13 +350,13 @@ impl CudaKernels {
     /// requires retaining/leaking resources rather than freeing them early.
     pub unsafe fn enqueue_stages(
         &self,
-        session: &Session<'_>,
+        session: &Session<'_, '_>,
         geometry: &RecurrentGeometry,
         buffers: StageBuffers<'_>,
         eps: f32,
     ) -> tenferro_tensor::Result<()> {
-        use tenferro_gpu::cuda::raw::KernelArg;
-        if self.runtime != session.runtime_identity() || !eps.is_finite() || eps <= 0.0 {
+        use driver::KernelArg;
+        if self.runtime != *session.runtime_identity() || !eps.is_finite() || eps <= 0.0 {
             return Err(tenferro_tensor::Error::invalid_argument(
                 "gated_delta.cuda",
                 "runtime/eps",
@@ -476,7 +478,7 @@ pub type OwnedStageOutputs = [tenferro_tensor::TypedTensor<f32>; 3];
 /// if completion cannot be established, resources are deliberately leaked.
 /// This is a low-level owner, not enabled full-layer production dispatch.
 pub struct CudaStageRun<'a, 's> {
-    session: &'a Session<'s>,
+    session: &'a Session<'a, 's>,
     kernels: Option<CudaKernels>,
     inputs: Option<OwnedStageInputs>,
     outputs: Option<OwnedStageOutputs>,
@@ -493,7 +495,7 @@ impl<'a, 's> CudaStageRun<'a, 's> {
     /// Resources must not have outstanding work on other streams. The owner
     /// manages their subsequent asynchronous lifetime, including enqueue errors.
     pub unsafe fn enqueue(
-        session: &'a Session<'s>,
+        session: &'a Session<'a, 's>,
         kernels: CudaKernels,
         geometry: &RecurrentGeometry,
         inputs: OwnedStageInputs,
@@ -610,8 +612,8 @@ impl ChunkDecayGeometry {
         [self.length, self.heads, self.chunk_size]
     }
 
-    pub fn launch(&self) -> tenferro_gpu::cuda::raw::LaunchConfig {
-        tenferro_gpu::cuda::raw::LaunchConfig {
+    pub fn launch(&self) -> driver::LaunchConfig {
+        driver::LaunchConfig {
             grid: [(self.heads * self.chunks) as u32, 1, 1],
             block: [128, 1, 1],
             shared_mem_bytes: 0,
@@ -642,12 +644,12 @@ impl CudaKernels {
     /// synchronization resources must remain retained rather than freed.
     pub unsafe fn enqueue_chunk_decay(
         &self,
-        session: &Session<'_>,
+        session: &Session<'_, '_>,
         geometry: &ChunkDecayGeometry,
         buffers: ChunkDecayBuffers<'_>,
     ) -> tenferro_tensor::Result<()> {
-        use tenferro_gpu::cuda::raw::KernelArg;
-        if self.runtime != session.runtime_identity() {
+        use driver::KernelArg;
+        if self.runtime != *session.runtime_identity() {
             return Err(tenferro_tensor::Error::invalid_argument(
                 "gated_delta.cuda",
                 "runtime",
