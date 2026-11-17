@@ -30,12 +30,12 @@ use tenferro_ad::extension::{
     EagerExtensionTarget, apply_eager_with_targeted_extension_in_session,
 };
 use tenferro_ad::{EagerSession, EagerTensor};
-use tenferro_cpu::CpuBackend;
+use tenferro_cpu::CpuEngine;
 use tenferro_runtime::extension::{
     ExtensionOp, ExtensionShapeContext, SymDim, define_extension_runtime,
 };
 use tenferro_runtime::{ErrorPhase, ExtensionModule};
-use tenferro_tensor::{BackendSession, DType, Tensor, TensorBackend, TensorRead};
+use tenferro_tensor::{DType, Engine, Tensor, TensorRead};
 
 /// Stable family identifier for the `gemm` extension op.
 pub const GEMM_FAMILY_ID: &str = "tenferro-decision.gemm.v1";
@@ -93,7 +93,7 @@ impl ExtensionOp for GemmOp {
 
 fn execute_gemm_in_session(
     _op: &GemmOp,
-    session: &mut dyn BackendSession,
+    session: &mut dyn Engine,
     _caches: &mut tenferro_runtime::ExtensionCacheStore,
     inputs: &[TensorRead<'_>],
 ) -> tenferro_tensor::Result<Vec<Tensor>> {
@@ -140,8 +140,8 @@ fn execute_gemm_in_session(
     Ok(vec![Tensor::from_vec_col_major(vec![out_dim, length], y)?])
 }
 
-fn gemm_session_supported<B: TensorBackend + 'static>(_op: &GemmOp) -> bool {
-    std::any::TypeId::of::<B>() == std::any::TypeId::of::<CpuBackend>()
+fn gemm_session_supported<B: Engine + 'static>(_op: &GemmOp) -> bool {
+    std::any::TypeId::of::<B>() == std::any::TypeId::of::<CpuEngine>()
 }
 
 define_extension_runtime! {
@@ -150,7 +150,7 @@ define_extension_runtime! {
     op_type = GemmOp,
     execute_in_session = execute_gemm_in_session,
     session_supported = gemm_session_supported,
-    backend_bound = TensorBackend,
+    backend_bound = Engine,
 }
 
 fn gemm_extension_module(
@@ -158,7 +158,7 @@ fn gemm_extension_module(
 ) -> tenferro_runtime::Result<Arc<dyn ExtensionModule>> {
     // This extension is CPU-only; model callers select native dot_general
     // on other backends.
-    extension_module::<CpuBackend>(target.engine_id).map_err(|source| {
+    extension_module::<CpuEngine>(target.engine_id).map_err(|source| {
         tenferro_runtime::Error::runtime_state_source(
             "tenferro-ext::gemm",
             ErrorPhase::Execution,
@@ -210,15 +210,16 @@ mod tests {
 
     #[test]
     fn gemm_matches_naive_loop() {
+        let mut engine = CpuEngine::serial();
         let (in_dim, out_dim, length) = (5usize, 3usize, 4usize);
         let mut state = 42u64;
         // Column-major logical `x (in, length)` and `weight (in, out)`.
         let x_data: Vec<f32> = (0..in_dim * length).map(|_| lcg(&mut state)).collect();
         let weight_data: Vec<f32> = (0..in_dim * out_dim).map(|_| lcg(&mut state)).collect();
 
-        let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+        let runtime = EagerRuntime::new().unwrap();
         let output = runtime
-            .with_eager_session(|session| {
+            .with_eager_session(&mut engine, |session| {
                 let x = session.constant_from(Tensor::from_vec_col_major(
                     vec![in_dim, length],
                     x_data.clone(),
@@ -229,7 +230,6 @@ mod tests {
                 )?)?;
                 session.gemm(&x, &weight)
             })
-            .unwrap()
             .unwrap();
         let got = output.value().unwrap().as_slice::<f32>().unwrap().to_vec();
 

@@ -6,9 +6,7 @@
 
 use bench_suite::BenchMetadata;
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
-use tenferro_cpu::CpuBackend;
 use tenferro_runtime::{Tensor, TensorSessionOpsExt};
-use tenferro_tensor::BackendSessionHost;
 
 fn matmul_benchmark(c: &mut Criterion) {
     // Attach build/machine provenance to the run; real runners write this next
@@ -24,12 +22,9 @@ fn matmul_benchmark(c: &mut Criterion) {
         let b = Tensor::from_vec_col_major(vec![size, size], vec![1.0_f32; size * size]).unwrap();
 
         group.bench_with_input(BenchmarkId::from_parameter(size), &size, |bencher, _| {
-            let mut backend = CpuBackend::new();
+            let mut engine = tenferro_infer::cpu_engine();
             bencher.iter(|| {
-                let out = backend
-                    .with_backend_session(|session| a.matmul(&b, session))
-                    .unwrap()
-                    .unwrap();
+                let out = a.matmul(&b, &mut engine).unwrap();
                 std::hint::black_box(out.shape());
             });
         });

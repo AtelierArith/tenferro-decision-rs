@@ -7,12 +7,12 @@ use tenferro_ad::extension::{
     EagerExtensionTarget, apply_eager_with_targeted_extension_in_session,
 };
 use tenferro_ad::{EagerSession, EagerTensor};
-use tenferro_cpu::CpuBackend;
+use tenferro_cpu::CpuEngine;
 use tenferro_runtime::extension::{
     ExtensionOp, ExtensionShapeContext, SymDim, define_extension_runtime,
 };
 use tenferro_runtime::{ErrorPhase, ExtensionCacheKey, ExtensionModule};
-use tenferro_tensor::{BackendSession, DType, Tensor, TensorBackend, TensorRead};
+use tenferro_tensor::{DType, Engine, Tensor, TensorRead};
 const FAMILY: &str = "tenferro-decision.packed_gemm.v1";
 fn error(field: &'static str, message: impl Into<String>) -> tenferro_tensor::Error {
     tenferro_tensor::Error::invalid_argument("tenferro-ext::packed_gemm", field, message)
@@ -120,7 +120,7 @@ impl ExtensionOp for PackedGemmOp {
 }
 fn execute(
     op: &PackedGemmOp,
-    session: &mut dyn BackendSession,
+    session: &mut dyn Engine,
     caches: &mut tenferro_runtime::ExtensionCacheStore,
     inputs: &[TensorRead<'_>],
 ) -> tenferro_tensor::Result<Vec<Tensor>> {
@@ -206,12 +206,12 @@ fn execute(
     };
     Ok(vec![Tensor::from_vec_col_major(shape, output)?])
 }
-fn supported<B: TensorBackend + 'static>(_: &PackedGemmOp) -> bool {
-    std::any::TypeId::of::<B>() == std::any::TypeId::of::<CpuBackend>()
+fn supported<B: Engine + 'static>(_: &PackedGemmOp) -> bool {
+    std::any::TypeId::of::<B>() == std::any::TypeId::of::<CpuEngine>()
 }
-define_extension_runtime! {runtime=PackedGemmRuntime,family_id=FAMILY,op_type=PackedGemmOp,execute_in_session=execute,session_supported=supported,backend_bound=TensorBackend,}
+define_extension_runtime! {runtime=PackedGemmRuntime,family_id=FAMILY,op_type=PackedGemmOp,execute_in_session=execute,session_supported=supported,backend_bound=Engine,}
 fn module(target: EagerExtensionTarget) -> tenferro_runtime::Result<Arc<dyn ExtensionModule>> {
-    extension_module::<CpuBackend>(target.engine_id).map_err(|source| {
+    extension_module::<CpuEngine>(target.engine_id).map_err(|source| {
         tenferro_runtime::Error::runtime_state_source(
             "tenferro-ext::packed_gemm",
             ErrorPhase::Execution,

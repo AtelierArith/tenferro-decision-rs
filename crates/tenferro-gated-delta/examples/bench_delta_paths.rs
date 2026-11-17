@@ -10,7 +10,6 @@
 use std::time::Instant;
 
 use tenferro_ad::{EagerRuntime, Tensor as AdTensor};
-use tenferro_cpu::CpuBackend;
 use tenferro_gated_delta::config::{Algorithm, GatedDeltaConfig};
 use tenferro_gated_delta::layer::GatedDeltaWeights;
 use tenferro_gated_delta::recurrent::delta_layer_recurrent;
@@ -43,6 +42,7 @@ impl Lcg {
 }
 
 fn main() {
+    let mut engine = tenferro_infer::cpu_engine();
     let cfg = GatedDeltaConfig {
         hidden: 1024,
         key_dim: 128,
@@ -72,7 +72,7 @@ fn main() {
         out_proj: rng.fill(value_width * cfg.hidden),
     };
 
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let runtime = EagerRuntime::new().unwrap();
     let iters = 10;
 
     println!("Gated DeltaNet layer: tensor-native (chunked) vs host recurrent");
@@ -93,7 +93,7 @@ fn main() {
         let mut cache = TensorCache::new();
         let mut run = || {
             runtime
-                .with_eager_session(|session| {
+                .with_eager_session(&mut engine, |session| {
                     let tw = prepare_tensor_weights(session, &cfg, &weights, &mut cache)?;
                     let x_t = session.constant_from(AdTensor::from_vec_col_major(
                         vec![cfg.hidden, length],
@@ -101,7 +101,6 @@ fn main() {
                     )?)?;
                     delta_layer_tenferro_native(session, &cfg, &tw, &x_t, &mask)
                 })
-                .unwrap()
                 .unwrap()
         };
         let _ = run();
@@ -115,7 +114,7 @@ fn main() {
         // are fed in the kernel's row-major layout, so nothing is transposed)
         let mut run_ext = || {
             runtime
-                .with_eager_session(|session| {
+                .with_eager_session(&mut engine, |session| {
                     let kw = prepare_kernel_weights(session, &cfg, &weights, &mut cache)?;
                     let x_t = session.constant_from(AdTensor::from_vec_col_major(
                         vec![length, cfg.hidden],
@@ -141,7 +140,6 @@ fn main() {
                         ],
                     )
                 })
-                .unwrap()
                 .unwrap()
         };
         let _ = run_ext();

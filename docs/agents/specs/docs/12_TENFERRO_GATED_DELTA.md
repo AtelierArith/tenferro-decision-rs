@@ -45,10 +45,11 @@ Out of scope:
 
 ## 2. Relationship to tenferro-rs
 
-- The crate depends on `tenferro-tensor` (storage, dtype, `BackendSession`),
-  `tenferro-runtime` (extension machinery), `tenferro-cpu`, `tenferro-linalg`
-  (for `triangular_solve`), and `tenferro-einsum` (contractions). CUDA support
-  is behind an optional `cuda` feature depending on `tenferro-gpu`.
+- The crate depends on `tenferro-tensor` (storage, dtype, the `Engine` trait),
+  `tenferro-runtime` (extension machinery), `tenferro-cpu` (the caller-held
+  `CpuEngine`), and `tenferro-linalg` (for `triangular_solve`). Contractions go
+  through `dot_general` rather than a separate einsum crate. CUDA support is
+  behind an optional `cuda` feature depending on `tenferro-gpu`.
 - It exposes operations through the extension API (`ExtensionOp` /
   `define_extension_runtime!`) so they can run in the direct, eager, and traced
   tiers, plus a convenience direct function.
@@ -124,7 +125,7 @@ pub struct GatedDeltaWorkspace { /* reusable buffers, one per concurrent context
 
 /// Convenience direct entry point.
 pub fn gated_delta<'a>(
-    session: &mut dyn BackendSession,
+    session: &mut dyn Engine,
     x: &Tensor,          // (hidden, L)
     mask: &Tensor,       // (L,) f32, 0/1
     weights: &GatedDeltaWeights<'a>,

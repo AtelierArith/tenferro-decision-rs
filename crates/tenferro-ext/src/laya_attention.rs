@@ -14,12 +14,12 @@ use tenferro_ad::extension::{
     EagerExtensionTarget, apply_eager_with_targeted_extension_in_session,
 };
 use tenferro_ad::{EagerSession, EagerTensor};
-use tenferro_cpu::CpuBackend;
+use tenferro_cpu::CpuEngine;
 use tenferro_runtime::extension::{
     ExtensionOp, ExtensionShapeContext, SymDim, define_extension_runtime,
 };
 use tenferro_runtime::{ErrorPhase, ExtensionModule};
-use tenferro_tensor::{BackendSession, DType, Tensor, TensorBackend, TensorRead};
+use tenferro_tensor::{DType, Engine, Tensor, TensorRead};
 
 /// Stable family identifier for the fused Laya attention block extension op.
 pub const LAYA_ATTENTION_BLOCK_FAMILY_ID: &str = "tenferro-decision.laya_attention_block.v1";
@@ -98,7 +98,7 @@ impl ExtensionOp for LayaAttentionBlockOp {
 
 fn execute_laya_attention_block_in_session(
     op: &LayaAttentionBlockOp,
-    session: &mut dyn BackendSession,
+    session: &mut dyn Engine,
     caches: &mut tenferro_runtime::ExtensionCacheStore,
     inputs: &[TensorRead<'_>],
 ) -> tenferro_tensor::Result<Vec<Tensor>> {
@@ -175,10 +175,8 @@ fn execute_laya_attention_block_in_session(
     )?])
 }
 
-fn laya_attention_block_session_supported<B: TensorBackend + 'static>(
-    _op: &LayaAttentionBlockOp,
-) -> bool {
-    std::any::TypeId::of::<B>() == std::any::TypeId::of::<CpuBackend>()
+fn laya_attention_block_session_supported<B: Engine + 'static>(_op: &LayaAttentionBlockOp) -> bool {
+    std::any::TypeId::of::<B>() == std::any::TypeId::of::<CpuEngine>()
 }
 
 define_extension_runtime! {
@@ -187,13 +185,13 @@ define_extension_runtime! {
     op_type = LayaAttentionBlockOp,
     execute_in_session = execute_laya_attention_block_in_session,
     session_supported = laya_attention_block_session_supported,
-    backend_bound = TensorBackend,
+    backend_bound = Engine,
 }
 
 fn laya_attention_block_extension_module(
     target: EagerExtensionTarget,
 ) -> tenferro_runtime::Result<Arc<dyn ExtensionModule>> {
-    extension_module::<CpuBackend>(target.engine_id).map_err(|source| {
+    extension_module::<CpuEngine>(target.engine_id).map_err(|source| {
         tenferro_runtime::Error::runtime_state_source(
             "tenferro-ext::laya_attention_block",
             ErrorPhase::Execution,

@@ -8,19 +8,22 @@
 //!
 //! The primitives take a borrowed [`tenferro_ad::EagerSession`] and
 //! [`tenferro_ad::EagerTensor`] values, so a model forward pass is one session
-//! entry. (`15_TENFERRO_INFER_DESIGN.md` sketched `&mut dyn BackendSession`;
-//! the eager session is the concrete tenferro surface that exposes the full op
-//! set, including `dot_general`, reductions, gather, slice, and concatenate.)
+//! entry that borrows the caller-held CPU engine. tenferro 0.11 stores no
+//! engine in the runtime, so [`cpu_engine`] builds the process-sized engine the
+//! engines keep for their lifetime.
 //!
-//! ## Known gap
+//! ## `erf`
 //!
-//! tenferro has no `erf` op; the exact erf-based GELU used by Laya comes from
-//! the self-hosted `tenferro-ext` extension op (`EagerSessionErfExt`).
+//! tenferro 0.11 ships a standard `erf`. The exact erf-based GELU used by Laya
+//! keeps the MLX-compatible `f32` kernel from the self-hosted `tenferro-ext`
+//! extension op (`EagerSessionErfExt::erf_ext` / `gelu_erf`) for parity with the
+//! Julia reference.
 
 pub mod activation;
 pub mod attention;
 pub mod cache;
 pub mod embedding;
+pub mod engine;
 pub mod input;
 pub mod linear;
 pub mod norm;
@@ -31,5 +34,7 @@ pub(crate) mod util;
 
 /// Reusable weight-tensor cache for the eager session.
 pub use cache::TensorCache;
+/// A CPU engine sized from `RAYON_NUM_THREADS` or the process parallelism.
+pub use engine::cpu_engine;
 /// Re-exported tenferro error and result types used by every primitive.
 pub use tenferro_ad::{Error, Result};

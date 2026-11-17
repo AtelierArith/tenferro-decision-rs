@@ -2,13 +2,13 @@
 
 use tenferro_ad::{EagerRuntime, Tensor};
 use tenferro_ext::{EagerSessionErfExt, cpu_extensions_supported};
-use tenferro_gpu::cuda::{CudaBackend, CudaDeviceId, download_tensor};
+use tenferro_gpu::cuda::{CudaDeviceId, CudaEngine, download_tensor};
 
 #[test]
 #[ignore = "requires CUDA hardware; run explicitly with --ignored"]
 fn cuda_erf_and_gelu_use_native_operations() {
-    let backend = CudaBackend::new(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
-    let runtime = EagerRuntime::with_cuda_backend(backend.clone()).unwrap();
+    let mut engine = CudaEngine::open(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
+    let runtime = EagerRuntime::new().unwrap();
     let input: Vec<f32> = (-2000..=2000).map(|i| i as f32 * 0.005).collect();
     let mut cache = tenferro_infer::TensorCache::new();
     let mut retained = Vec::new();
@@ -16,13 +16,13 @@ fn cuda_erf_and_gelu_use_native_operations() {
     for scale in [1.0f32, 0.5, -0.75] {
         let changed: Vec<f32> = input.iter().map(|x| x * scale).collect();
         let (erf, gelu, cached_erf, cached_gelu) = runtime
-            .with_eager_session(|session| {
+            .with_eager_session(&mut engine, |session| {
                 assert!(!cpu_extensions_supported(session));
                 let x = session.constant_from_host(Tensor::from_vec_col_major(
                     vec![changed.len()],
                     changed.clone(),
                 )?)?;
-                let erf = session.erf(&x)?;
+                let erf = session.erf_ext(&x)?;
                 let gelu = session.gelu_erf(&x)?;
                 let cached_erf = tenferro_ext::erf_tensor_native_cached(session, &mut cache, &x)?;
                 let cached_gelu =
@@ -34,7 +34,6 @@ fn cuda_erf_and_gelu_use_native_operations() {
                     session.duplicate_value(&cached_gelu)?,
                 ))
             })
-            .unwrap()
             .unwrap();
         if constants == 0 {
             constants = cache.len();
@@ -45,10 +44,10 @@ fn cuda_erf_and_gelu_use_native_operations() {
     }
     // Keep every output alive through later cache reuse. No intermediate download.
     for (input, erf, gelu, cached_erf, cached_gelu) in retained {
-        let erf = download_tensor(backend.runtime(), &erf).unwrap();
-        let gelu = download_tensor(backend.runtime(), &gelu).unwrap();
-        let cached_erf = download_tensor(backend.runtime(), &cached_erf).unwrap();
-        let cached_gelu = download_tensor(backend.runtime(), &cached_gelu).unwrap();
+        let erf = download_tensor(engine.runtime(), &erf).unwrap();
+        let gelu = download_tensor(engine.runtime(), &gelu).unwrap();
+        let cached_erf = download_tensor(engine.runtime(), &cached_erf).unwrap();
+        let cached_gelu = download_tensor(engine.runtime(), &cached_gelu).unwrap();
         assert_eq!(
             erf.as_slice::<f32>().unwrap(),
             cached_erf.as_slice::<f32>().unwrap()
@@ -80,12 +79,12 @@ fn cuda_erf_and_gelu_use_native_operations() {
 #[test]
 #[ignore = "requires CUDA hardware; run explicitly with --ignored"]
 fn cuda_output_boundary_downloads_strided_retained_outputs() {
-    let backend = CudaBackend::new(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
-    let runtime = EagerRuntime::with_cuda_backend(backend).unwrap();
+    let mut engine = CudaEngine::open(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
+    let runtime = EagerRuntime::new().unwrap();
     let mut retained = Vec::new();
     for factor in [1.0f32, -0.5, 3.0] {
         let output = runtime
-            .with_eager_session(|session| {
+            .with_eager_session(&mut engine, |session| {
                 let input = session.constant_from_host(Tensor::from_vec_col_major(
                     vec![2, 3],
                     vec![1.0f32, 2., 3., 4., 5., 6.],
@@ -95,14 +94,13 @@ fn cuda_output_boundary_downloads_strided_retained_outputs() {
                 let changed = session.mul(&input, &factor)?;
                 session.transpose(&changed, &[1, 0])
             })
-            .unwrap()
             .unwrap();
         retained.push((factor, output));
     }
     // Transfer only after subsequent requests, preserving all original outputs.
     for (factor, output) in retained {
         runtime
-            .with_eager_session(|session| {
+            .with_eager_session(&mut engine, |session| {
                 for _ in 0..2 {
                     let host = tenferro_infer::output::host_value(session, &output)?;
                     assert_eq!(host.shape(), &[3, 2]);
@@ -111,7 +109,6 @@ fn cuda_output_boundary_downloads_strided_retained_outputs() {
                 }
                 Ok::<_, tenferro_ad::Error>(())
             })
-            .unwrap()
             .unwrap();
     }
 }
@@ -119,8 +116,8 @@ fn cuda_output_boundary_downloads_strided_retained_outputs() {
 #[test]
 #[ignore = "requires CUDA hardware; run explicitly with --ignored"]
 fn cuda_native_masks_select_without_bool_leaf_import() {
-    let backend = CudaBackend::new(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
-    let runtime = EagerRuntime::with_cuda_backend(backend).unwrap();
+    let mut engine = CudaEngine::open(CudaDeviceId::from_ordinal(0)).expect("CUDA device required");
+    let runtime = EagerRuntime::new().unwrap();
     let mut retained = Vec::new();
     for keep in [
         [true, false, false, true, true, false],
@@ -128,7 +125,7 @@ fn cuda_native_masks_select_without_bool_leaf_import() {
         [true; 6],
     ] {
         let selected = runtime
-            .with_eager_session(|session| {
+            .with_eager_session(&mut engine, |session| {
                 let mask = tenferro_infer::input::bool_tensor_native(session, vec![2, 3], &keep)?;
                 assert_eq!(mask.dtype(), tenferro_ad::DType::Bool);
                 let values = session.constant_from_host(Tensor::from_vec_col_major(
@@ -140,14 +137,14 @@ fn cuda_native_masks_select_without_bool_leaf_import() {
                 let selected = session.where_select(&mask, &values, &replacement)?;
                 session.transpose(&selected, &[1, 0])
             })
-            .unwrap()
             .unwrap();
         retained.push((keep, selected));
     }
     for (keep, selected) in retained {
         let output = runtime
-            .with_eager_session(|session| tenferro_infer::output::host_value(session, &selected))
-            .unwrap()
+            .with_eager_session(&mut engine, |session| {
+                tenferro_infer::output::host_value(session, &selected)
+            })
             .unwrap();
         let expected: Vec<f32> = [0usize, 2, 4, 1, 3, 5]
             .into_iter()

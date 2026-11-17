@@ -1,10 +1,10 @@
 //! Owned Jeff CPU projections through tenferro's packed portable extension.
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use cpu_kernels::{PortableProjection, RowMajorProjection};
 use decision_core::{DecisionError, Result};
 use tenferro_ad::{EagerRuntime, Tensor};
-use tenferro_cpu::CpuBackend;
+use tenferro_cpu::CpuEngine;
 use tenferro_ext::{EagerSessionPackedGemmExt, PackedGemm};
 use tenferro_infer::TensorCache;
 
@@ -19,6 +19,8 @@ pub struct PreparedCpuModel {
     config: JeffConfig,
     weights: Arc<JeffWeights>,
     runtime: Arc<EagerRuntime>,
+    /// The CPU engine every eager session borrows. Clones share it.
+    engine: Arc<Mutex<CpuEngine>>,
     cache: TensorCache,
 }
 
@@ -31,11 +33,12 @@ impl PreparedCpuModel {
     /// Share immutable checkpoint ownership with an engine or benchmark.
     pub fn from_shared(config: JeffConfig, weights: Arc<JeffWeights>) -> Result<Self> {
         weights.validate(&config)?;
-        let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).map_err(backend_error)?;
+        let runtime = EagerRuntime::new().map_err(backend_error)?;
         Ok(Self {
             config,
             weights,
             runtime,
+            engine: Arc::new(Mutex::new(tenferro_infer::cpu_engine())),
             cache: TensorCache::new(),
         })
     }
@@ -50,6 +53,7 @@ impl PreparedCpuModel {
     ) -> Result<Vec<f32>> {
         let mut projection = SessionProjections {
             runtime: &self.runtime,
+            engine: &self.engine,
             cache: &mut self.cache,
         };
         forward_host_opt_with_projection(
@@ -72,6 +76,7 @@ fn backend_error(error: impl std::fmt::Display) -> DecisionError {
 
 struct SessionProjections<'a> {
     runtime: &'a Arc<EagerRuntime>,
+    engine: &'a Mutex<CpuEngine>,
     cache: &'a mut TensorCache,
 }
 
@@ -115,8 +120,12 @@ impl RowMajorProjection for SessionProjections<'_> {
                 PackedGemm::new(&transposed, input, output)
             })
             .map_err(|error| error.to_string())?;
+        let mut engine = self
+            .engine
+            .lock()
+            .map_err(|_| "poisoned engine".to_string())?;
         self.runtime
-            .with_eager_session(|session| -> tenferro_ad::Result<()> {
+            .with_eager_session(&mut *engine, |session| -> tenferro_ad::Result<()> {
                 let source = session.constant_from_host(Tensor::from_vec_col_major(
                     vec![input, length],
                     token_major(x, input, length),
@@ -134,7 +143,6 @@ impl RowMajorProjection for SessionProjections<'_> {
                 transpose_into(values, length, output, y);
                 Ok(())
             })
-            .map_err(|error| error.to_string())?
             .map_err(|error| error.to_string())
     }
 }

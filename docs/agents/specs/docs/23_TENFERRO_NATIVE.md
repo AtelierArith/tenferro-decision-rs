@@ -118,11 +118,11 @@ The host forwards remain the correctness oracle.
 
 Making the extension op execute through tenferro session ops is **not feasible**
 with the current extension API, but for a narrower reason than first recorded:
-`execute_in_session` receives `&mut dyn BackendSession`, which *does* expose the
-raw tensor ops (`TensorBackendOps`, including `dot_general`, elementwise,
-structural, reduction). What is out of reach is **linalg** — `triangular_solve`
-/ `solve` live on `EagerSessionLinalgExt` (an eager-session trait), not on
-`BackendSession` — and the composed `tenferro-infer` primitives (norm /
+`execute_in_session` receives `&mut dyn tenferro_tensor::Engine`, which *does*
+expose the raw tensor ops (`TensorBackendOps`, including `dot_general`,
+elementwise, structural, reduction). What is out of reach is **linalg** —
+`triangular_solve` / `solve` live on `EagerSessionLinalgExt` (an eager-session
+trait), not on `Engine` — and the composed `tenferro-infer` primitives (norm /
 attention / RoPE). The chunked scan needs a solve, so the op keeps its CPU fused
 kernel (tracked as tensor4all/tenferro-rs#2005).
 

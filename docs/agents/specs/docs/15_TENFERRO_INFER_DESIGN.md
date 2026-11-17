@@ -56,9 +56,11 @@ crates/tenferro-infer/
 ```
 
 The API is ordinary Rust functions and small types that take a
-`&mut dyn BackendSession` (plus the linalg trait for any triangular work) and
-`Tensor`/views. No hidden global state; prepared plans and workspaces are
-caller-owned.
+`&mut EagerSession` (tenferro `0.11`; the eager session lends the caller-held
+`CpuEngine`) and `EagerTensor` values. No hidden global state; prepared plans
+and workspaces are caller-owned. The signatures below are the original design
+sketch; the implemented surface is listed in
+`18_IMPLEMENTATION_STATUS.md`.
 
 ```rust
 pub struct RmsNorm { pub weight: Tensor, pub eps: f32, pub centered: bool }

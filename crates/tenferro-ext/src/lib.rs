@@ -54,12 +54,12 @@ use tenferro_ad::extension::{
     EagerExtensionTarget, apply_eager_with_targeted_extension_in_session,
 };
 use tenferro_ad::{EagerSession, EagerTensor};
-use tenferro_cpu::CpuBackend;
+use tenferro_cpu::CpuEngine;
 use tenferro_runtime::extension::{
     ExtensionOp, ExtensionShapeContext, SymDim, define_extension_runtime,
 };
 use tenferro_runtime::{ErrorPhase, ExtensionModule};
-use tenferro_tensor::{BackendSession, DType, Tensor, TensorBackend, TensorRead};
+use tenferro_tensor::{DType, Engine, Tensor, TensorRead};
 
 /// Whether this admitted eager session can execute this crate's CPU extensions.
 ///
@@ -67,7 +67,7 @@ use tenferro_tensor::{BackendSession, DType, Tensor, TensorBackend, TensorRead};
 /// resident on a GPU. This only borrows the CPU execution marker and does not
 /// transfer tensors or change the backend.
 pub fn cpu_extensions_supported(session: &mut EagerSession<'_>) -> bool {
-    tenferro_cpu::with_cpu_exec_session(session.backend_session(), |_| ()).is_some()
+    tenferro_cpu::with_cpu_engine(session.engine(), |_| ()).is_some()
 }
 
 /// Stable family identifier for the `erf` extension op.
@@ -114,7 +114,7 @@ impl ExtensionOp for ErfOp {
 
 fn execute_erf_in_session(
     _op: &ErfOp,
-    _session: &mut dyn BackendSession,
+    _session: &mut dyn Engine,
     _caches: &mut tenferro_runtime::ExtensionCacheStore,
     inputs: &[TensorRead<'_>],
 ) -> tenferro_tensor::Result<Vec<Tensor>> {
@@ -152,8 +152,8 @@ fn execute_erf_in_session(
     Ok(vec![output])
 }
 
-fn erf_session_supported<B: TensorBackend + 'static>(_op: &ErfOp) -> bool {
-    std::any::TypeId::of::<B>() == std::any::TypeId::of::<CpuBackend>()
+fn erf_session_supported<B: Engine + 'static>(_op: &ErfOp) -> bool {
+    std::any::TypeId::of::<B>() == std::any::TypeId::of::<CpuEngine>()
 }
 
 define_extension_runtime! {
@@ -162,7 +162,7 @@ define_extension_runtime! {
     op_type = ErfOp,
     execute_in_session = execute_erf_in_session,
     session_supported = erf_session_supported,
-    backend_bound = TensorBackend,
+    backend_bound = Engine,
 }
 
 fn erf_extension_module(
@@ -170,7 +170,7 @@ fn erf_extension_module(
 ) -> tenferro_runtime::Result<Arc<dyn ExtensionModule>> {
     // This extension has a CPU implementation only. Unsupported backends
     // report an extension error; they never download tensors implicitly.
-    extension_module::<CpuBackend>(target.engine_id).map_err(|source| {
+    extension_module::<CpuEngine>(target.engine_id).map_err(|source| {
         tenferro_runtime::Error::runtime_state_source(
             "tenferro-ext::erf",
             ErrorPhase::Execution,
@@ -181,15 +181,20 @@ fn erf_extension_module(
 
 /// Eager-session methods for the `erf` extension and the exact GELU.
 pub trait EagerSessionErfExt {
-    /// Elementwise `erf`; CPU extension or native composition by backend.
-    fn erf(&mut self, x: &EagerTensor) -> tenferro_ad::Result<EagerTensor>;
+    /// Elementwise `erf` from this crate's kernel.
+    ///
+    /// tenferro 0.11 ships its own `EagerSession::erf`, and an inherent method
+    /// wins over a trait method, so `session.erf(x)` resolves to that one.
+    /// This method stays available as `erf_ext` for the MLX-compatible `f32`
+    /// kernel the decision engines were validated against.
+    fn erf_ext(&mut self, x: &EagerTensor) -> tenferro_ad::Result<EagerTensor>;
 
     /// Exact (erf-based) GELU: `x * (1 + erf(x / sqrt(2))) / 2`.
     fn gelu_erf(&mut self, x: &EagerTensor) -> tenferro_ad::Result<EagerTensor>;
 }
 
 impl EagerSessionErfExt for EagerSession<'_> {
-    fn erf(&mut self, x: &EagerTensor) -> tenferro_ad::Result<EagerTensor> {
+    fn erf_ext(&mut self, x: &EagerTensor) -> tenferro_ad::Result<EagerTensor> {
         if !cpu_extensions_supported(self) {
             return erf_tensor_native(self, x);
         }
@@ -209,7 +214,7 @@ impl EagerSessionErfExt for EagerSession<'_> {
             return gelu_erf_tensor_native(self, x);
         }
         let scaled = self.scale_real(x, std::f64::consts::FRAC_1_SQRT_2)?;
-        let erf = self.erf(&scaled)?;
+        let erf = self.erf_ext(&scaled)?;
         let one = scalar_like(self, x, 1.0)?;
         let gate = self.add(&erf, &one)?;
         let half = self.scale_real(x, 0.5)?;

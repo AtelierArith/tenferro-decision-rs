@@ -109,14 +109,15 @@ Observed source during review included commit:
 Re-validated for implementation at:
 
 ```text
-471c4278dbc5a955b8a1664789c37e5d07e743cb   (workspace version 0.7.1)
+cef3746f1b58838ad9074ddc7371ce4b860f161f   (workspace version 0.11.0)
 ```
 
-The `Cargo.toml` workspace pins `tenferro-runtime`, `tenferro-cpu`, and
-`tenferro-tensor` to that git revision, because the crates.io `0.7.1` release
-predates it and differs in the session-entry API
-(`with_backend_session` returns a nested `Result` at `471c4278`). See
-`11_TENFERRO_API_SURVEY.md`.
+The workspace depends on the published `0.11` line of `tenferro-runtime`,
+`tenferro-cpu`, `tenferro-tensor`, `tenferro-ad`, `tenferro-linalg`, and
+`tenferro-gpu` (`Cargo.lock` fixes the exact release). The earlier git pin
+`471c4278` (workspace version `0.7.1`) is gone: `0.11.0` is published, and it
+carries the caller-held engine API this workspace now uses. See
+`11_TENFERRO_API_SURVEY.md` and `25_TENFERRO_0_11_MIGRATION.md`.
 
 Relevant observed properties:
 

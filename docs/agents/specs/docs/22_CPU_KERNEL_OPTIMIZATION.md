@@ -10,7 +10,7 @@
   (`linear_host` / `linear_into`) with no BLAS or explicit SIMD.
 - The tenferro forwards delegate the heavy ops to `EagerSession`
   (`dot_general`, `rms_norm`, `attention`, …). `tenferro-cpu`'s default backend
-  is **`faer`** (`cpu-faer`), so `dot_general`/`triangular_solve` already get an
+  is **`faer`** (the `native` feature), so `dot_general`/`triangular_solve` already get an
   optimized, multi-threaded GEMM. This is why the Laya tenferro path (845 ms at
   L8B1) is ~3× faster than the host path (2692 ms) — but it still rebuilds every
   weight tensor per call.
@@ -245,9 +245,11 @@ After the GEMM + rayon work (`21_SPEED_COMPARISON.md`):
 
 ## tenferro eager `dot_general` CPU path (2026-10-04)
 
-Call path (pinned rev `471c4278`):
+Call path (studied at `471c4278`; the entry points moved in `0.11` — the engine
+is caller-held and `CpuBackend`/`CpuExecSession` became `CpuEngine`/its exec
+session, but the provider choice and per-call work described here are the same):
 
-- `EagerRuntime::with_cpu_backend(CpuBackend::new())` — cpu threads follow
+- `EagerRuntime::new()` + `CpuEngine::serial()` — cpu threads follow
   `RAYON_NUM_THREADS` (`tenferro-cpu/src/context.rs`).
 - `EagerSession::dot_general` → `EagerTensor::nary_op_in_session`
   (`tenferro-ad/src/eager_ops.rs:214`); inference takes the `!any_requires_grad`
@@ -259,8 +261,8 @@ Call path (pinned rev `471c4278`):
   `UninitTensor::acquire`, `DotGeneralRuntime::execute_dot_into_uninit`
   (`dot_runtime.rs:1044`); on decline, a zeroed pool alloc + scoped fallback.
 - Provider: `builtin_gemm_provider(CpuBackendKind::default_compiled())` —
-  **`Blas` when the `cpu-blas` feature is on, else `Faer`**
-  (`tenferro-cpu/src/backend.rs:286`). We build with default features → **faer**.
+  **`Blas` when the `blas` feature is on, else `Faer`**
+  (`tenferro-cpu/src/backend.rs`). We build with default features → **faer**.
 - faer path: `FaerGemmProvider` (`provider.rs:2224`) →
   `faer::MatRef::from_raw_parts` + `faer::linalg::matmul::matmul_with_conj(...,
   Par::rayon(n))`, `n` = the cpu thread budget (`provider.rs:561`); below
@@ -275,7 +277,7 @@ shapes (`out_dim` small) the fan-out fraction is larger.
 
 Levers that need **no edit to the pinned repo**:
 
-- `tenferro-cpu` features: `cpu-faer` (default), `cpu-blas`, `provider-src`,
+- `tenferro-cpu` features: `native` (default), `blas`, `provider-src`,
   `blas-accelerate`, `blas-openblas`, `blas-mkl`. Enabling `blas-accelerate`
   flips `default_compiled()` to Accelerate's `cblas_sgemm`.
 - `cpu-kernels` (host path): (A1) Accelerate via `blas-src`+`cblas-sys`;

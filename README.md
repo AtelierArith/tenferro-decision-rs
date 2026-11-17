@@ -27,6 +27,11 @@ architecture.
 
 `decision-core` and `jev-client` never depend on tenferro.
 
+The workspace uses the published tenferro `0.11` line (caller-held
+`CpuEngine`/`CudaEngine`, eager sessions that borrow it) rather than a git
+revision; `docs/agents/specs/docs/25_TENFERRO_0_11_MIGRATION.md` records the
+migration.
+
 ## Status
 
 Phase 0 (workspace), Phase 1 (`tenferro-infer` primitives), and Phase 9
@@ -45,8 +50,8 @@ fetchable with `hf-fetch` and its tokenizer/forward match `extern/Laya.jl`
 (prompt + calibration) is next.
 See
 [`docs/agents/specs/docs/18_IMPLEMENTATION_STATUS.md`](docs/agents/specs/docs/18_IMPLEMENTATION_STATUS.md)
-for the live status and blockers (CUDA hardware, tenferro `erf`/F16/BF16,
-WebGPU coverage).
+for the live status and blockers (CUDA hardware, tenferro F16/BF16, Metal
+coverage).
 
 ## Usage
 

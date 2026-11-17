@@ -1,10 +1,11 @@
 # tenferro-rs API Survey for the Decision Engines
 
 **Status:** analysis / implementation reference  
-**Date:** 2026-10-04  
-**Surveyed revision:** `471c4278` (workspace version `0.7.1`)  
-**Note:** the package's `08_SOURCE_SNAPSHOT.md` recorded `67baa74b`, which is now
-an ancestor of this revision. Re-validate against this revision before coding.
+**Date:** 2026-11-18  
+**Surveyed revision:** crates.io `0.11.0` (tag `cef3746`)  
+**History:** the first survey covered git `471c4278` (workspace `0.7.1`); the
+workspace now depends on the published `0.11` line and the sections below
+describe that API. `25_TENFERRO_0_11_MIGRATION.md` records what moved.
 
 This survey maps the operations Laya and Jeff need onto the current tenferro-rs
 public API, records the gaps, and identifies the extension and CUDA hooks the
@@ -17,31 +18,35 @@ package's `tenferro-infer` / `tenferro-gated-delta` crates will use.
 There is no `tenferro` facade crate. A CPU concrete program depends on:
 
 ```toml
-tenferro-runtime = { version = "0.7", features = ["cpu-faer"] }
-tenferro-cpu     = { version = "0.7", features = ["cpu-faer"] }
+tenferro-runtime = "0.11"
+tenferro-cpu     = "0.11"
 ```
 
-Add `tenferro-einsum`, `tenferro-linalg`, or `tenferro-fft` for those operation
-families. Add `tenferro-gpu` with the `cuda` feature for CUDA (and the
-experimental `webgpu` feature for WebGPU). At least one of `cpu-faer` /
-`cpu-blas` is required; enable exactly one BLAS provider when using `cpu-blas`.
+The CPU provider feature is `native` (faer) and is the default; `blas` plus one
+of `blas-openblas` / `blas-accelerate` / `blas-mkl` is the alternative, and the
+two are mutually exclusive. Add `tenferro-einsum`, `tenferro-linalg`, or
+`tenferro-fft` for those operation families. Add `tenferro-gpu` with the `cuda`
+feature for CUDA. WebGPU is no longer offered (Metal/CUDA only).
 
 ---
 
 ## 2. Execution model
 
-- **Direct concrete tensors** run inside an explicit session:
+- **The caller holds the engine.** There is no `CpuBackend`: an ordinary
+  operation borrows a `tenferro_cpu::CpuEngine` (or `tenferro_gpu::cuda::CudaEngine`)
+  built once and reused:
   ```rust
-  let y = backend.with_backend_session(|session| x.matmul(&w, session))??;
+  let mut engine = CpuEngine::serial();
+  let y = x.matmul(&w, &mut engine)?;
   ```
-  Session entry is fallible and wraps the callback's own `Result`; operations
-  returning `Result` therefore need `??`. Re-entering the same backend from
-  inside a session fails with `Reentered`.
-- **Amortize entry** with `CpuBackend::with_execution_scope` for sequential
-  ordinary/eager/prepared work built from clones of one configured backend
-  (CPU domains only).
-- **Eager** uses `EagerRuntime::with_eager_session(|s| …)??`; family methods
-  come from `EagerSessionEinsumExt` / `EagerSessionLinalgExt`.
+- **Eager** stores no engine either: `EagerRuntime::new()` is only the AD
+  context, and every session borrows the engine:
+  `runtime.with_eager_session(&mut engine, |s| …)?`. The callback returns one
+  `Result`, so a single `?` covers registration and the operation. Family
+  methods come from `EagerSessionEinsumExt` / `EagerSessionLinalgExt`.
+- **Compiled programs** are prepared against input reads and engine targets
+  (`runtime.prepare(&program, &reads, &[target])`) and run with
+  `runtime.run(&mut [&mut engine], &prepared, &reads)`.
 - **Traced** compiles once (`GraphCompiler`) and replays (`Runtime::run_compiled`);
   extension modules must be installed and the engine registered.
 - **Prepared contractions**: `ConcreteEinsumPlan` (and `execute_into` /
@@ -57,9 +62,10 @@ prefer one session for a request, and keep shape-specialized plans in the model.
 
 - Owned tensors are **column-major**; `from_vec_col_major` silently reinterprets
   row-major data (wrong values, no error). The safetensors loader must reorder.
-- Public `Tensor` dtypes: `F32`, `F64`, `I32`, `I64`, `Bool`, `C32`, `C64`.
-  **`F16`/`BF16` are not public dtypes yet**, so Phase 8 reduced precision is
-  currently tenferro-blocked; the MVP `f32` path is unaffected (safetensors
+- Public `Tensor` dtypes: `F32`, `F64`, `I32`, `I64`, `Bool`, `C32`, `C64`
+  (plus an `external` escape hatch for extension scalars).
+  **`F16`/`BF16` still have no public dtype**, so Phase 8 reduced precision
+  remains tenferro-blocked; the MVP `f32` path is unaffected (safetensors
   converts to `F32`).
 - Views carry arbitrary strides; compact outputs are column-major. Layout
   conversion within a device is allowed; cross-device transfer is never implicit.
@@ -78,8 +84,10 @@ prefer one session for a request, and keep shape-specialized plans in the model.
 ### Elementwise and analytic
 
 `add, sub, mul, div, pow, maximum, minimum, neg, abs, sign, conj, exp, log,
-sin, cos, tanh, sqrt, rsqrt, expm1, log1p`, plus `clamp`, `compare` (→`Bool`),
-and `where_select` / `select`.
+sin, cos, tanh, sqrt, rsqrt, expm1, log1p, erf`, plus `clamp`, `compare`
+(→`Bool`), and `where_select` / `select`. `0.11` added `erf`, and the composed
+`softmax`, `sigmoid`, `silu`, `softplus`, `gelu`, and `reduce_mean` helpers now
+exist in the eager surface.
 
 ### Reductions
 
@@ -104,11 +112,10 @@ the `unit_diagonal` flag needed by the chunked Gated DeltaNet solve.
 ### Explicitly absent
 
 - `cumsum` / `cumprod`
-- `softmax` / `log_softmax`
-- `argmax` / `argmin`, `reduce_mean` / `reduce_var`
-- `sigmoid` / `silu` / `softplus` / `gelu`
+- `argmax` / `argmin`, `reduce_var`
 - `conv1d` / depthwise convolution
 - `outer`
+- `F16` / `BF16` dtypes
 
 These are composed from existing ops or added as extension operations
 (section 7).
@@ -193,23 +200,29 @@ This is the intended home for `tenferro-gated-delta` and for fused
 
 ## 9. Custom CUDA kernels
 
-`tenferro_gpu::cuda::raw` is a public extension boundary:
+`tenferro_gpu::cuda::raw` is a public extension boundary, but `0.11` narrowed it
+to the parts only tenferro can provide (stream, allocations, transfers,
+resources):
 
 ```text
-CudaBackend::with_backend_session
-  -> with_cuda_exec_session
-  -> CudaExecSession::with_raw
-  -> load PTX/CUBIN or compile with NVRTC
-  -> launch on the session stream
+with_cuda_engine(&mut dyn Engine, |cuda: &mut CudaEngine| {
+    cuda.with_raw("op", |session: &mut raw::Session<'_>| {
+        // session.tensor()/tensor_mut()/alloc_output()/retain_tensor()
+        // session.stream().raw_handle()
+        // compile PTX with cudarc::nvrtc, launch with cudarc::driver::result
+    })
+})
 ```
 
 - `session.tensor()/tensor_mut()` validate residency and return bounded device
-  spans; `alloc_output::<T>()` allocates; `raw::KernelArg` / `LaunchConfig`
-  describe the launch.
-- `NvrtcOptions`, `load_ptx`, `load_cubin`, `compile_nvrtc`. A raw module is
-  `!Send`/`!Sync`, whereas `raw::Session::resource` requires `Send`; keep loaded
-  modules in the thread-bound CUDA execution owner. The resource cache can
-  retain compatible `Send` state, not a raw `Module` directly.
+  spans; `alloc_output::<T>()` allocates; `retain_tensor()` proves residency.
+- `Module` / `Function` / `NvrtcOptions` / `KernelArg` / `LaunchConfig` and
+  `Session::{compile_nvrtc, launch, runtime_identity}` were **removed**. The
+  downstream crate owns NVRTC and the launch, using the re-exported
+  `tenferro_gpu::cuda::cudarc`. `tenferro-gated-delta` keeps a small adapter for
+  this in `src/cuda/driver.rs`.
+- A raw module is `!Send`/`!Sync`; keep loaded modules in the thread-bound CUDA
+  execution owner, not in a `Send` extension cache.
 - Device-side libraries (cuBLASDx, cuSOLVERDx) are callable from downstream
   kernels.
 - Stream ordering and lifetime rules: launch on the session stream, keep
@@ -228,12 +241,12 @@ elementwise and analytic ops, `reduce_sum`, `reduce_sum_squares`, `reduce_max`,
 linalg including `triangular_solve`. Unsupported op/dtype returns
 `BackendFailure` — never a silent CPU fallback.
 
-**WebGPU/Metal** is intentionally narrow: currently `dot_general` for `F32`/`C32`
-and transpose/to-contiguous. Elementwise, reductions, indexing, and linalg are
-not implemented and return errors. Running Jeff or Laya on Apple GPU therefore
-requires implementing most primitives as WebGPU extension operations. This
-matches the package's decision to treat Apple GPU as a post-CPU/CUDA target, and
-is a stronger constraint than `01_DESIGN.md` §11 implies.
+**WebGPU** is gone in `0.11`; Metal is a separate, still narrow target.
+Elementwise, reductions, indexing, and linalg coverage there remains partial and
+returns typed errors for unsupported combinations. Running Jeff or Laya on Apple
+GPU therefore requires implementing most primitives as Metal extension
+operations. This matches the package's decision to treat Apple GPU as a
+post-CPU/CUDA target.
 
 CUDA library floor: CUDA 12.6.2 minimum, 12.8 full capability; cuTENSOR 2.1.x on
 compute capability 7.0.
@@ -242,17 +255,16 @@ compute capability 7.0.
 
 ## 11. Performance and ownership idioms
 
-- Construct the backend/runtime once; per-call construction discards pools and
-  caches.
-- Reuse one session for a request; use `with_execution_scope` where entry cost
-  matters. Measured CPU session entry was ~26 us at 18 workers on one machine
-  (machine-specific), so grouping calls matters for tiny operations.
+- Reuse one engine for a request: it owns the buffer pool, the plan cache and
+  the thread pool, so constructing one per call discards all of them. The
+  caller-held engine also removes session entry from the inner loop.
 - Keep `ConcreteEinsumPlan` / compiled programs in the model; the plan retains
   metadata only, and execution still validates and allocates.
 - Use `execute_into` / `copy_read_into` for preallocated destinations where the
   package's workspace requirements demand no per-request allocation.
 - CUDA: explicit upload/download; no hidden host round trip; synchronize only at
-  boundaries (`EagerRuntime::synchronize` or `backend.runtime().synchronize()`).
+  boundaries (an explicit raw-scope `synchronize` or
+  `CudaRuntime::synchronize()`).
 
 ---
 
@@ -263,7 +275,8 @@ compute capability 7.0.
 2. **`triangular_solve` with `unit_diagonal`** makes the chunked Gated DeltaNet
    core a standard-op implementation; keep the recurrent form as the reference.
 3. **`cumsum` and `conv1d` are the two real custom-operation candidates**;
-   `softmax`, `sigmoid`, `SiLU`, and `softplus` are cheap compositions.
+   `softmax`, `sigmoid`, `SiLU`, `softplus`, `gelu`, and `erf` are now standard
+   tenferro ops.
 4. **`tenferro-gated-delta` should be an extension crate** using the
    `ExtensionOp` / `define_extension_runtime!` path, with an optional CUDA
    implementation through `cuda::raw`.
@@ -271,8 +284,8 @@ compute capability 7.0.
    batch-trailing output convention.
 6. **Laya-first is feasible**: every Laya primitive maps to existing ops or
    simple compositions; only the fused kernels are extensions.
-7. **Apple GPU is farther than the package assumed**: WebGPU is dot_general-only
-   in practice, so the model crates must not depend on a broad WebGPU surface.
+7. **Apple GPU is farther than the package assumed**: WebGPU was withdrawn in
+   0.11, so the model crates must not depend on a broad WebGPU surface.
 
 ---
 
@@ -288,5 +301,7 @@ compute capability 7.0.
 - [ ] A supported preallocated-output path for every hot op (to meet the
       workspace requirements).
 - [ ] Reduced-precision timeline in tenferro before committing to Phase 8.
-- [ ] Re-survey after any tenferro revision bump, since APIs here changed
-      between the package snapshot and `471c4278` (notably session `??`).
+- [x] Re-survey after the `0.11.0` bump; see
+      `25_TENFERRO_0_11_MIGRATION.md` for the caller-held engine, extension
+      `Engine` callback, `Option<&[usize]>` reduction axes, `TraceContext`
+      traced inputs, `Runtime::prepare`/`run`, and the narrowed CUDA raw seam.

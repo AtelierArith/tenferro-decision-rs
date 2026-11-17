@@ -15,7 +15,6 @@
 use std::time::Instant;
 
 use tenferro_ad::{DotGeneralConfig, EagerRuntime, Tensor};
-use tenferro_cpu::CpuBackend;
 use tenferro_ext::EagerSessionGemmExt;
 
 fn lcg(state: &mut u64) -> f32 {
@@ -44,8 +43,9 @@ fn dot_cfg() -> DotGeneralConfig {
 }
 
 fn main() {
+    let mut engine = tenferro_infer::cpu_engine();
     let iters = 30usize;
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let runtime = EagerRuntime::new().unwrap();
 
     println!(
         "eager dot_general vs tenferro-ext GEMM (cpu-kernels), iters={iters} \
@@ -69,7 +69,7 @@ fn main() {
         let x = col_major(in_dim, length, &x_rm);
 
         let (x_t, w_t) = runtime
-            .with_eager_session(|session| {
+            .with_eager_session(&mut engine, |session| {
                 let x_t = session
                     .constant_from(Tensor::from_vec_col_major(vec![in_dim, length], x.clone())?)?;
                 let w_t = session.constant_from(Tensor::from_vec_col_major(
@@ -78,24 +78,24 @@ fn main() {
                 )?)?;
                 Ok::<_, tenferro_ad::Error>((x_t, w_t))
             })
-            .unwrap()
             .unwrap();
 
         // Warmup both paths once (amortize planning/caching).
         let _ = runtime
-            .with_eager_session(|session| session.dot_general(&x_t, &w_t, dot_cfg()))
-            .unwrap()
+            .with_eager_session(&mut engine, |session| {
+                session.dot_general(&x_t, &w_t, dot_cfg())
+            })
             .unwrap();
         let _ = runtime
-            .with_eager_session(|session| session.gemm(&x_t, &w_t))
-            .unwrap()
+            .with_eager_session(&mut engine, |session| session.gemm(&x_t, &w_t))
             .unwrap();
 
         let start = Instant::now();
         for _ in 0..iters {
             let _ = runtime
-                .with_eager_session(|session| session.dot_general(&x_t, &w_t, dot_cfg()))
-                .unwrap()
+                .with_eager_session(&mut engine, |session| {
+                    session.dot_general(&x_t, &w_t, dot_cfg())
+                })
                 .unwrap();
         }
         let dot_ms = start.elapsed().as_secs_f64() * 1e3 / iters as f64;
@@ -103,8 +103,7 @@ fn main() {
         let start = Instant::now();
         for _ in 0..iters {
             let _ = runtime
-                .with_eager_session(|session| session.gemm(&x_t, &w_t))
-                .unwrap()
+                .with_eager_session(&mut engine, |session| session.gemm(&x_t, &w_t))
                 .unwrap();
         }
         let gemm_ms = start.elapsed().as_secs_f64() * 1e3 / iters as f64;

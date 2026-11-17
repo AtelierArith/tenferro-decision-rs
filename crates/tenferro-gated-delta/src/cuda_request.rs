@@ -3,8 +3,8 @@
 
 use std::rc::Rc;
 
+use crate::cuda::driver::with_cuda_exec_session;
 use tenferro_ad::{EagerSession, EagerTensor, Result};
-use tenferro_gpu::cuda::with_cuda_exec_session;
 
 use crate::{
     GatedDeltaConfig, GatedDeltaTensorWeights,
@@ -220,7 +220,7 @@ pub fn with_cuda_request<R: Send>(
     }
     if let Err(error) = request.runtime.synchronize() {
         std::mem::forget(result);
-        return Err(error.into());
+        return Err(tenferro_tensor::Error::backend_source("cuda_request", error).into());
     }
     request.mark_completed();
     let result = result?;

@@ -7,19 +7,19 @@ use std::time::Instant;
 use jeff_infer::checkpoint::load_checkpoint;
 use jeff_infer::model::{DeltaKernel, forward_reference, forward_tenferro_cached_kernel};
 use tenferro_ad::EagerRuntime;
-use tenferro_cpu::CpuBackend;
 use tenferro_gated_delta::GatedDeltaWorkspace;
 use tenferro_infer::TensorCache;
 
 const BASE: [i64; 8] = [2, 100, 1000, 2000, 3000, 4000, 5, 3];
 
 fn main() {
+    let mut engine = tenferro_infer::cpu_engine();
     let args: Vec<String> = std::env::args().collect();
     let dir = args.get(1).expect("usage: <dir> [iters]");
     let iters: usize = args.get(2).map(|s| s.parse().unwrap()).unwrap_or(5);
     let checkpoint = load_checkpoint(dir).expect("load checkpoint");
     let (cfg, weights) = (checkpoint.config, checkpoint.weights);
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let runtime = EagerRuntime::new().unwrap();
 
     for length in [8usize, 16, 64] {
         let ids: Vec<i64> = (0..length).map(|i| BASE[i % BASE.len()]).collect();
@@ -43,7 +43,7 @@ fn main() {
             let mut cache = TensorCache::new();
             let mut run = || {
                 runtime
-                    .with_eager_session(|session| {
+                    .with_eager_session(&mut engine, |session| {
                         forward_tenferro_cached_kernel(
                             &mut workspace,
                             &mut cache,
@@ -55,7 +55,6 @@ fn main() {
                             kernel,
                         )
                     })
-                    .unwrap()
                     .unwrap()
             };
             let _ = run();

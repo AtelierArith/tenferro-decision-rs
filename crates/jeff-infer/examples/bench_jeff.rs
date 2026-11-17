@@ -15,7 +15,6 @@ use jeff_infer::model::{
 };
 use serde_json::json;
 use tenferro_ad::EagerRuntime;
-use tenferro_cpu::CpuBackend;
 use tenferro_gated_delta::GatedDeltaWorkspace;
 use tenferro_infer::TensorCache;
 
@@ -40,6 +39,7 @@ fn stats(mut samples: Vec<f64>) -> serde_json::Value {
 }
 
 fn main() {
+    let mut engine = tenferro_infer::cpu_engine();
     let args: Vec<String> = std::env::args().collect();
     let dir = args
         .get(1)
@@ -135,15 +135,15 @@ fn main() {
     let length = 8usize;
     let ids: Vec<i64> = (0..length).map(|i| BASE[i % BASE.len()]).collect();
     let mask = vec![1.0f32; length];
-    let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).unwrap();
+    let runtime = EagerRuntime::new().unwrap();
 
-    let time = |cached: bool, kernel: DeltaKernel| -> serde_json::Value {
+    let mut time = |cached: bool, kernel: DeltaKernel| -> serde_json::Value {
         let mut workspace = GatedDeltaWorkspace::new();
         let mut cache = TensorCache::new();
-        let run = |workspace: &mut GatedDeltaWorkspace, cache: &mut TensorCache| -> f64 {
+        let mut run = |workspace: &mut GatedDeltaWorkspace, cache: &mut TensorCache| -> f64 {
             let timer = Instant::now();
             let _ = runtime
-                .with_eager_session(|session| {
+                .with_eager_session(&mut engine, |session| {
                     if cached {
                         forward_tenferro_cached_kernel(
                             workspace, cache, session, &cfg, &weights, &ids, &mask, kernel,
@@ -152,7 +152,6 @@ fn main() {
                         forward_tenferro(session, &cfg, &weights, &ids, &mask)
                     }
                 })
-                .unwrap()
                 .unwrap();
             timer.elapsed().as_secs_f64() * 1000.0
         };

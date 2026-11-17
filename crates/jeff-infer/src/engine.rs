@@ -21,13 +21,13 @@
 //! `load` reads local tokenizer assets and compiles the checkpoint chat template.
 //! Constructors from raw weights remain prepared-only until `with_tokenizer`.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use decision_core::{
     Answer, DecisionEngine, DecisionError, PreparedState, Question, QuestionSet, Result, State,
 };
 use tenferro_ad::EagerRuntime;
-use tenferro_cpu::CpuBackend;
+use tenferro_cpu::CpuEngine;
 use tenferro_gated_delta::GatedDeltaWorkspace;
 use tenferro_infer::TensorCache;
 
@@ -70,6 +70,9 @@ pub struct JeffEngine {
     backend: JeffBackend,
     /// The tenferro runtime the tenferro forward runs on (CPU today).
     runtime: Arc<EagerRuntime>,
+    /// The CPU engine every eager session borrows (tenferro 0.11: caller-held).
+    /// Clones share it, so a clone serializes against the same engine.
+    engine: Arc<Mutex<CpuEngine>>,
     /// DeltaNet scratch reused across rows.
     workspace: GatedDeltaWorkspace,
     /// Activation buffers for the host-optimized forward.
@@ -108,7 +111,7 @@ impl JeffEngine {
                 ),
             ));
         }
-        let runtime = EagerRuntime::with_cpu_backend(CpuBackend::new()).map_err(backend_error)?;
+        let runtime = EagerRuntime::new().map_err(backend_error)?;
         let weights = Arc::new(weights);
         let prepared_cpu =
             crate::prepared_cpu::PreparedCpuModel::from_shared(config, weights.clone())?;
@@ -119,6 +122,7 @@ impl JeffEngine {
             weights,
             backend,
             runtime,
+            engine: Arc::new(Mutex::new(tenferro_infer::cpu_engine())),
             workspace: GatedDeltaWorkspace::new(),
             host_opt: HostOptWorkspace::new(),
             cache: TensorCache::new(),
@@ -251,22 +255,26 @@ impl JeffEngine {
             JeffBackend::Host => {
                 forward_reference_with(&mut self.workspace, &self.config, &self.weights, ids, &mask)
             }
-            JeffBackend::Tenferro => self
-                .runtime
-                .with_eager_session(|session| {
-                    forward_tenferro_cached_kernel(
-                        &mut self.workspace,
-                        &mut self.cache,
-                        session,
-                        &self.config,
-                        &self.weights,
-                        ids,
-                        &mask,
-                        self.delta_kernel,
-                    )
-                })
-                .map_err(forward_error)?
-                .map_err(forward_error),
+            JeffBackend::Tenferro => {
+                let mut engine = self.engine.lock().map_err(|_| DecisionError::Backend {
+                    message: "the tenferro CPU engine lock is poisoned".to_string(),
+                    source: None,
+                })?;
+                self.runtime
+                    .with_eager_session(&mut *engine, |session| {
+                        forward_tenferro_cached_kernel(
+                            &mut self.workspace,
+                            &mut self.cache,
+                            session,
+                            &self.config,
+                            &self.weights,
+                            ids,
+                            &mask,
+                            self.delta_kernel,
+                        )
+                    })
+                    .map_err(forward_error)
+            }
         }
     }
 

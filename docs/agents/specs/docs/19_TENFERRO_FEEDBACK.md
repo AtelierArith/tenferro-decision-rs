@@ -1,7 +1,24 @@
 # tenferro-rs Feedback (filed as issues)
 
 Issues filed upstream on `tensor4all/tenferro-rs` while building this stack
-against revision `471c4278` (workspace version `0.7.1`).
+against revision `471c4278` (workspace version `0.7.1`). The workspace now
+depends on crates.io `0.11.0`; `25_TENFERRO_0_11_MIGRATION.md` records the
+migration, and the table below marks what that release resolved.
+
+## Resolved by `0.11.0`
+
+| # | Issue | Resolution |
+|---|---|---|
+| [#1973](https://github.com/tensor4all/tenferro-rs/issues/1973) | elementwise `erf` | standard `Erf` op on CPU and CUDA, plus composed `gelu`/`sigmoid`/`silu`/`softplus`/`softmax` |
+| [#1982](https://github.com/tensor4all/tenferro-rs/issues/1982) | `with_eager_session` required `Send` and returned a nested `Result` | the caller-held engine entry returns the callback's own `Result`; no `Send` bound |
+| [#1985](https://github.com/tensor4all/tenferro-rs/issues/1985) | `reduce_sum_squares` axes differ from other reductions | every reduction takes `Option<&[usize]>` |
+| [#1971](https://github.com/tensor4all/tenferro-rs/issues/1971) | crates.io and git exposed different `with_backend_session` signatures | the release carries the API; the git pin is gone |
+
+Still open after `0.11.0`: `cumsum`/`cumprod` (#1974), `argmax`, `conv1d`
+(#1977), fused norm ops (#2006), public `F16`/`BF16` (#1978), `Clone` for
+`Tensor` (#1981), `dot_general` batch-trailing output (#1980), public
+`tenferro_ad::Error` constructors (#1983), extension ops reaching linalg
+(#2005), rank-2-only `triangular_solve` (#2007).
 
 ## Release / feature gating
 
@@ -79,20 +96,26 @@ eager path's sequential per-op SIMD kernels.
 
 ## Raw CUDA ownership caveat (2026-10-08)
 
-At the pinned revision, `cuda::raw::Module` and `Function` are `!Send`/`!Sync`.
+**Updated for `0.11`:** the raw module/function/launch types are gone; a
+downstream crate now owns NVRTC and the launch through `cudarc` (see
+`25_TENFERRO_0_11_MIGRATION.md`). The ownership rule below is unchanged and
+still applies to the module a crate loads itself.
+
+At the surveyed `0.7.1` revision, `cuda::raw::Module` and `Function` are `!Send`/`!Sync`.
 `raw::Session::resource` requires `T: Send`; the runtime's
 `ExtensionCacheStore::put` requires `Send + Sync`. Loaded module handles
 therefore cannot be cached directly in either store. A thread-bound CUDA
 execution owner must retain the module instead; do not add unsafe `Send`/`Sync`
 implementations to bypass this boundary. `BackendSessionHost::with_backend_session`
-also requires both its closure and return value to be `Send`, so a loaded
-module cannot be captured from outside or returned across session admission.
+(removed in `0.11`) also required both its closure and return value to be
+`Send`, so a loaded module could not be captured from outside or returned
+across session admission.
 Construct/use a thread-bound owner inside the admitted executor scope, or
 provide an appropriate thread-local cache; runtime identity must be checked.
 
-`raw::Session::launch` explicitly requires modules and device allocations to
-remain live until a subsequent synchronization; launch does not retain them
-for asynchronous completion. An extension-local module that is dropped on
+`raw::Session::launch` (now a crate-local adapter) explicitly requires modules
+and device allocations to remain live until a subsequent synchronization;
+launch does not retain them for asynchronous completion. An extension-local module that is dropped on
 return is insufficient. Full GatedDelta integration must provide an execution
 owner/lease that spans the device work, with stream-ordered buffer reuse and
 cleanup. The current low-level `CudaKernels` owner validates and enqueues raw stages

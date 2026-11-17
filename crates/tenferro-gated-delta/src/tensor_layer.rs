@@ -404,7 +404,7 @@ fn l2_normalize_heads(
     length: usize,
     eps: &EagerTensor,
 ) -> AdResult<EagerTensor> {
-    let sum_sq = session.reduce_sum_squares(x, &[1])?; // (heads, length)
+    let sum_sq = session.reduce_sum_squares(x, Some(&[1]))?; // (heads, length)
     let denom = session.add(&sum_sq, eps)?;
     let inv = session.rsqrt(&denom)?;
     let inv = session.reshape(&inv, vec![heads, 1, length])?;
@@ -870,6 +870,7 @@ mod tests {
     use super::*;
     use crate::chunked::col_major;
     use crate::layer::delta_layer_reference;
+    use tenferro_cpu::CpuEngine;
 
     fn lcg(state: &mut u64) -> f32 {
         *state = state.wrapping_mul(6364136223846793005).wrapping_add(1);
@@ -877,11 +878,12 @@ mod tests {
     }
 
     fn runtime() -> std::sync::Arc<tenferro_ad::EagerRuntime> {
-        tenferro_ad::EagerRuntime::with_cpu_backend(tenferro_cpu::CpuBackend::new()).unwrap()
+        tenferro_ad::EagerRuntime::new().unwrap()
     }
 
     #[test]
     fn conv_matches_host() {
+        let mut engine = CpuEngine::serial();
         let channels = 6usize;
         let length = 9usize;
         let taps = 4usize;
@@ -890,7 +892,7 @@ mod tests {
         let w: Vec<f32> = (0..taps * channels).map(|_| lcg(&mut s)).collect();
         let want = crate::conv::causal_depthwise_silu(&x, channels, length, &w, taps);
         let got = runtime()
-            .with_eager_session(|session| {
+            .with_eager_session(&mut engine, |session| {
                 let xt = constant(
                     session,
                     &[channels, length],
@@ -909,7 +911,6 @@ mod tests {
                         .collect(),
                 )
             })
-            .unwrap()
             .unwrap();
         let diff = want
             .iter()
@@ -921,6 +922,7 @@ mod tests {
 
     #[test]
     fn native_matches_reference() {
+        let mut engine = CpuEngine::serial();
         let cfg = GatedDeltaConfig {
             hidden: 8,
             key_dim: 4,
@@ -982,7 +984,7 @@ mod tests {
                 let reference =
                     delta_layer_reference(&request_cfg, &weights, &input, &request_mask).unwrap();
                 runtime
-                    .with_eager_session(|session| {
+                    .with_eager_session(&mut engine, |session| {
                         let tw =
                             prepare_tensor_weights(session, &request_cfg, &weights, &mut cache)?;
                         let xt = constant(
@@ -1059,7 +1061,6 @@ mod tests {
                         }
                         Ok::<_, tenferro_ad::Error>(())
                     })
-                    .unwrap()
                     .unwrap();
             }
         }
