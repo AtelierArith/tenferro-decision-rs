@@ -19,6 +19,8 @@ pub mod agent;
 pub mod calibration;
 pub mod checkpoint;
 pub mod config;
+#[cfg(feature = "cuda")]
+pub mod cuda_raw;
 pub mod model;
 pub mod prompt;
 pub mod tokenizer;

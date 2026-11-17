@@ -8,7 +8,8 @@
 //! [`JeffBackend`] selects the forward: the default `Auto` picks the optimized
 //! CPU path with prepared tenferro projection extensions; `Host` runs the all-host oracle
 //! ([`forward_reference_with`]); `Tenferro` is the backend-portable path (slower
-//! on CPU today).
+//! on CPU today) and the only one that runs on a [`Device::Cuda`] runtime
+//! ([`JeffEngine::with_device`] / [`JeffEngine::load_with_device`]).
 //!
 //! Row `i` of the prepared state answers question `i`, so the batch and the
 //! [`QuestionSet`] must have the same length. Each question selects its own
@@ -21,20 +22,20 @@
 //! `load` reads local tokenizer assets and compiles the checkpoint chat template.
 //! Constructors from raw weights remain prepared-only until `with_tokenizer`.
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use decision_core::{
     Answer, DecisionEngine, DecisionError, PreparedState, Question, QuestionSet, Result, State,
 };
-use tenferro_ad::EagerRuntime;
-use tenferro_cpu::CpuEngine;
+pub use tenferro_ext::{CudaPath, Device, DeviceRuntime};
 use tenferro_gated_delta::GatedDeltaWorkspace;
 use tenferro_infer::TensorCache;
 
 use crate::config::DecisionConfig;
 use crate::host_opt::HostOptWorkspace;
 use crate::model::{
-    DeltaKernel, JeffConfig, JeffWeights, forward_reference_with, forward_tenferro_cached_kernel,
+    CudaDeltaWorkspaces, DeltaKernel, JeffConfig, JeffWeights, forward_reference_with,
+    forward_tenferro_device,
 };
 use crate::readout::{choice_answer, noul_answer, score_answer};
 
@@ -68,19 +69,25 @@ pub struct JeffEngine {
     weights: Arc<JeffWeights>,
     prepared_cpu: crate::prepared_cpu::PreparedCpuModel,
     backend: JeffBackend,
-    /// The tenferro runtime the tenferro forward runs on (CPU today).
-    runtime: Arc<EagerRuntime>,
-    /// The CPU engine every eager session borrows (tenferro 0.11: caller-held).
-    /// Clones share it, so a clone serializes against the same engine.
-    engine: Arc<Mutex<CpuEngine>>,
+    /// The device of `runtime`.
+    device: Device,
+    /// The tenferro runtime and engine the tenferro forward runs on.
+    runtime: Arc<DeviceRuntime>,
     /// DeltaNet scratch reused across rows.
     workspace: GatedDeltaWorkspace,
+    /// CUDA DeltaNet layer workspaces reused across rows ([`DeltaKernel::Cuda`]).
+    cuda_workspaces: CudaDeltaWorkspaces,
     /// Activation buffers for the host-optimized forward.
     host_opt: HostOptWorkspace,
     /// Weight tensors cached across rows (tenferro backend).
     cache: TensorCache,
     /// How the tenferro forward runs each Gated DeltaNet layer.
     delta_kernel: DeltaKernel,
+    /// The CUDA execution path.
+    cuda_path: CudaPath,
+    /// Resident device state of the raw CUDA forward.
+    #[cfg(feature = "cuda")]
+    raw: crate::cuda_raw::JeffCudaRaw,
     tokenizer: Option<crate::tokenizer::JeffTokenizer>,
 }
 
@@ -111,22 +118,26 @@ impl JeffEngine {
                 ),
             ));
         }
-        let runtime = EagerRuntime::new().map_err(backend_error)?;
         let weights = Arc::new(weights);
         let prepared_cpu =
             crate::prepared_cpu::PreparedCpuModel::from_shared(config, weights.clone())?;
+        let runtime = Device::Cpu.runtime().map_err(backend_error)?;
         Ok(Self {
             prepared_cpu,
             config,
             decision,
             weights,
             backend,
+            device: Device::Cpu,
             runtime,
-            engine: Arc::new(Mutex::new(tenferro_infer::cpu_engine())),
             workspace: GatedDeltaWorkspace::new(),
+            cuda_workspaces: CudaDeltaWorkspaces::new(),
             host_opt: HostOptWorkspace::new(),
             cache: TensorCache::new(),
             delta_kernel: DeltaKernel::default(),
+            cuda_path: CudaPath::from_env(),
+            #[cfg(feature = "cuda")]
+            raw: crate::cuda_raw::JeffCudaRaw::new(),
             tokenizer: None,
         })
     }
@@ -141,6 +152,17 @@ impl JeffEngine {
         } else {
             Ok(engine)
         }
+    }
+
+    /// Load a local checkpoint and run it on `device`.
+    ///
+    /// [`Device::Cpu`] keeps the default forward; a CUDA device selects the
+    /// tenferro forward with the CUDA DeltaNet layer (see [`Self::with_device`]).
+    pub fn load_with_device(
+        directory: impl AsRef<std::path::Path>,
+        device: Device,
+    ) -> Result<Self> {
+        Self::load(directory)?.with_device(device)
     }
 
     /// Resolve a Hub snapshot and load it with the default forward backend.
@@ -200,6 +222,67 @@ impl JeffEngine {
         self
     }
 
+    /// Run the engine on `device`, replacing its tenferro runtime.
+    ///
+    /// Weights are uploaded to the new runtime once, on the first forward, and
+    /// stay resident (cached) for later calls; each call then uploads only the
+    /// token ids and mask and downloads the readout logits.
+    ///
+    /// Only the tenferro forward runs on a GPU, so a CUDA device switches the
+    /// backend to [`JeffBackend::Tenferro`] with [`DeltaKernel::Cuda`].
+    /// Selecting [`Device::Cpu`] restores the CPU runtime and, if the CUDA
+    /// DeltaNet kernel was selected, the default kernel. Creating a CUDA
+    /// runtime fails (without CPU fallback) when the `cuda` feature is off or
+    /// no device is available.
+    pub fn with_device(mut self, device: Device) -> Result<Self> {
+        self.runtime = device.runtime().map_err(backend_error)?;
+        self.device = device;
+        self.cache = TensorCache::new();
+        self.cuda_workspaces = CudaDeltaWorkspaces::new();
+        #[cfg(feature = "cuda")]
+        {
+            self.raw = crate::cuda_raw::JeffCudaRaw::new();
+        }
+        if device.is_cuda() {
+            self.backend = JeffBackend::Tenferro;
+            self.delta_kernel = DeltaKernel::Cuda;
+        } else if self.delta_kernel == DeltaKernel::Cuda {
+            self.delta_kernel = DeltaKernel::default();
+        }
+        Ok(self)
+    }
+
+    /// The device the tenferro forward runs on.
+    pub fn device(&self) -> Device {
+        self.device
+    }
+
+    /// Select how a CUDA device runs the forward (default [`CudaPath::Raw`],
+    /// or `TENFERRO_DECISION_CUDA_PATH=native`). Ignored on the CPU.
+    pub fn with_cuda_path(mut self, path: CudaPath) -> Self {
+        self.cuda_path = path;
+        self
+    }
+
+    /// The CUDA path that runs the forward on a CUDA device: the selected
+    /// one, or [`CudaPath::Native`] when the raw path does not support the
+    /// model or the `cuda` feature is off. Rows longer than
+    /// `cuda_raw::MAX_TOKENS` also run natively.
+    pub fn cuda_path(&self) -> CudaPath {
+        #[cfg(feature = "cuda")]
+        if self.cuda_path == CudaPath::Raw
+            && crate::cuda_raw::JeffCudaRaw::supports(&self.config, &self.weights)
+        {
+            return CudaPath::Raw;
+        }
+        CudaPath::Native
+    }
+
+    /// The selected Gated DeltaNet formulation of the tenferro forward.
+    pub fn delta_kernel(&self) -> DeltaKernel {
+        self.delta_kernel
+    }
+
     /// The selected forward.
     pub fn backend(&self) -> JeffBackend {
         self.backend
@@ -255,26 +338,41 @@ impl JeffEngine {
             JeffBackend::Host => {
                 forward_reference_with(&mut self.workspace, &self.config, &self.weights, ids, &mask)
             }
-            JeffBackend::Tenferro => {
-                let mut engine = self.engine.lock().map_err(|_| DecisionError::Backend {
-                    message: "the tenferro CPU engine lock is poisoned".to_string(),
-                    source: None,
-                })?;
+            #[cfg(feature = "cuda")]
+            JeffBackend::Tenferro
+                if self.device.is_cuda()
+                    && self.cuda_path() == CudaPath::Raw
+                    && ids.len() <= crate::cuda_raw::MAX_TOKENS =>
+            {
                 self.runtime
-                    .with_eager_session(&mut *engine, |session| {
-                        forward_tenferro_cached_kernel(
-                            &mut self.workspace,
-                            &mut self.cache,
+                    .with_eager_session(|session| {
+                        crate::cuda_raw::forward_cuda_raw(
+                            &mut self.raw,
                             session,
                             &self.config,
                             &self.weights,
                             ids,
                             &mask,
-                            self.delta_kernel,
                         )
                     })
                     .map_err(forward_error)
             }
+            JeffBackend::Tenferro => self
+                .runtime
+                .with_eager_session(|session| {
+                    forward_tenferro_device(
+                        &mut self.workspace,
+                        &mut self.cuda_workspaces,
+                        &mut self.cache,
+                        session,
+                        &self.config,
+                        &self.weights,
+                        ids,
+                        &mask,
+                        self.delta_kernel,
+                    )
+                })
+                .map_err(forward_error),
         }
     }
 
@@ -321,7 +419,7 @@ impl JeffEngine {
 /// Map a tenferro backend-construction error into a decision error.
 fn backend_error(error: tenferro_ad::Error) -> DecisionError {
     DecisionError::Backend {
-        message: format!("failed to create the tenferro CPU runtime: {error}"),
+        message: format!("failed to create the tenferro runtime: {error}"),
         source: Some(Box::new(error)),
     }
 }

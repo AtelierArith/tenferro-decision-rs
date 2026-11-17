@@ -151,10 +151,19 @@ impl TensorCache {
         }
         let rows = shape.first().copied().unwrap_or(1);
         let cols = shape.get(1).copied().unwrap_or(1);
+        // Tiled transpose: large tables (e.g. a ~1 GB embedding) would
+        // otherwise stride through memory on every element.
+        const TILE: usize = 64;
         let mut column_major = vec![0.0f32; rows * cols];
-        for row in 0..rows {
-            for col in 0..cols {
-                column_major[row + col * rows] = row_major[row * cols + col];
+        for row_start in (0..rows).step_by(TILE) {
+            let row_end = (row_start + TILE).min(rows);
+            for col_start in (0..cols).step_by(TILE) {
+                let col_end = (col_start + TILE).min(cols);
+                for row in row_start..row_end {
+                    for col in col_start..col_end {
+                        column_major[row + col * rows] = row_major[row * cols + col];
+                    }
+                }
             }
         }
         let tensor =

@@ -5,9 +5,9 @@
 //! runtime_identity}`. The replacement contract is that a downstream crate owns
 //! its own NVRTC compilation and driver launches through the re-exported
 //! `cudarc` bindings, using tenferro's stream and device buffers
-//! (`cuda::raw::Session`). This module restores the small surface the Gated
-//! DeltaNet stages need, so the kernel source, launch geometry, and ABI are
-//! unchanged.
+//! (`cuda::raw::Session`). This module restores the small surface the decision
+//! engines' raw CUDA paths need, so kernel sources, launch geometry, and ABIs
+//! are unchanged.
 //!
 //! The old `with_cuda_exec_session(session, |cuda| ...)` entry keeps its shape:
 //! [`with_cuda_exec_session`] visits the caller-held [`CudaEngine`] and lends a
@@ -18,11 +18,11 @@ use std::ffi::{CString, c_void};
 use tenferro_gpu::cuda::cudarc::driver::result as cu_result;
 use tenferro_gpu::cuda::cudarc::driver::sys as cu_sys;
 use tenferro_gpu::cuda::cudarc::nvrtc;
-use tenferro_gpu::cuda::raw::{self, Session as RawSession, TensorMut, TensorRef};
+use tenferro_gpu::cuda::raw::{self, Session as RawSession, StreamRef, TensorMut, TensorRef};
 use tenferro_gpu::cuda::{CudaEngine, CudaRuntime, CudaRuntimeIdentity};
 use tenferro_tensor::{TensorScalar, TypedTensor};
 
-const OP: &str = "gated_delta.cuda";
+const OP: &str = "tenferro-ext::cuda";
 
 fn backend_error(error: impl std::error::Error + Send + Sync + 'static) -> tenferro_tensor::Error {
     tenferro_tensor::Error::backend_source(OP, error)
@@ -42,7 +42,7 @@ pub struct NvrtcOptions {
 /// A loaded CUDA module owned by the caller.
 ///
 /// Dropping it unloads the module, so every [`Function`] taken from it must be
-/// dropped first; [`super::CudaKernels`] owns both and is dropped as a whole.
+/// dropped first; the kernel caches in this workspace keep both together.
 pub struct Module {
     module: cu_sys::CUmodule,
 }
@@ -92,25 +92,17 @@ pub struct LaunchConfig {
 /// of [`CudaSession::launch`]'s contract.
 #[derive(Clone, Copy)]
 pub enum KernelArg {
-    /// A device buffer address.
+    /// A device address (`void*` ABI), e.g. from [`Self::tensor`].
     Pointer(*mut c_void),
     /// An `i32` scalar.
     I32(i32),
+    /// An `i64` scalar.
+    I64(i64),
     /// An `f32` scalar.
     F32(f32),
 }
 
 impl KernelArg {
-    /// An `i32` scalar.
-    pub fn i32(value: i32) -> Self {
-        Self::I32(value)
-    }
-
-    /// An `f32` scalar.
-    pub fn f32(value: f32) -> Self {
-        Self::F32(value)
-    }
-
     /// A read-only device buffer.
     pub fn tensor(reference: &TensorRef<'_, f32>) -> Self {
         Self::Pointer(reference.raw_ptr())
@@ -119,6 +111,26 @@ impl KernelArg {
     /// A writable device buffer.
     pub fn tensor_mut(reference: &TensorMut<'_, f32>) -> Self {
         Self::Pointer(reference.raw_ptr())
+    }
+
+    /// A device address carried as a `u64` (the raw-cache ABI's pointer form).
+    pub fn u64(address: u64) -> Self {
+        Self::Pointer(address as usize as *mut c_void)
+    }
+
+    /// An `i32` scalar.
+    pub fn i32(value: i32) -> Self {
+        Self::I32(value)
+    }
+
+    /// An `i64` scalar.
+    pub fn i64(value: i64) -> Self {
+        Self::I64(value)
+    }
+
+    /// An `f32` scalar.
+    pub fn f32(value: f32) -> Self {
+        Self::F32(value)
     }
 }
 
@@ -141,6 +153,11 @@ impl<'a, 's> CudaSession<'a, 's> {
     /// The underlying tenferro raw session.
     pub fn raw(&self) -> &RawSession<'s> {
         self.raw
+    }
+
+    /// This engine's stream, for vendor calls to bind.
+    pub fn stream(&self) -> StreamRef {
+        self.raw.stream()
     }
 
     /// Compile `source` with NVRTC and load it on this session's context.
@@ -253,6 +270,7 @@ impl<'a, 's> CudaSession<'a, 's> {
                     bytes[..std::mem::size_of::<usize>()].copy_from_slice(&address.to_ne_bytes());
                 }
                 KernelArg::I32(value) => bytes[..4].copy_from_slice(&value.to_ne_bytes()),
+                KernelArg::I64(value) => bytes.copy_from_slice(&value.to_ne_bytes()),
                 KernelArg::F32(value) => bytes[..4].copy_from_slice(&value.to_ne_bytes()),
             }
             slots.push(u64::from_ne_bytes(bytes));
@@ -276,13 +294,13 @@ impl<'a, 's> CudaSession<'a, 's> {
     }
 }
 
-/// tenferro's caller-held CUDA engine, in the shape the layer adapters expect.
+/// tenferro's caller-held CUDA engine, in the shape the raw paths expect.
 pub struct CudaExecSession<'a> {
     engine: &'a mut CudaEngine,
     identity: CudaRuntimeIdentity,
 }
 
-impl<'a> CudaExecSession<'a> {
+impl CudaExecSession<'_> {
     /// The engine's runtime.
     pub fn runtime(&self) -> &CudaRuntime {
         self.engine.runtime()
@@ -308,7 +326,7 @@ pub fn with_cuda_exec_session<R>(
     engine: &mut dyn tenferro_tensor::Engine,
     f: impl FnOnce(&mut CudaExecSession<'_>) -> R,
 ) -> Option<R> {
-    tenferro_gpu::cuda::raw::with_cuda_engine(engine, |cuda| {
+    raw::with_cuda_engine(engine, |cuda| {
         let identity = cuda.runtime().identity().clone();
         f(&mut CudaExecSession {
             engine: cuda,
@@ -317,7 +335,7 @@ pub fn with_cuda_exec_session<R>(
     })
 }
 
-/// Visit the CUDA engine behind an admitted eager session without a raw scope.
+/// Visit the caller-held CUDA engine without opening a raw scope.
 pub fn with_cuda_engine<R>(
     engine: &mut dyn tenferro_tensor::Engine,
     f: impl FnOnce(&mut CudaEngine) -> R,

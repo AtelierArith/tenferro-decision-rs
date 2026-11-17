@@ -210,6 +210,26 @@ pub(crate) fn enqueue_chunked_layer(
             });
         }
     }
+    // A completed workspace from another request length reallocates scratch.
+    if pending
+        .workspace
+        .as_ref()
+        .is_some_and(|workspace| workspace.convolved.shape() != [length, channels])
+    {
+        let convolved = with_cuda_exec_session(session.backend_session(), |cuda| {
+            cuda.with_raw("cuda_chunked_workspace_resize", |raw| {
+                Ok(Tensor::from_typed(
+                    raw.alloc_output::<f32>(&[length, channels])?,
+                ))
+            })
+        })
+        .expect("CUDA session checked above")?;
+        pending
+            .workspace
+            .as_mut()
+            .expect("owned workspace")
+            .convolved = convolved;
+    }
     let workspace = pending.workspace.as_mut().expect("owned workspace");
     if !workspace.constants.matches(cfg, length, x) {
         workspace.constants = prepare_native_constants(session, cfg, length)?;

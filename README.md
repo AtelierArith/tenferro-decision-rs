@@ -274,6 +274,70 @@ tenferro-native forward (`--example bench_laya_tenferro_gap`, all shapes):
 `forward_tenferro` without the tensor cache rebuilds every weight per call
 (272.9 ms at L8 B1, ~6×).
 
+### GPU (CUDA) versus the Julia GPU implementations
+
+Same RTX 3060 (GPU 0, 12 GB, driver 580, sm_86), F32, same inputs, run one
+after another on an idle host. Rust: `--features cuda` examples
+`bench_jeff_cuda` / `bench_laya_cuda` in the CUDA 13 devcontainer. Julia 1.13.1
++ CUDA.jl 6.4: `tools/bench_jeff_cuda_julia.jl` (JeffClient.jl on
+QwenDecisionCore.jl's CUDA extension with the chunked delta rule, QwenDecisionCore.jl
+PR #6) and `tools/bench_laya_cuda_julia.jl`
+(Laya.jl `CUDABackend()`). Every timed call includes the input upload, the
+forward, the readout download and the synchronization it implies; model load
+and the first call are excluded. Warm median of 50 iterations after 10
+warmups, mean of two runs (they agree within a few percent). Raw results:
+[`fixtures/bench-gpu-vs-julia-2026-10-11`](fixtures/bench-gpu-vs-julia-2026-10-11).
+
+Jeff (`mstrasser/Jeff-Qwen3.5-0.8B`; parcel = JeffClient.jl
+`examples/data/parcel_reference.json` case 1, B1/L256 with 101 active tokens).
+"Rust native" is the tenferro-native device forward (the PR #9 measurement,
+[`fixtures/bench-gpu-vs-julia-2026-10-11`](fixtures/bench-gpu-vs-julia-2026-10-11));
+"Rust raw" is the default raw single-stream forward, measured alternately with
+Julia on 2026-10-11 (mean of two runs each,
+[`fixtures/bench-gpu-raw-2026-10-11`](fixtures/bench-gpu-raw-2026-10-11)):
+
+| input | Julia CUDA | Rust native | Rust raw | raw / Julia |
+|---|---:|---:|---:|---:|
+| parcel, left padding trimmed (L101) | 25.8 ms | 37.9 ms | 24.7 ms | 0.96× |
+| parcel, full sequence (L256) | 47.2 ms | 79.1 ms | 45.7 ms | 0.97× |
+| synthetic L8 | 12.0 ms | 26.5 ms | 9.7 ms | 0.81× |
+| synthetic L64 | 16.8 ms | 28.0 ms | 15.6 ms | 0.93× |
+
+Julia trims with `QDC_CUDA_TRIM_PADDING=1` (the Rust engine always trims);
+the full-sequence row keeps the padding on both sides.
+
+Laya (`convaiinnovations/laya`; the fixed prepared batches of `bench_laya`,
+extended with `LAYA_BENCH_SHAPES`; L93/L512 match Laya.jl's short/long
+prompt lengths):
+
+| shape | Julia CUDA | Rust native | Rust raw | raw / Julia |
+|---|---:|---:|---:|---:|
+| L8 B1 | 8.0 ms | 26.2 ms | 7.2 ms | 0.90× |
+| L64 B1 | 11.8 ms | 28.2 ms | 11.0 ms | 0.93× |
+| L8 B8 | 11.9 ms | 27.0 ms | 11.0 ms | 0.93× |
+| L93 B1 | 16.8 ms | 30.0 ms | 15.8 ms | 0.94× |
+| L93 B10 | 111.8 ms | 155.2 ms | 107.7 ms | 0.96× |
+| L512 B1 | 67.4 ms | 267.6 ms | 63.6 ms | 0.94× |
+| L512 B10 | 582.3 ms | out of device memory | 542.5 ms | 0.93× |
+
+Reading the GPU numbers:
+
+- The native path has a floor of about 25 ms per call: tenferro eager costs
+  host time per op (~700 launches per forward) and every `with_raw`
+  synchronizes. The raw path runs the whole forward in one `with_raw` scope
+  (cuBLAS + NVRTC kernels on tenferro's stream, one download), so it is GPU
+  bound: at Jeff L8 the kernels take 9.7 ms of the 9.7 ms call.
+- Laya's raw path ports Laya.jl's fused FP32 attention (local-window and
+  padding tiles skipped, no score matrix), which fixes L512 and the L512 B10
+  memory blow-up; Jeff's uses QwenDecisionCore.jl's chunked WY delta rule,
+  packed projections, residuals folded into GEMMs and a last-position final
+  layer.
+- At long sequences both sides are bound by the same F32 cuBLAS GEMMs
+  (~80% of Jeff L256's GPU time). Laya.jl also offers Float16 (about 2×
+  faster again); the Rust GPU path is F32 only.
+- First calls: Rust raw Jeff ~3 s and Laya ~1.8 s (weight upload, host
+  transposes, NVRTC); the Julia first call is dominated by JIT compilation.
+
 ### Model load
 
 | model | Julia | Rust |
@@ -331,5 +395,59 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo bench -p bench-suite
 ```
 
-The MVP targets the tenferro CPU provider (`cpu-faer`); CUDA follows in later
-phases.
+The default build targets the tenferro CPU provider. The optional `cuda`
+feature of `laya-infer` / `jeff-infer` runs the tenferro forward on a CUDA
+device (tenferro-gpu: cuBLAS + cuTENSOR, NVRTC for the repository's fused
+kernels; the driver is loaded at run time):
+
+```rust
+use laya_infer::agent::{Device, LayaEngine};
+use jeff_infer::engine::JeffEngine;
+
+let mut laya = LayaEngine::load_with_device(laya_dir, Device::Cuda(0))?;
+let mut jeff = JeffEngine::load_with_device(jeff_dir, Device::Cuda(0))?;
+// or: JeffEngine::load(dir)?.with_device(Device::Cuda(0))?
+```
+
+Weights are uploaded once (first forward) and stay resident; each call
+uploads only token ids/masks and downloads logits. Without the feature,
+`Device::Cuda` returns an unsupported error (no CPU fallback).
+
+On a CUDA device both engines default to the **raw single-stream forward**
+(`CudaPath::Raw`, modules `laya_infer::cuda_raw` / `jeff_infer::cuda_raw`):
+the whole forward is one `with_raw` scope on tenferro's stream, enqueueing
+cuBLAS products and the repository's NVRTC kernels (fused flash attention
+for Laya, the chunked WY Gated DeltaNet for Jeff) with preallocated device
+buffers and a single synchronization at the final download. The
+tenferro-native device forward stays selectable and is used automatically for
+models the raw path does not support:
+
+```rust
+use jeff_infer::engine::CudaPath;
+let jeff = JeffEngine::load_with_device(jeff_dir, Device::Cuda(0))?
+    .with_cuda_path(CudaPath::Native); // or TENFERRO_DECISION_CUDA_PATH=native
+```
+
+The CUDA tests are `#[ignore]`d hardware gates; run them in `.devcontainer/`
+with e.g.
+
+```sh
+CUDA_VISIBLE_DEVICES=0 cargo test --release -p jeff-infer -p laya-infer \
+    -p tenferro-gated-delta -p tenferro-ext \
+    --features jeff-infer/cuda,laya-infer/cuda,tenferro-gated-delta/cuda,tenferro-ext/cuda \
+    -- --ignored --test-threads=1
+cargo run --release -p jeff-infer --features cuda --example bench_jeff_cuda -- <JEFF_DIR> 10 50 --cpu
+cargo run --release -p laya-infer --features cuda --example bench_laya_cuda -- <LAYA_DIR> 10 50 --cpu
+```
+
+`TENFERRO_CUDA_ARCH` overrides the NVRTC architecture (default: the device's
+compute capability); `TENFERRO_DECISION_FUSED=0` disables the native path's
+fused CUDA kernels (A/B measurement); `TENFERRO_DECISION_DELTA_SCAN=recurrent|chunked`
+and `TENFERRO_DECISION_JEFF_GEMM=nn|tn` pin the raw Jeff path's DeltaNet scan
+and weight orientation. (The experimental CubeCL kernel variant is gone:
+tenferro 0.11 retired CubeCL, so the raw path's NVRTC kernels are the only
+formulation — see `docs/agents/specs/docs/25_TENFERRO_0_11_MIGRATION.md`.)
+The benches take `LAYA_BENCH_PATH` / `JEFF_BENCH_PATH`
+(`native`), `LAYA_BENCH_SHAPES` and `JEFF_BENCH_ONLY`. See
+`docs/agents/specs/docs/23_TENFERRO_NATIVE.md` ("Raw single-stream CUDA
+forward") for the design and the comparison with the Julia GPU runtimes.
