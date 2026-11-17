@@ -24,6 +24,17 @@ separate crates; this workspace does not use einsum equations or FFTs.
 
 ## The engine is caller-held
 
+tenferro 0.11 also removed the runtime-owned device: `EagerRuntime` has no
+`with_cuda_backend`/`with_cpu_backend`, and `CudaEngine` (`CudaDeviceId` →
+`CudaEngine::open`) is a caller-held value like `CpuEngine`. The device
+selection therefore moved from the runtime to a pair:
+`tenferro_ext::DeviceRuntime` owns one `EagerRuntime` plus the engine of its
+`Device` (behind a `Mutex`, since tenferro operations take `&mut`), and
+`Device::runtime()` returns it. Engines keep `Arc<DeviceRuntime>` and call
+`runtime.with_eager_session(|s| …)` exactly as before; `runtime.eager()` gives
+the `Arc<EagerRuntime>` for context-bound values.
+
+
 `CpuBackend` and `CudaBackend::new(device)` are gone. A `tenferro_cpu::CpuEngine`
 (or `tenferro_gpu::cuda::CudaEngine::open(device)`) owns the thread pool, buffer
 pool, and plan cache, and every operation borrows it as `&mut dyn Engine`.
@@ -92,6 +103,28 @@ The kernel source, launch geometry, and ABI are unchanged.
 
 This lane needs CUDA hardware and NVRTC to run; CI builds it (`--features cuda`)
 but the parity tests stay `#[ignore]`d.
+
+`CudaRuntime` itself kept its shape, with two renames: `runtime_identity()` is
+`identity()` (returning `&CudaRuntimeIdentity`), and `device_id()` is unchanged.
+
+## The CubeCL kernel lane is retired
+
+The `0.11` change "one CUDA path — the kernel-catalogue engine replaces CubeCL"
+removed CubeCL from tenferro-gpu, including the downstream client and pool
+bindings (`with_cubecl`, `array_arg`, `CubeClient`) that
+`tenferro_ext::cube_kernels` launched through. That lane was experimental and
+opt-in (`TENFERRO_DECISION_CUDA_KERNELS=cubecl`, default off), so it is deleted
+rather than rebuilt on a CubeCL client this workspace would have to own and
+order against tenferro's stream:
+
+- removed: `cube_kernels.rs`, `RawKernels`, `CubeClient`/`CubePool`/`cube_alloc`,
+  `with_raw_exec_cube`, `RawExec::{cube, cube_launched, pool_ptr}`,
+  `take_drain_stats`, `DeltaCube`, and the `with_kernels`/`kernels` accessors of
+  `LayaCudaRaw`/`JeffCudaRaw`;
+- kept: the NVRTC raw path (the default, `CudaPath::Raw`) and the tenferro-native
+  device path (`CudaPath::Native`), both unchanged in their kernels and ABIs.
+
+`cubecl`/`cubecl-cuda` left the workspace dependencies.
 
 ## Verification
 

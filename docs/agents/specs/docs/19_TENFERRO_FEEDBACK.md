@@ -218,3 +218,90 @@ packing performs layout movement only. It remains a self-hosted CPU extension,
 with backend admission checked before model dispatch and native composition on
 other backends. Prepared resources retain no eager runtime or borrowed model
 pointers. This is another candidate for a future public tenferro preparation API.
+
+## CUDA engine findings (2026-10-10)
+
+Hardware validation of the CUDA engines (pinned `471c427`, RTX 3060) found:
+
+- **Bool broadcast**: `broadcast_in_dim` + `where_select` on a Bool mask fails
+  in `CudaBackend::to_contiguous_read` (`UnsupportedDType: Bool`). Device
+  attention now adds an F32 score bias instead.
+- **Eager `scale_real`** still imports a host scalar that CUDA cannot read
+  (the cause of two failing `cuda_stages` gates); tests now upload the scalar.
+- **Mixed dtypes**: an F64 state silently promoted the F32 chunked scan to an
+  F64 result on CUDA (CPU would reject it); the test literal was fixed.
+- **`gather` over a `(vocab, hidden)` table** permutes the entire table per
+  call (6.3 ms, 1 GB for Jeff); even a `(hidden, vocab)` table did. A
+  first-class embedding/gather-rows op without the permute would remove the
+  need for the fused kernel.
+- **`dot_general` layout**: contracting a weight's first axis produced an
+  output permute (`cutensor permute_coop`), contracting its second axis did
+  not.
+- **Raw seam costs**: every `CudaExecSession::with_raw` call flushes CubeCL
+  with a `cuEventSynchronize` (measured with an empty closure), and
+  `raw::Session::tensor` only binds owned `TypedTensor`s. Eager constants
+  (`constant_from[_host]`) are pooled views, so they must be copied once
+  before raw use; eager op outputs are owned and bind in place. A
+  non-blocking raw session and a view-binding API would let fused kernels
+  avoid both.
+- **`reshape` of a constant** materializes a copy on CUDA; rank-1 weights are
+  now cached directly.
+- **Per-op host overhead** (~40 µs per eager op incl. cuBLAS/cuTENSOR plan
+  lookup and allocation) bounds small-batch latency once kernels are fused.
+
+
+## Raw single-stream CUDA forward (2026-10-11)
+
+Removing the ~25 ms per-call floor of the CUDA engines meant running each
+forward in one `CudaExecSession::with_raw` scope (see `23_TENFERRO_NATIVE.md`,
+"Raw single-stream CUDA forward"). What the pinned seam (`471c427`) lacked:
+
+- **No BLAS through the raw seam.** `raw::Session` exposes the stream
+  (`StreamRef::raw_handle`) but no cuBLAS handle, so the extension creates its
+  own (cudarc 0.19, the same crate and features tenferro-gpu uses) per thread
+  and runtime and binds it to the captured stream. A `Session::cublas()` (or a
+  raw GEMM entry point) would avoid a second handle per runtime.
+- **CubeCL's memory pool never returns memory.** The CubeCL client is
+  process-global per device and keeps freed pages reserved. Weights parked in
+  `alloc_output` tensors by one engine stay reserved after it drops, so a
+  second engine in the same process (e.g. consecutive hardware tests) ran out
+  of the 12 GB device. The raw path therefore allocates its persistent buffers
+  with `cuMemAlloc` on the retained primary context and frees them on drop. A
+  public pool trim (`memory_cleanup`) or an allocation API outside the pool
+  would let extensions stay inside tenferro's allocator.
+- **Kernel arguments.** `KernelArg::DevicePtr` is only constructible from a
+  `TensorRef`/`TensorMut`; buffers addressed by offset inside an arena are
+  passed as `KernelArg::u64` (ABI-identical). A `KernelArg::device_ptr(u64)`
+  escape (unsafe) would document that use.
+- **Dynamic shared memory above 48 KB** needs `cuFuncSetAttribute`, which the
+  raw `Function` does not expose; the raw kernels stay within 48 KB.
+- **Entry cost.** `with_raw` still flushes CubeCL with a host barrier on
+  entry; with one scope per forward this is negligible.
+
+
+## CubeCL seam for the raw path (2026-10-11) — withdrawn upstream in `0.11`
+
+`0.11` retired CubeCL entirely ("one CUDA path — the kernel-catalogue engine
+replaces CubeCL"), including the downstream client/pool bindings these findings
+are about, so the decision-engine CubeCL lane was dropped rather than rebuilt
+on a client we would own. The points below remain the record of the seam's
+cost.
+
+Evaluating `#[cube]` kernels next to cuBLAS (see `23_TENFERRO_NATIVE.md`,
+"CubeCL kernels for the raw path"):
+
+- `with_cubecl` flushes on entry and exit; an empty scope behind queued work
+  blocks on the first call, and a scope launching a slow kernel returns only
+  after it completes. Alternating `with_cubecl` ↔ `with_raw` costs 0.8–1.7 ms
+  per pair. Related: tenferro-rs #2078.
+- No contract orders launches on tenferro's (cloned) CubeCL client against
+  raw-stream work inside one raw scope; both use the same CUDA stream, but
+  launches pass through CubeCL's device thread. We drain with
+  `ComputeClient::exclusive(|| ())` (~17 µs) before each raw operation that
+  follows a launch. A documented "issue now" / non-blocking dispatch would
+  remove the drain.
+- CubeCL binds only pool tensors; external device memory (our `cuMemAlloc`
+  buffers) cannot be adopted. `client.memory_cleanup()` does return dropped
+  pool memory to the driver (workaround for #2081).
+- CubeCL's CUDA runtime requires toolkit headers at run time (`CUDA_PATH`);
+  when missing it panics on the device thread and silently drops launches.

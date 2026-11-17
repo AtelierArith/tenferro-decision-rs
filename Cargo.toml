@@ -47,3 +47,7 @@ tenferro-gpu = { version = "0.11.0", default-features = false }
 tenferro-tensor = "0.11.0"
 tenferro-ad = "0.11.0"
 tenferro-linalg = "0.11.0"
+# Driver/cuBLAS bindings for the raw single-stream CUDA forward. Same version
+# and loading features as tenferro-gpu's own `cudarc`, so no second copy is
+# built; the libraries are loaded at run time.
+cudarc = { version = "0.19", default-features = false, features = ["driver", "runtime", "nvrtc", "cublas", "dynamic-loading", "cuda-12080"] }

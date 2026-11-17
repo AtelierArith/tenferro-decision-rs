@@ -11,6 +11,9 @@ authors.workspace = true
 [features]
 default = []
 hub = ["dep:hf-fetch"]
+# CUDA execution of the tenferro forward (`Device::Cuda`). Needs the CUDA
+# driver at run time; tests touching hardware are `#[ignore]`d.
+cuda = ["tenferro-ext/cuda", "tenferro-gated-delta/cuda", "tenferro-ad/cuda"]
 
 [dependencies]
 hf-fetch = { workspace = true, optional = true }
@@ -32,3 +35,7 @@ minijinja-contrib = { version = "2.24.0", features = ["pycompat"] }
 [dev-dependencies]
 bench-suite = { path = "../bench-suite" }
 hf-fetch.workspace = true
+
+[[example]]
+name = "bench_jeff_cuda"
+required-features = ["cuda"]

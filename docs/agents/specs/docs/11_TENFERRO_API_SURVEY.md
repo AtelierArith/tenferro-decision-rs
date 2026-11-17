@@ -235,7 +235,8 @@ keeping tenferro's context, stream, and allocation ownership.
 
 ## 10. GPU coverage
 
-**CUDA** (CubeCL-CUDA + cuTENSOR/cuBLAS/cuSOLVER) is broad for `F32`/`F64`/etc.:
+**CUDA** (the kernel-catalogue engine + cuTENSOR/cuBLAS/cuSOLVER; `0.11`
+removed the CubeCL path) is broad for `F32`/`F64`/etc.:
 elementwise and analytic ops, `reduce_sum`, `reduce_sum_squares`, `reduce_max`,
 `dot_general`, `gather`/`slice`/`dynamic_slice`/`concatenate`/`reverse`, and
 linalg including `triangular_solve`. Unsupported op/dtype returns
